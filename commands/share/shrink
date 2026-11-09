@@ -116,7 +116,13 @@ if (( made == 0 )); then
   else words="$(if (( n == 1 )); then echo "It is"; else echo "They are"; fi) small enough to send already"; rc=0; fi
 else
   words="$(share_counted "$pm" "$vm")"
-  words="$(printf '%s' "${words:0:1}" | tr '[:lower:]' '[:upper:]')${words:1} $(if (( made == 1 )); then echo is; else echo are; fi) smaller: $(human "$before") became $(human "$after"), next to the original$( (( made > 1 )) && echo s || true)"
+  # A HEIC or AVIF photo can come out larger as a JPEG: then it is said as ready to send, not as smaller.
+  if (( after < before )); then how="smaller: $(human "$before") became $(human "$after")"
+  else
+    as="JPEG or MP4"; (( vm == 0 )) && as=JPEG; (( pm == 0 )) && as=MP4
+    how="ready to send as $as, which every app opens ($(human "$after"))"
+  fi
+  words="$(printf '%s' "${words:0:1}" | tr '[:lower:]' '[:upper:]')${words:1} $(if (( made == 1 )); then echo is; else echo are; fi) $how, next to the original$( (( made > 1 )) && echo s || true)"
   (( failed == 0 )) || words="$words; $failed could not be made smaller (see $log)"
   rc=0; (( failed == 0 )) || rc=1
 fi

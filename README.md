@@ -9,7 +9,7 @@ bet at every layer of the stack.
 
 | Layer | Takumi OS | Why |
 |---|---|---|
-| Root filesystem | **Atomic rooms**: every update boots a new Btrfs root, old one kept, automatic rollback if the new one fails to boot three times | Updates should never be scary, and yesterday should always be one reboot away. |
+| Root filesystem | **Atomic rooms**: every update boots a new Btrfs root, old one kept, the new one is tried once and the computer goes back to the last good one if it does not reach its login screen | Updates should never be scary, and yesterday should always be one reboot away. |
 | Desktop | **The Strip**: a scrolling desktop on [niri](https://github.com/YaLTeR/niri). Windows sit side by side on an endless horizontal strip, never overlap, never need tiling knowledge | Tiling WMs ask you to learn a layout language. A strip is a thing you scroll. |
 | Shell | **The Core**: the only object over your windows. A capsule of status that widens for notices, grows into the Palette on `Super+Space` (apps, windows, settings, every `takumi` command, emoji, what you copied, sentences), into Quick settings from its status marks and into Today from its clock | One object instead of a menu bar, dock, launcher, popups and settings app. |
 | Keys | **Harmony**: `Super` is the universal Command key via keyd. `Super+C/V/X/Z/A/S/F/W/T/N` do the same thing in every app, terminal included | Mac muscle memory should just work on day one. |
@@ -26,7 +26,7 @@ login screen from this repository, running on Arch Linux ARM in the QEMU VM
 | | |
 |---|---|
 | ![The login screen](docs/screens/login.jpg) | ![Two apps on the Strip](docs/screens/desktop.jpg) |
-| The login screen: the Sky at dusk, the time, one field | Two apps on the Strip; the Core names the one you are in and maps the strip |
+| The login screen: the Sky at night, the time, one field | Two apps on the Strip; the Core names the one you are in and maps the strip |
 | ![Quick settings](docs/screens/quick.jpg) | ![Today](docs/screens/today.jpg) |
 | Quick settings from the status marks (`Super+I`): switches, the sound, capture | Today from the clock: the month and what apps said earlier |
 | ![The Palette](docs/screens/palette.jpg) | ![A theme shown before choosing it](docs/screens/themes.jpg) |
@@ -76,16 +76,26 @@ login screen from this repository, running on Arch Linux ARM in the QEMU VM
 - fifty-five themes with phases: Takumi's own and the community palettes
   people already use
 
-Not yet: real hardware (so no real Wi-Fi card or Bluetooth adapter yet), an
-ISO, disk encryption, work and school Wi-Fi.
+- the setup disc and disk encryption: install from the disc, one password
+  from boot to desktop, a recovery code ([iso.md](docs/iso.md),
+  [encryption.md](docs/encryption.md))
+- for someone coming from a Mac or Windows: apps that open at login, closing
+  apps before shutting down, force quit, zoom, remote help, the login keyring
+  opened with your password, Free up space, restore points, update failures
+  said in words, OneDrive, Google Drive and Dropbox as folders, writing a disk
+  image to a USB stick, settings by topic and Help in the Palette, erasing the
+  computer and setting one up for someone else
+
+Not yet: real hardware (so no real Wi-Fi card or Bluetooth adapter yet), and
+an x86_64 setup disc (the disc is built and tested for the ARM VM).
 [docs/roadmap.md](docs/roadmap.md) has the order.
 
-## Install (target shape)
+## Install
 
 On a fresh Arch install, or from the Takumi ISO's live session:
 
 ```bash
-curl -fsSL https://takumi.sh | bash
+curl -fsSL https://www.bakarimustafa.com/takumi/install.sh | bash
 ```
 
 That downloads this repo to `~/.local/share/takumi` and runs

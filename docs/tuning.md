@@ -12,7 +12,7 @@ They are installed by `install/steps/20-system.sh` and `30-boot.sh`.
 | File index on the charger | `etc/systemd/system/plocate-updatedb.timer.d/takumi.conf` | the index for file search is rebuilt when plugged in, not on battery |
 | `fs.inotify.max_user_watches = 524288` | `etc/sysctl.d/90-takumi.conf` | editors, file sync and build tools watch many files |
 | Services stop within 10 s | `etc/systemd/*.conf.d/10-takumi.conf` | shutting down never waits a minute and a half on one service ([boot.md](boot.md)) |
-| Open files: 524288 for every service and app | `etc/systemd/system.conf.d/10-takumi.conf`, `etc/systemd/user.conf.d/10-takumi.conf` (`DefaultLimitNOFILE`) | games through Wine and Proton (esync), build tools and file sync open thousands of files at once; systemd's own soft limit is 1024 |
+| Open files: 524288 for every service and app | `etc/systemd/system.conf.d/10-takumi.conf`, `etc/systemd/user.conf.d/10-takumi.conf` (`DefaultLimitNOFILE`) | games through Wine and Proton (esync), build tools and file sync open thousands of files at once; systemd's own soft limit is 1024; apps niri starts while it runs outside systemd (a VM, drawing on the CPU) keep the login's 1024 |
 | Out-of-memory: the app goes, not the desktop | `etc/systemd/oomd.conf.d/10-takumi.conf`, `etc/systemd/user/app.slice.d/10-takumi.conf` | below |
 
 ## When the memory runs out

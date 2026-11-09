@@ -12,9 +12,9 @@ serves one of them.
 
 A running system is a **room**: a bootable Btrfs subvolume. An update never
 edits the room you are in. It copies the room, upgrades the copy, and asks the
-bootloader to try the copy next. If the copy fails to boot three times,
-systemd-boot's boot counting falls back to the room that worked. If it boots
-and you dislike it, `takumi rollback` returns in one reboot.
+bootloader to try the copy once at the next start. If the copy does not reach
+the login screen, the computer goes back to the room that worked and says so.
+If it boots and you dislike it, `takumi rollback` returns in one reboot.
 
 `pacman -Syu` in the current room is allowed and does exactly what Arch users
 expect: it just is not what `takumi update` does. See [atomic-rooms.md](atomic-rooms.md).

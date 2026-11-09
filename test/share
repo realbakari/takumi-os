@@ -321,6 +321,8 @@ check "shrink: a photo small already stays as it was" '[[ "$said" == *"done It i
 touch "$FAKE/magick-fails"
 said=$(talk '' share shrink "$HOME/Pictures/Trip/beach.jpg")
 check "shrink: one that fails says where to look, 1" '[[ "$said" == *"A photo could not be made smaller"*"rc=1" ]]'
+mkdir -p "$t/names"; : > "$t/names/IMG_7 (small).jpg"
+check "shrink: a name already taken gets a number, so one copy never replaces another" '[[ "$(lib share_small_name "$t/names/IMG_7.heic")" == "$t/names/IMG_7 (small 2).jpg" && -z "$(lib share_kind "$t/names/IMG_7 (small 2).jpg")" ]]'
 rm -f "$FAKE/magick-fails"; : > "$FAKE/notices"
 takumi share shrink "$HOME/Pictures/Trip/beach.jpg" </dev/null >/dev/null
 check "shrink from Files: said in the Core, pressed to open the folder" 'grep -qx -- "--open|$HOME/Pictures/Trip|picture|A photo is smaller: 3.0 MB became 500 kB, next to the original||-1|10|" "$FAKE/notices"'

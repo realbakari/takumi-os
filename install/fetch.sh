@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# What `curl -fsSL https://takumi.sh | bash` runs. Fetches the repo and hands off to install/run.sh.
+# What `curl -fsSL https://www.bakarimustafa.com/takumi/install.sh | bash` runs. Fetches the repo and hands off to install/run.sh.
 set -euo pipefail
 
 [[ $EUID -ne 0 ]] || { echo "Run as your user, not root. The installer uses sudo where it must." >&2; exit 1; }

@@ -6,7 +6,7 @@ install you already have, and the VM's provisioner ([vm.md](vm.md)).
 
 ## `install/fetch.sh`
 
-What `curl -fsSL https://takumi.sh | bash` fetches. It:
+What `curl -fsSL https://www.bakarimustafa.com/takumi/install.sh | bash` fetches. It:
 
 1. refuses to run as root and refuses a non-Arch host
 2. installs `git` if missing

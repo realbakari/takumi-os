@@ -101,10 +101,17 @@ trash="${XDG_DATA_HOME:-$HOME/.local/share}/Trash"
 if [[ -n "$(ls -A "$trash/files" 2>/dev/null || true)" ]]; then
   size=$(du -sk "$trash" 2>/dev/null | awk '{ print $1 }')
   if yes_or_no "Empty the Trash too? $(update_human "${size:-0}") in it cannot be brought back afterwards."; then
-    gio trash --empty 2>/dev/null || core_note "The Trash could not be emptied"
+    # gio empties the Trash of other drives too; the home Trash is emptied here as well, since gio can leave its
+    # files behind when nothing in the session serves trash:// (it then removes only the index).
+    gio trash --empty 2>/dev/null || true
+    find "$trash/files" "$trash/info" "$trash/expunged" -mindepth 1 -delete 2>/dev/null || true
+    [[ -z "$(ls -A "$trash/files" 2>/dev/null || true)" ]] || core_note "The Trash could not be emptied"
   fi
 fi
 
+# Btrfs gives deleted space back when its transaction is written, up to half a minute later: write it now, so
+# what is said is what came back (sync -f writes the file system holding each path).
+sync -f / "$HOME" 2>/dev/null || sync
 after=$(free_kib)
 freed=$(( after - before ))
 if (( freed >= 10240 )); then core_done "$(update_human "$freed") freed"

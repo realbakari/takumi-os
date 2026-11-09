@@ -23,6 +23,8 @@ share=${TAKUMI_SETUP_SHARE:-/usr/share/takumi}
 if [[ $owner == yes ]]; then
   # The greeter's home is /: its caches (compiled QML, the language list) live with the screen.
   export TAKUMI_SETUP_MODE=owner XDG_CACHE_HOME=$run/cache TAKUMI_SETUP_SKIES=$run/skies
+  # Whether the password will also open the disk: the page says so only when it will.
+  case "$(findmnt -no SOURCE / 2>/dev/null || true)" in /dev/mapper/*) export TAKUMI_SETUP_ENCRYPTED=1 ;; *) export TAKUMI_SETUP_ENCRYPTED=0 ;; esac
   theme=$(cat "$share/config/takumi/theme" 2>/dev/null || echo ion)
   for phase in dawn day dusk night; do
     HOME=/nonexistent TAKUMI_RENDER_OUT="$TAKUMI_SETUP_SKIES/$phase" TAKUMI_RENDER_PALETTE_ONLY=1 \

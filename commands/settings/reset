@@ -41,12 +41,15 @@ if [[ -z "$app" ]]; then
 fi
 
 folders=$app; [[ "$app" == gtk ]] && folders="gtk-3.0 gtk-4.0"
+# Said the way the Palette's rows say it.
+case "$app" in foot) said="the Terminal" ;; niri) said="windows and keys" ;; btop) said="the System monitor" ;; gtk) said="the apps' look" ;;
+  nvim) said="Neovim" ;; takumi) said="Takumi's own settings" ;; *) said=$app ;; esac
 for f in $folders; do
   [[ "$f" =~ ^[a-z0-9][a-z0-9.-]*$ && -d "$src/$f" ]] || core_fail 2 "Takumi has no settings for $app. These can be reset: $(cd "$src" && find . -mindepth 1 -maxdepth 1 -type d | sed 's|^\./||' | sort | paste -sd ' ' -)"
 done
-yes_or_no "Put Takumi's settings for $app back? Yours are kept aside." || core_fail 1 "Nothing changed."
+yes_or_no "Put Takumi's settings for $said back? Yours are kept aside." || core_fail 1 "Nothing changed."
 stamp=$(date +%s)
 for f in $folders; do reset_app "$f"; done
 takumi phase tick --force
-core_done "Takumi's settings for $app are back; yours are in ~/.config/${folders%% *}.bak-$stamp"
+core_done "Takumi's settings for $said are back; yours are in ~/.config/${folders%% *}.bak-$stamp"
 exit 0

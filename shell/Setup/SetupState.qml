@@ -12,6 +12,8 @@ Item {
     // language, keyboard, place, you, disk: the questions; then installing, code, done (or failed). A first
     // start asks all but the disk.
     readonly property bool firstStart: Quickshell.env("TAKUMI_SETUP_MODE") === "owner"
+    // At a first start, whether the disk is encrypted (takumi setup start); the setup disc always encrypts.
+    readonly property bool encrypted: !firstStart || Quickshell.env("TAKUMI_SETUP_ENCRYPTED") !== "0"
     property string page: "language"
     readonly property var questions: firstStart ? ["language", "keyboard", "place", "you"] : ["language", "keyboard", "place", "you", "disk"]
 

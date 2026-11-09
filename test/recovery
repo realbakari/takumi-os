@@ -123,6 +123,7 @@ check "a row by itself: Free up space, a conversation, asked first" '[[ "$(row "
 out=$(printf 'yes\nyes\n' | TAKUMI_CORE=1 takumi update clean)
 check "with rooms: one password for the system part, unneeded packages left to the next update ($out)" 'grep -qx "sudo takumi update clean --system" "$FAKE/calls" && grep -qx "note Also 1 package nothing uses: they leave with the next update, where going back undoes it." <<< "$out" && grep -qx "note Deleted 2 older systems" <<< "$out"'
 check "the Trash asked for, then emptied" 'grep -q "^confirm Empty the Trash too? .* cannot be brought back afterwards.$" <<< "$out" && grep -qx "gio trash --empty" "$FAKE/calls"'
+check "the Trash's files go even when gio leaves them behind" '[[ -z "$(ls -A "$HOME/.local/share/Trash/files")" ]]'
 check "how much came back, in one sentence" '[[ "$(tail -n 1 <<< "$out")" == "done 4.2 GB freed" ]]'
 reset; printf 'libfoo\nlibbar\njq\n' > "$FAKE/orphans"
 out=$(printf 'yes\n' | TAKUMI_CORE=1 takumi update clean)
@@ -170,7 +171,7 @@ check "the list names restore points" 'grep -qE "^20261105-120000 .* good .*Befo
 reset; mkdir -p "$HOME/.config/foot" "$HOME/.config/niri/takumi"
 echo "font=Comic Sans:size=20" > "$HOME/.config/foot/foot.ini"; echo "// mine" > "$HOME/.config/niri/takumi/overrides.kdl"
 out=$(printf 'yes\n' | TAKUMI_CORE=1 takumi settings reset foot)
-check "one app: Takumi's file back, yours kept aside, said in the Core" 'cmp -s config/foot/foot.ini "$HOME/.config/foot/foot.ini" && grep -qx "font=Comic Sans:size=20" "$HOME"/.config/foot.bak-*/foot.ini && [[ "$(tail -n 1 <<< "$out")" == "done Takumi'"'"'s settings for foot are back; yours are in ~/.config/foot.bak-"* ]] && [[ ! -e "$HOME/.config/niri/takumi/defaults.kdl" ]]'
+check "one app: Takumi's file back, yours kept aside, said in the Core" 'cmp -s config/foot/foot.ini "$HOME/.config/foot/foot.ini" && grep -qx "font=Comic Sans:size=20" "$HOME"/.config/foot.bak-*/foot.ini && [[ "$(tail -n 1 <<< "$out")" == "done Takumi'"'"'s settings for the Terminal are back; yours are in ~/.config/foot.bak-"* ]] && [[ ! -e "$HOME/.config/niri/takumi/defaults.kdl" ]]'
 out=$(printf 'yes\n' | TAKUMI_CORE=1 takumi settings reset gtk)
 check "gtk: both of its folders" '[[ -d "$HOME/.config/gtk-3.0" && -d "$HOME/.config/gtk-4.0" ]]'
 rc=0; out=$(last takumi settings reset firefox </dev/null) || rc=$?

@@ -12,7 +12,8 @@ Page {
     readonly property bool owner: page.setup.firstStart
     readonly property bool other: !owner && page.setup.forOther
     title: owner ? "Whose computer is this?" : "Who is this computer for?"
-    detail: owner ? "Your name, and a password you will type when the computer starts. It replaces the one it started with today, and locks the disk: without it, nobody can read what is on it."
+    detail: owner && !page.setup.encrypted ? "Your name, and the password you will log in with."
+          : owner ? "Your name, and a password you will type when the computer starts. It replaces the one it started with today, and locks the disk: without it, nobody can read what is on it."
           : other ? "Choose a password for now. Its owner types it once, when the computer first starts, and then picks their own name, password and keyboard."
           : "Your name, and a password you will type when the computer starts. It also locks the disk: without it, nobody can read what is on it."
     next: owner ? "Set up" : "Continue"
