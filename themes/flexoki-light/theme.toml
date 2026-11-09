@@ -1,0 +1,35 @@
+# Flexoki Light: ink on warm paper, made for reading
+# Colours after Flexoki by Steph Ango (https://stephango.com/flexoki); phases by Takumi.
+
+[meta]
+name = "flexoki-light"
+mode = "light"
+title = "Flexoki Light"
+about = "ink on warm paper, made for reading"
+credit = "Flexoki by Steph Ango (https://stephango.com/flexoki)"
+
+[palette]
+accent     = "#24837b"
+background = "#fffcf0"
+surface    = "#f2f0e5"
+foreground = "#100f0f"
+muted      = "#6f6e69"
+red        = "#af3029"
+yellow     = "#ad8301"
+green      = "#66800b"
+cyan       = "#24837b"
+blue       = "#205ea6"
+magenta    = "#a02f6f"
+
+[phase.dawn]
+accent     = "#bc5215"
+background = "#fff8ea"
+
+[phase.dusk]
+accent     = "#b7461c"
+
+[phase.night]
+accent     = "#1f716a"
+background = "#f3f0e5"
+surface    = "#e4e2d8"
+foreground = "#282726"

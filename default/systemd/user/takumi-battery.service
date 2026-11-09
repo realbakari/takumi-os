@@ -1,0 +1,6 @@
+[Unit]
+Description=Takumi: follow the battery (low warnings, mode when plugged in or out)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/takumi power battery

@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Install Takumi on a disk from the setup disc (the setup screen runs this as root)
+risk: 2
+sudo: yes
+hidden: yes
+ABOUT
+#
+# Reads one JSON line of answers, then the password, on stdin; never from the command line:
+#   {"disk":"/dev/nvme0n1","layout":"fr","variant":"","zone":"Europe/Paris","locale":"fr_FR.UTF-8",
+#    "name":"Ana López","user":"ana","host":"ana-takumi","software":false}
+# Erases the disk, locks it with the password (LUKS2) and a recovery code, makes the first room, installs
+# every package from the disc and runs the Takumi installer inside it. With "owner":"later" (set up for
+# someone else) the password is a temporary one and there is no account and no recovery code yet: the
+# installer runs as a passing account that is removed after it, and the first start asks the owner
+# (takumi setup owner, docs/setup.md). Tells the setup screen, one line at a
+# time on stdout: "step <words>", "progress <0-100>", "recovery <code>", "done", or "fail <words>". The rest
+# goes to /run/takumi-setup/install.log, which never holds the password or the code. See docs/setup.md.
+set -Eeuo pipefail
+export LC_ALL=C.UTF-8
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/setup.sh" ]] && { . "$l/setup.sh"; . "$l/disk.sh"; break; }; done
+log=${TAKUMI_SETUP_LOG:-/run/takumi-setup/install.log}
+target=${TAKUMI_SETUP_TARGET:-/run/takumi/target}
+media=${TAKUMI_SETUP_MEDIA:-/run/takumi/media}
+share=${TAKUMI_SETUP_SHARE:-/usr/share/takumi}
+efi=${TAKUMI_SETUP_EFI:-/sys/firmware/efi}
+min_bytes=$(( 30 * 1000 * 1000 * 1000 ))
+mkdir -p "$(dirname "$log")"; : > "$log"; chmod 644 "$log"   # the setup screen shows its end when it fails
+exec 3>&1 >>"$log" 2>&1
+
+now="Getting ready"
+step() { now=$1; printf 'step %s\n' "$1" >&3; printf '\n== %s (%s)\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; }
+at()   { printf 'progress %s\n' "$1" >&3; }
+fail() { printf 'fail %s\n' "$1" >&3; printf 'FAILED: %s\n' "$1"; trap - ERR; exit 1; }
+trap 'fail "$now"' ERR
+# Let the disk go: the keyring's gpg-agent that pacstrap started inside it, and anything else still using it,
+# would keep it mounted and open, and "Try again" would then find it busy.
+release() {
+  if [[ -d "$target/etc/pacman.d/gnupg" ]]; then gpgconf --homedir "$target/etc/pacman.d/gnupg" --kill all >/dev/null 2>&1 || true; fi
+  if mountpoint -q "$target" 2>/dev/null; then fuser -km "$target" >/dev/null 2>&1 || true; sleep 1; fi   # fuser fails when nothing uses it
+  umount -R "$target" 2>/dev/null || umount -R -l "$target" 2>/dev/null || true
+  local _
+  for _ in 1 2 3 4 5; do
+    [[ -e /dev/mapper/takumi ]] || return 0
+    cryptsetup close takumi 2>/dev/null && return 0
+    sleep 1
+  done
+  return 0
+}
+cleanup() { release; }
+trap cleanup EXIT
+
+# The packages pacman sees while installing: only the disc's own, so nothing waits on a network. The disc
+# itself is what is trusted here; each package was checked against the keyring when the disc was built.
+media_conf() {
+  printf '[options]\nArchitecture = auto\nSigLevel = Never\nCacheDir = %s/\nParallelDownloads = 1\n\n[takumi-media]\nServer = file://%s\n' "$1" "$1"
+}
+# pacman's lines move the bar from $1 to $2: "Packages (723)" gives the count, and each "installing name..." is
+# one more (with a terminal pacman writes "( 12/723) installing" instead); everything goes on to the log.
+progress_from() {
+  local lo=$1 hi=$2 line total=0 n=0 last=-1 p
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+    if [[ "$line" =~ ^Packages\ \(([0-9]+)\) ]]; then total=${BASH_REMATCH[1]}
+    elif [[ "$line" =~ \(\ *([0-9]+)/([0-9]+)\)\ (installing|reinstalling|upgrading) ]]; then n=${BASH_REMATCH[1]}; total=${BASH_REMATCH[2]}
+    elif [[ "$line" =~ ^(installing|reinstalling|upgrading)\  ]]; then n=$((n + 1))
+    else continue; fi
+    if (( total > 0 )); then
+      p=$(( lo + (hi - lo) * (n > total ? total : n) / total ))
+      if (( p != last )); then printf 'progress %s\n' "$p" >&3; last=$p; fi
+    fi
+  done
+  return 0
+}
+# The Takumi installer's steps move the bar from $1 to $2.
+progress_steps() {
+  local lo=$1 hi=$2 line p
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+    if [[ "$line" =~ ::.*\ ([0-9])([0-9])-[a-z]+$ ]]; then
+      p=$(( lo + (hi - lo) * (BASH_REMATCH[1] * 10 + BASH_REMATCH[2]) / 100 ))
+      printf 'progress %s\n' "$p" >&3
+    fi
+  done
+  return 0
+}
+part() { if [[ "$1" =~ [0-9]$ ]]; then printf '%sp%s' "$1" "$2"; else printf '%s%s' "$1" "$2"; fi; }
+
+[[ "$(id -u)" == 0 ]] || fail "Setup must run as root"
+IFS= read -r answers || fail "Setup sent no answers"
+IFS= read -r password || true
+[[ -n "$password" ]] || fail "Setup sent no password"
+get() { jq -r --arg k "$1" '.[$k] // "" | tostring' <<< "$answers"; }
+disk=$(get disk) layout=$(get layout) variant=$(get variant) zone=$(get zone) name=$(get name) user=$(get user) host=$(get host) software=$(get software)
+locale=$(get locale); locale=${locale:-en_US.UTF-8}
+later=no; [[ "$(get owner)" == later ]] && later=yes
+# For someone else: the installer runs as this account, which goes once it is done; the owner names the
+# computer at its first start.
+if [[ $later == yes ]]; then user=takumi-setup name="Takumi setup" host=takumi; fi
+name=$(printf '%s' "$name" | tr -d ':,\000-\037'); name=${name:0:64}
+
+[[ -d "$efi" ]] || fail "This computer started the disc without UEFI"
+[[ "$(lsblk -ndo TYPE "$disk" 2>/dev/null)" == disk ]] || fail "That disk is gone"
+[[ "$disk" != "$(setup_media_disk)" ]] || fail "That is the setup disc itself"
+(( $(lsblk -bndo SIZE "$disk") >= min_bytes )) || fail "That disk is too small"
+[[ "$user" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || fail "That account name cannot be used"
+[[ "$host" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || fail "That computer name cannot be used"
+[[ "$zone" != *..* && -f "$TAKUMI_ZONEINFO/$zone" ]] || fail "That time zone is unknown"
+[[ "$layout" =~ ^[a-z]{2,8}$ && "$variant" =~ ^[A-Za-z0-9_-]*$ ]] || fail "That keyboard is unknown"
+setup_locale_ok "$locale" || fail "That language is unknown"
+mode=$(get mode); mode=${mode:-erase}
+[[ "$mode" == erase || "$mode" == beside ]] || fail "That way to install is unknown"
+repo=$media/takumi/repo
+if [[ ! -f "$repo/takumi-media.db" ]]; then
+  mkdir -p "$media"; mount -o ro "/dev/disk/by-uuid/$(cat /etc/takumi/live-media)" "$media" 2>/dev/null || true
+fi
+[[ -f "$repo/takumi-media.db" ]] || fail "The packages on the setup disc cannot be read"
+
+step "Getting the disk ready"; at 2
+release
+for p in $(lsblk -nlo PATH "$disk" | tail -n +2); do umount "$p" 2>/dev/null || true; swapoff "$p" 2>/dev/null || true; done
+winesp=""
+if [[ "$mode" == beside ]]; then
+  # Beside Windows: only the disk's largest free stretch is used, and nothing of Windows is moved or
+  # resized. Takumi adds its own boot partition (XBOOTLDR: each room's kernel lives there) and the encrypted
+  # one; systemd-boot goes on the boot partition Windows already has, so its menu offers both.
+  winesp=$(lsblk -nlo PATH,PARTTYPE "$disk" | awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" { print $1; exit }')
+  [[ -n "$winesp" ]] || fail "This disk has no boot partition to share with Windows"
+  free=$(sfdisk -F "$disk" | awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { if ($3 > best) { best = $3; s = $1; e = $2 } } END { if (best) print s, e }')
+  [[ -n "$free" ]] || fail "There is no free space beside Windows"
+  fstart=${free% *} fend=${free#* }
+  bstart=$(( (fstart + 2047) / 2048 * 2048 )) bsize=2097152
+  sstart=$(( bstart + bsize ))
+  ssize=$(( (fend + 1 - sstart) / 2048 * 2048 ))
+  (( ssize * 512 >= min_bytes - 1073741824 )) || fail "There is not enough free space beside Windows"
+  printf 'start=%s, size=%s, type=BC13C2FF-59E6-4262-A352-B275FD6F7172, name="Takumi boot"\nstart=%s, size=%s, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=takumi\n' \
+    "$bstart" "$bsize" "$sstart" "$ssize" | sfdisk --append "$disk"
+  udevadm settle || sleep 2
+  esp=$(lsblk -nlo PATH,START "$disk" | awk -v s="$bstart" '$2 == s { print $1 }')
+  sys=$(lsblk -nlo PATH,START "$disk" | awk -v s="$sstart" '$2 == s { print $1 }')
+  [[ -n "$esp" && -n "$sys" ]] || fail "The new partitions did not appear"
+else
+  wipefs -a -f "$disk" >/dev/null
+  sfdisk --wipe always --wipe-partitions always "$disk" <<'PT'
+label: gpt
+size=1GiB, type=uefi, name=EFI
+type=linux, name=takumi
+PT
+  udevadm settle || sleep 2
+  esp=$(part "$disk" 1) sys=$(part "$disk" 2)
+fi
+for _ in 1 2 3 4 5; do [[ -b "$sys" || -n "$(lsblk -ndo TYPE "$sys" 2>/dev/null)" ]] && break; sleep 1; done
+at 5
+
+if [[ $later == yes ]]; then step "Locking the disk with a password for now"; else step "Locking the disk with your password"; fi
+printf '%s' "$password" | cryptsetup luksFormat --batch-mode --type luks2 --label takumi --key-file=- "$sys"
+at 8
+# The recovery code is the owner's: for someone else it is made at the first start, shown to them alone.
+code=""
+if [[ $later == no ]]; then code=$(disk_recovery_code); disk_add_code "$sys" "$password" "$code"; fi
+printf '%s' "$password" | cryptsetup open --type luks2 --key-file=- --allow-discards \
+  --perf-no_read_workqueue --perf-no_write_workqueue --persistent "$sys" takumi
+at 11
+
+step "Making room for Takumi"
+if [[ "$mode" == beside ]]; then mkfs.fat -F 32 -n TAKUMIBOOT "$esp" >/dev/null; else mkfs.fat -F 32 -n EFI "$esp" >/dev/null; fi
+mkfs.btrfs -f -L takumi /dev/mapper/takumi >/dev/null
+room=$(date -u +%Y%m%d-%H%M%S)
+mkdir -p "$target"
+mount /dev/mapper/takumi "$target"
+btrfs subvolume create "$target/@rooms" >/dev/null
+btrfs subvolume create "$target/@rooms/$room" >/dev/null
+for s in @home @var-log @var-lib-takumi; do btrfs subvolume create "$target/$s" >/dev/null; done
+umount "$target"
+opts=noatime,compress=zstd:1
+mount -o "$opts,subvol=/@rooms/$room" /dev/mapper/takumi "$target"
+mkdir -p "$target"/{efi,home,var/log,var/lib/takumi}
+mount -o "$opts,subvol=/@home" /dev/mapper/takumi "$target/home"
+mount -o "$opts,subvol=/@var-log" /dev/mapper/takumi "$target/var/log"
+mount -o "$opts,subvol=/@var-lib-takumi" /dev/mapper/takumi "$target/var/lib/takumi"
+mount "$esp" "$target/efi"
+# Beside Windows, its boot partition is shared: systemd-boot goes there, and each room's kernel stays on
+# Takumi's own boot partition at /efi (docs/setup.md).
+if [[ -n "$winesp" ]]; then mkdir -p "$target/boot/efi"; mount "$winesp" "$target/boot/efi"; fi
+at 12
+
+step "Copying Takumi"
+conf=$(dirname "$log")/pacman.conf
+media_conf "$repo" > "$conf"
+pkgs=()
+while read -r p; do pkgs+=("$p"); done < <(sed 's/#.*//; /^[[:space:]]*$/d' "$share/setup/packages")
+pacstrap -C "$conf" -c -K "$target" "${pkgs[@]}" 2>&1 | progress_from 12 78
+gpgconf --homedir "$target/etc/pacman.d/gnupg" --kill all >/dev/null 2>&1 || true
+grep -q "^$user:" "$target/etc/passwd" && fail "That account name is taken by the system"
+
+if [[ $later == yes ]]; then step "Setting up the computer"; else step "Setting up your account"; fi
+genfstab -U "$target" > "$target/etc/fstab"
+cmdline="rd.luks.name=$(cryptsetup luksUUID "$sys")=takumi root=/dev/mapper/takumi rw"
+if systemd-detect-virt -vq; then
+  case "$(uname -m)" in aarch64) cmdline+=" console=tty0 console=ttyAMA0" ;; x86_64) cmdline+=" console=tty0 console=ttyS0" ;; esac
+fi
+echo "$cmdline" > "$target/etc/kernel/cmdline"
+ln -sf "/usr/share/zoneinfo/$zone" "$target/etc/localtime"
+# The language, and English (US) beside it: what a program without the chosen one falls back to.
+for l in en_US.UTF-8 "$locale"; do
+  grep -q "^#\{0,1\}[[:space:]]*$l UTF-8" "$target/etc/locale.gen" || echo "#$l UTF-8" >> "$target/etc/locale.gen"
+  sed -i "s/^#[[:space:]]*\($l UTF-8\)/\1/" "$target/etc/locale.gen"
+done
+echo "LANG=$locale" > "$target/etc/locale.conf"
+# One file holds the keyboard for the disk's password prompt (KEYMAP, in the initramfs), the login screen
+# and niri (XKB*, through systemd-localed).
+printf 'KEYMAP=%s\nXKBLAYOUT=%s\nXKBMODEL=pc105\nXKBVARIANT=%s\n' "$(setup_console_keymap "$layout" "$variant")" "$layout" "$variant" > "$target/etc/vconsole.conf"
+echo "$host" > "$target/etc/hostname"
+printf '127.0.0.1 localhost\n::1 localhost\n127.0.1.1 %s.localdomain %s\n' "$host" "$host" > "$target/etc/hosts"
+[[ "$software" == true ]] && { mkdir -p "$target/etc/takumi"; echo "virtual machine without 3D" > "$target/etc/takumi/vm"; }
+arch-chroot "$target" locale-gen
+arch-chroot "$target" useradd -m -G wheel -s /bin/bash -c "$name" "$user"
+printf '%s:%s\n' "$user" "$password" | arch-chroot "$target" chpasswd
+arch-chroot "$target" passwd -l root >/dev/null
+# Only while the Takumi installer runs below; removed before the disk is let go.
+echo "$user ALL=(ALL:ALL) NOPASSWD: ALL" > "$target/etc/sudoers.d/99-takumi-setup"
+chmod 440 "$target/etc/sudoers.d/99-takumi-setup"
+if [[ -n "$winesp" ]]; then
+  # The menu shows for three seconds beside Windows: Takumi first, Windows Boot Manager found by itself.
+  arch-chroot "$target" bootctl --esp-path=/boot/efi --boot-path=/efi install
+  mkdir -p "$target/boot/efi/loader"
+  printf 'default takumi-%s.conf\ntimeout 3\n' "$room" > "$target/boot/efi/loader/loader.conf"
+else
+  arch-chroot "$target" bootctl --esp-path=/efi install
+  mkdir -p "$target/efi/loader"
+  printf 'default takumi-%s.conf\ntimeout 0\n' "$room" > "$target/efi/loader/loader.conf"
+fi
+mkdir -p "$target/var/lib/takumi/state"; echo "status=good" > "$target/var/lib/takumi/state/$room"
+at 80
+
+step "Setting up the apps"
+mkdir -p "$target/home/$user/.local/share"
+rsync -a "$share/source/" "$target/home/$user/.local/share/takumi/"
+arch-chroot "$target" chown -R "$user:$user" "/home/$user"
+mkdir -p "$target/var/cache/takumi-media" "$target/etc/takumi"
+mount --bind -o ro "$repo" "$target/var/cache/takumi-media"
+media_conf /var/cache/takumi-media > "$target/etc/takumi/setup-pacman.conf"
+TAKUMI_OFFLINE=1 TAKUMI_PACMAN_CONF=/etc/takumi/setup-pacman.conf takumi hardware apply --root "$target" --data "$share/source/default/hardware" || echo "hardware: not every fix this computer needs was set up; the first update tries again (docs/hardware.md)"
+arch-chroot "$target" su - "$user" -c 'TAKUMI_IN_CHROOT=1 TAKUMI_OFFLINE=1 TAKUMI_PACMAN_CONF=/etc/takumi/setup-pacman.conf bash ~/.local/share/takumi/install/run.sh' 2>&1 \
+  | progress_steps 80 97
+umount "$target/var/cache/takumi-media"; rmdir "$target/var/cache/takumi-media"
+rm -f "$target/etc/sudoers.d/99-takumi-setup" "$target/etc/takumi/setup-pacman.conf" "$target/var/lib/pacman/sync/takumi-media.db"
+# From now on the person runs what needs root with their password (Arch ships sudo with wheel's line commented
+# out). Only now: while any of an account's sudo rules asks for a password, `sudo -v` asks too (verifypw=all).
+echo '%wheel ALL=(ALL:ALL) ALL' > "$target/etc/sudoers.d/10-takumi-wheel"
+chmod 440 "$target/etc/sudoers.d/10-takumi-wheel"
+
+if [[ $later == yes ]]; then
+  # Nobody owns the computer yet: the passing account goes, home and all, and the first start asks. The
+  # mark holds the password for now, root's alone, on the encrypted disk, until the owner replaces it.
+  arch-chroot "$target" userdel -r "$user" >/dev/null 2>&1 || arch-chroot "$target" userdel -r -f "$user"
+  rm -rf "${target:?}/home/$user"
+  disk_greetd="$target/usr/share/takumi/greetd/config.toml" disk_autologin off
+  install -d -m 755 "$target/var/lib/takumi"
+  ( umask 077; printf '%s\n' "$password" > "$target${TAKUMI_FIRST_START}" )
+  arch-chroot "$target" systemctl enable takumi-first-start.service
+fi
+
+step "Finishing"
+# With a network, the first update already knows what is new; without one it learns later.
+timeout 90 arch-chroot "$target" pacman -Sy --noconfirm >/dev/null 2>&1 || echo "no package lists yet (no network)"
+install -m644 "$log" "$target/var/log/takumi-setup.log"
+sync
+at 100
+[[ -z "$code" ]] || printf 'recovery %s\n' "$code" >&3
+printf 'done\n' >&3

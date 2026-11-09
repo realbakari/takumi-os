@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Open your backups in Files, one folder per backup by date, to copy back what you need
+usage: [--close]
+example: takumi backup restore
+example: takumi backup restore --close
+risk: 0
+converse: yes
+title: Restore files from a backup
+words: restore recover backup backups lost deleted file earlier version time machine file history snapshot
+glyph: history
+ABOUT
+set -euo pipefail
+# A conversation in the Core. restic mount shows every backup as a folder named by its date and time under ~/Backups,
+# read-only, and Files opens there; copy back what you need. The folder closes with --close, at logout, or by itself
+# after four hours. It runs in its own unit (takumi-backup-restore), so it outlives the Core. Exit status: 0 open or
+# closed · 1 it would not open · 2 backups are not set up · 3 the disk is not plugged in. See docs/backup.md.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/backup.sh" ]] && { . "$l/core.sh"; . "$l/backup.sh"; break; }; done
+declare -F backup_load >/dev/null && declare -F core_note >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+command -v jq >/dev/null || core_fail 1 "Backups need jq."
+backup_load
+shut() {
+  systemctl --user stop "$backup_restore_unit" >/dev/null 2>&1 || true
+  if [[ -d "$backup_open" ]]; then
+    if command -v fusermount >/dev/null; then fusermount -u -q "$backup_open" 2>/dev/null || true; fi
+    rmdir "$backup_open" 2>/dev/null || true
+  fi
+  return 0
+}
+if [[ "${1:-}" == --close ]]; then
+  shut
+  core_done "Your backups are closed."
+  exit 0
+fi
+[[ -z "${1:-}" ]] || core_fail 2 "usage: takumi backup restore [--close]"
+[[ -n "$place_kind" ]] || core_fail 2 "Backups are not set up yet. Type backup in the Core to set them up."
+command -v restic >/dev/null || core_fail 1 "Backups need restic: set up backups again to install it."
+command -v fusermount >/dev/null || core_fail 1 "Showing backups needs fuse2: set up backups again to install it."
+command -v systemd-run >/dev/null || core_fail 1 "Showing backups needs systemd-run."
+opened() { [[ -n "$(ls -A "$backup_open" 2>/dev/null)" ]]; }
+if backup_restore_open && opened; then
+  gio open "$backup_open" >/dev/null 2>&1 || true
+  core_done "Your backups are open in Files, by date."
+  exit 0
+fi
+shut   # nothing left over from a folder that did not close cleanly
+
+core_note "Opening the backups on $place_name…"
+rc=0; backup_locate ask || rc=$?
+(( rc != 3 )) || core_fail 3 "Plug in $place_name to see your backups."
+(( rc == 0 )) || core_fail 1 "$place_name could not be opened."
+if ! backup_key_have; then
+  # The keyring lost the key (a new install, a new keyring): the card's copy opens them, and the keyring keeps it again.
+  tries=0
+  while :; do
+    core_secret typed "Your backup key" || core_fail 1 "Your backups need their key."
+    key=$(backup_key_typed "$typed"); typed=""
+    core_note "Checking the key…"
+    backup_restic_typed "$key" cat config >/dev/null 2>&1 && break
+    tries=$((tries + 1))
+    (( tries < 3 )) || core_fail 1 "That key does not open your backups."
+    core_wrong "That key does not open your backups"
+    core_in_core || core_fail 1 "That key does not open your backups."
+  done
+  printf '%s' "$key" | backup_key_store || core_fail 1 "The keyring did not keep the key."
+  key=""
+fi
+if [[ -e "$backup_open" && -n "$(ls -A "$backup_open" 2>/dev/null)" ]]; then
+  core_fail 1 "The folder Backups in your home folder has files in it. Move them, then try again."
+fi
+mkdir -p "$backup_open"
+# One folder per backup, named by its date and time, newest last: "2026-11-09 14.00".
+systemd-run --user --quiet --collect --unit="$backup_restore_unit" --property=RuntimeMaxSec=4h \
+  restic --repo "$backup_repo" --password-command "$backup_ask_key" mount --path-template "%T" --time-template "2006-01-02 15.04" \
+  "$backup_open" >/dev/null 2>&1 || core_fail 1 "Your backups could not be opened."
+for _ in $(seq 1 60); do
+  opened && break
+  backup_restore_open || break
+  sleep 0.5
+done
+if ! opened; then
+  shut
+  core_fail 1 "Your backups could not be opened; the reason is in the journal of $backup_restore_unit."
+fi
+gio open "$backup_open" >/dev/null 2>&1 || true
+core_done "Your backups are open in Files, by date. Copy back what you need; they close by themselves in four hours."

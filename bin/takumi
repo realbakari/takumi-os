@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# The router. `takumi <group> <command>` runs commands/<group>/<command>, and each command describes itself
+# in the ABOUT block at its top. See docs/commands.md.
+# Plain indexed arrays only, so it runs on any bash (the test suite runs on macOS too).
+set -euo pipefail
+
+TAKUMI_BIN_DIR=$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+# Where commands live: TAKUMI_COMMANDS (dirs joined by ":", the first that has a command wins), else the tree
+# next to this router (a checkout), else the installed one.
+if [[ -n "${TAKUMI_COMMANDS:-}" ]]; then dirs=$TAKUMI_COMMANDS
+elif [[ -d "$TAKUMI_BIN_DIR/../commands" ]]; then dirs="$TAKUMI_BIN_DIR/../commands"
+else dirs=/usr/lib/takumi/commands; fi
+IFS=: read -r -a COMMAND_DIRS <<< "$dirs"
+SCAN_LIMIT=40
+
+KEYS=(); BINARY=(); SUMMARY=(); USAGE=(); RISK=(); SUDO=(); HIDDEN=(); EXAMPLES=()
+TITLE=(); WORDS=(); INTERACTIVE=(); GLYPH=(); CONVERSE=()
+ALIAS_FROM=(); ALIAS_TO=()
+
+word_ok() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]]; }
+
+# The first command file for <group> <name> among the command dirs, or nothing.
+find_command() {
+  local d
+  for d in "${COMMAND_DIRS[@]}"; do
+    [[ -f "$d/$1/$2" && -x "$d/$1/$2" ]] && { printf '%s' "$d/$1/$2"; return 0; }
+  done
+  return 0
+}
+
+group_description() {
+  local d g text
+  for d in "${COMMAND_DIRS[@]}"; do
+    [[ -f "$d/groups.tsv" ]] || continue
+    while IFS=$'\t' read -r g text; do
+      [[ "$g" == "$1" ]] && { printf '%s' "$text"; return 0; }
+    done < "$d/groups.tsv"
+  done
+  return 0
+}
+
+# Index of a "group name" key in KEYS, or empty.
+idx_of() {
+  local i
+  for i in "${!KEYS[@]}"; do [[ "${KEYS[$i]}" == "$1" ]] && { printf '%s' "$i"; return 0; }; done
+  return 0
+}
+
+# Read the ABOUT block of commands/<group>/<name>: `key: value` lines between `: <<'ABOUT'` and `ABOUT`.
+load_command() {
+  local file=$1 group=$2 name=$3 line n=0 inside=0 key value done=0
+  local summary="" usage="" risk="" sudo="no" hidden="no" examples="" aliases="" title="" words=""
+  local interactive="no" glyph="" converse="no"
+  [[ -n "$(idx_of "$group $name")" ]] && return 0   # an earlier command dir has it
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    n=$((n + 1)); (( n > SCAN_LIMIT )) && break
+    if (( ! inside )); then [[ "$line" == ": <<'ABOUT'" ]] && inside=1; continue; fi
+    [[ "$line" == ABOUT ]] && { done=1; break; }
+    key=${line%%:*}; value=${line#*:}; value=${value#"${value%%[![:space:]]*}"}
+    case "$key" in
+      summary) summary=$value ;;
+      usage) usage=$value ;;
+      example) examples+="${value}"$'\n' ;;
+      risk) risk=$value ;;
+      sudo) sudo=$value ;;
+      hidden) hidden=$value ;;
+      alias) aliases+="${value}"$'\n' ;;
+      title) title=$value ;;              # the Palette row's label, in plain words
+      words) words=$value ;;              # extra search words: "shutdown turn off"
+      interactive) interactive=$value ;;  # yes: needs a terminal (asks questions, sudo)
+      glyph) glyph=$value ;;              # the Palette's stroke icon (shell/Look/Icons.js)
+      converse) converse=$value ;;        # yes: talks in the Core (lib/core.sh), so the Palette runs it there
+    esac
+  done < "$file"
+  (( done )) && [[ -n "$summary" && -n "$risk" ]] || return 1
+  local key="$group $name"
+  KEYS+=("$key"); BINARY+=("$file"); SUMMARY+=("$summary"); USAGE+=("$usage"); RISK+=("$risk")
+  SUDO+=("$sudo"); HIDDEN+=("$hidden"); EXAMPLES+=("$examples")
+  TITLE+=("$title"); WORDS+=("$words"); INTERACTIVE+=("$interactive"); GLYPH+=("$glyph"); CONVERSE+=("$converse")
+  local a
+  while IFS= read -r a; do [[ -n "$a" ]] && { ALIAS_FROM+=("$a"); ALIAS_TO+=("$key"); }; done <<< "$aliases"
+  return 0
+}
+
+load_group() {
+  local d f
+  for d in "${COMMAND_DIRS[@]}"; do
+    for f in "$d/$1"/*; do
+      [[ -f "$f" && -x "$f" ]] || continue
+      load_command "$f" "$1" "${f##*/}" || true
+    done
+  done
+}
+
+load_all() {
+  local d g seen=" "
+  for d in "${COMMAND_DIRS[@]}"; do
+    for g in "$d"/*/; do
+      g=${g%/}; g=${g##*/}
+      [[ "$seen" == *" $g "* ]] && continue
+      seen+="$g "; load_group "$g"
+    done
+  done
+}
+
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+print_manifest() {
+  local i first=1
+  printf '['
+  for i in "${!KEYS[@]}"; do
+    [[ "${HIDDEN[$i]}" == "yes" ]] && continue
+    (( first )) || printf ','
+    first=0
+    local key=${KEYS[$i]} sudo_json=false inter_json=false conv_json=false
+    [[ "${SUDO[$i]}" == yes ]] && sudo_json=true
+    [[ "${INTERACTIVE[$i]}" == yes ]] && inter_json=true
+    [[ "${CONVERSE[$i]}" == yes ]] && conv_json=true
+    printf '{"group":"%s","name":"%s","summary":"%s","usage":"%s","risk":%s,"sudo":%s,"interactive":%s,"converse":%s,"title":"%s","words":"%s","glyph":"%s","examples":[' \
+      "${key%% *}" "${key#* }" "$(json_escape "${SUMMARY[$i]}")" "$(json_escape "${USAGE[$i]}")" \
+      "${RISK[$i]}" "$sudo_json" "$inter_json" "$conv_json" "$(json_escape "${TITLE[$i]}")" "$(json_escape "${WORDS[$i]}")" "$(json_escape "${GLYPH[$i]}")"
+    local ex efirst=1
+    while IFS= read -r ex; do
+      [[ -n "$ex" ]] || continue
+      (( efirst )) || printf ','
+      efirst=0
+      printf '"%s"' "$(json_escape "$ex")"
+    done <<< "${EXAMPLES[$i]}"
+    printf ']}'
+  done
+  printf ']\n'
+}
+
+version_string() { cat "$TAKUMI_BIN_DIR/../version" 2>/dev/null || cat /usr/share/takumi/version 2>/dev/null || echo dev; }
+
+# The groups a person can use: those with at least one command that is not hidden.
+print_groups() {
+  printf 'takumi %s\n\nUsage: takumi <group> <command> [args]\n\n' "$(version_string)"
+  local i seen=" "
+  for i in "${!KEYS[@]}"; do
+    local g=${KEYS[$i]%% *}
+    [[ "${HIDDEN[$i]}" == yes || "$seen" == *" $g "* ]] && continue
+    seen+="$g "
+    printf '  %-12s %s\n' "$g" "$(group_description "$g")"
+  done
+  printf '\n  --manifest   every command as JSON\n'
+}
+
+print_group() {
+  local group=$1 i found=0
+  printf 'takumi %s: %s\n\n' "$group" "$(group_description "$group")"
+  for i in "${!KEYS[@]}"; do
+    [[ "${KEYS[$i]%% *}" == "$group" && "${HIDDEN[$i]}" != "yes" ]] || continue
+    found=1
+    local lock=""; [[ "${SUDO[$i]}" == yes ]] && lock=" (sudo)"
+    printf '  %-16s %s%s\n' "${KEYS[$i]#* }" "${SUMMARY[$i]}" "$lock"
+  done
+  (( found )) || { printf '  no such group\n'; return 1; }
+}
+
+print_help() {
+  local i=$1 shown=${KEYS[$1]}
+  [[ "$shown" == *" main" ]] && shown=${shown% main}   # `takumi update`, not `takumi update main`
+  printf 'takumi %s\n  %s\n\n' "$shown" "${SUMMARY[$i]}"
+  [[ -n "${USAGE[$i]}" ]] && printf 'Usage:\n  takumi %s %s\n\n' "$shown" "${USAGE[$i]}"
+  printf 'Risk tier: %s' "${RISK[$i]}"
+  [[ "${SUDO[$i]}" == yes ]] && printf ' (needs sudo)'
+  printf '\n'
+  if [[ -n "${EXAMPLES[$i]//$'\n'/}" ]]; then
+    printf '\nExamples:\n'
+    printf '%s' "${EXAMPLES[$i]}" | sed '/^$/d; s/^/  /'
+  fi
+}
+
+# Help for one command file, reading only its own ABOUT block.
+help_for() {
+  load_command "$1" "$2" "$3" || { printf 'takumi: %s has no ABOUT block\n' "$1" >&2; exit 2; }
+  print_help "$(idx_of "$2 $3")"
+}
+
+complete_words() {
+  local group=${1:-} d f
+  if [[ -z "$group" ]]; then
+    for d in "${COMMAND_DIRS[@]}"; do for f in "$d"/*/; do [[ -d "$f" ]] && basename "$f"; done; done | sort -u
+  else
+    for d in "${COMMAND_DIRS[@]}"; do for f in "$d/$group"/*; do [[ -x "$f" ]] && basename "$f"; done; done | sort -u
+  fi
+}
+
+main() {
+  case "${1:-}" in
+    "" | -h | --help) load_all; print_groups; exit 0 ;;
+    --manifest) load_all; print_manifest; exit 0 ;;
+    --complete) shift; complete_words "$@"; exit 0 ;;
+    --version | -v) version_string; exit 0 ;;
+  esac
+
+  local group=$1; shift
+  local name=${1:-} file=""
+  # The file is the route: a command runs without any other command's header being read.
+  if word_ok "$group"; then
+    if [[ -n "$name" ]] && word_ok "$name"; then file=$(find_command "$group" "$name"); fi
+    if [[ -n "$file" ]]; then
+      shift
+    else
+      name=main; file=$(find_command "$group" main)     # `takumi update`: the group itself is the command
+    fi
+  fi
+  if [[ -n "$file" ]]; then
+    case "${1:-}" in -h | --help) help_for "$file" "$group" "$name"; exit 0 ;; esac
+    exec "$file" "$@"
+  fi
+
+  # Not a file: an alias, a group to list, or a mistake.
+  load_all
+  name=${1:-}
+  local a i=""
+  for a in "${!ALIAS_FROM[@]}"; do [[ "${ALIAS_FROM[$a]}" == "$group $name" ]] && i=$(idx_of "${ALIAS_TO[$a]}"); done
+  if [[ -n "$i" ]]; then
+    shift
+    case "${1:-}" in -h | --help) print_help "$i"; exit 0 ;; esac
+    exec "${BINARY[$i]}" "$@"
+  elif [[ -z "$name" ]]; then
+    print_group "$group"; exit $?
+  else
+    printf 'takumi: unknown command "%s %s"\n' "$group" "$name" >&2
+    print_group "$group" >&2 || true
+    exit 2
+  fi
+}
+
+main "$@"

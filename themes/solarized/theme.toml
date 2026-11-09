@@ -1,0 +1,34 @@
+# Solarized Dark: precise, balanced colour on deep teal
+# Colours after Solarized by Ethan Schoonover (https://ethanschoonover.com/solarized/); phases by Takumi.
+
+[meta]
+name = "solarized"
+mode = "dark"
+title = "Solarized Dark"
+about = "precise, balanced colour on deep teal"
+credit = "Solarized by Ethan Schoonover (https://ethanschoonover.com/solarized/)"
+
+[palette]
+accent     = "#268bd2"
+background = "#002b36"
+surface    = "#073642"
+foreground = "#a9b4b4"
+muted      = "#5f747b"
+red        = "#dc322f"
+yellow     = "#b58900"
+green      = "#859900"
+cyan       = "#2aa198"
+blue       = "#268bd2"
+magenta    = "#d33682"
+
+[phase.dawn]
+accent     = "#cb4b16"
+
+[phase.dusk]
+accent     = "#d1421f"
+
+[phase.night]
+accent     = "#5964aa"
+background = "#001c23"
+surface    = "#05262e"
+foreground = "#99a8a9"

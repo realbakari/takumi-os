@@ -1,0 +1,14 @@
+# Judges a room on its first start: boot-complete.target (which systemd-bless-boot waits for) requires it.
+# No ordering against graphical.target: a target orders itself after what it wants, which would loop.
+[Unit]
+Description=Takumi: a new room counts as good once its desktop comes up
+After=systemd-user-sessions.service
+Before=boot-complete.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/takumi room health
+TimeoutStartSec=6min
+
+[Install]
+RequiredBy=boot-complete.target

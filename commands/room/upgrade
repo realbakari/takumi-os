@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Upgrade the packages inside a room, never the running one
+usage: <name>
+risk: 2
+sudo: yes
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/rooms.sh" ]] && { . "$l/rooms.sh"; . "$l/update.sh"; break; }; done
+declare -F rooms_current >/dev/null && declare -F update_why >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || { echo "run via sudo" >&2; exit 1; }
+name=${1:?room name}
+r=$(rooms_path "$name"); [[ -d "$r" ]] || { echo "no room $name" >&2; exit 1; }
+# Share the package cache so downloads land where the next update finds them.
+# arch-chroot wants the target to be a mount point; bind the room onto itself.
+mount --bind "$r" "$r"
+mkdir -p "$r/var/cache/pacman/pkg"
+mount --bind /var/cache/pacman/pkg "$r/var/cache/pacman/pkg"
+# pacman's words, kept to say why in one sentence if it fails (lib/update.sh). In English, so they can be read.
+said=$(mktemp)
+finish() {
+  local rc=$? why text next
+  umount "$r/var/cache/pacman/pkg" 2>/dev/null || true; umount "$r" 2>/dev/null || true
+  if (( rc )) && why=$(update_why "$said"); then
+    IFS=$'\t' read -r _ text next <<< "$why"
+    echo "takumi: $text $next." >&2
+  fi
+  rm -f "$said"
+  exit "$rc"
+}
+trap finish EXIT
+pm() { LC_ALL=C arch-chroot "$r" pacman "$@" 2>&1 | tee -a "$said"; }   # pacman's status, through pipefail
+# A lock copied with the room is nobody's: nothing else runs pacman inside a room that is being built.
+rm -f "$r/var/lib/pacman/db.lck"
+# Keys first, so a key rotation never fails the upgrade's signature checks.
+keyrings=$(arch-chroot "$r" pacman -Qq archlinux-keyring archlinuxarm-keyring 2>/dev/null || true)
+# shellcheck disable=SC2086 # one word per keyring
+[[ -n "$keyrings" ]] && pm -Sy --noconfirm --needed $keyrings
+if ! pm -Syu --noconfirm; then
+  # Keys out of date all the same (a room left long unupdated, keys that expired): renew them from the keyring
+  # packages and try once more. Anything else stops here.
+  [[ "$(update_why "$said" | cut -f 1)" == keyring && -n "$keyrings" ]] || exit 1
+  echo "the keys that check downloads were out of date: renewing them and trying again"
+  arch-chroot "$r" pacman-key --populate || true
+  # shellcheck disable=SC2086
+  pm -Sy --noconfirm $keyrings || true
+  : > "$said"
+  pm -Syu --noconfirm
+fi
+# What Takumi ships now and the room still lacks (a package added to a list since the install, like the
+# recorder behind takumi screen record): installed in the room too, never removed. The installer puts the
+# lists in /usr/share/takumi/packages; a checkout keeps them in install/packages.
+want=$(update_listed || true)
+[[ -n "$want" ]] || echo "no package lists in /usr/share/takumi/packages: the room gets the upgrade and nothing more" >&2
+if [[ -n "$want" ]]; then
+  # shellcheck disable=SC2086 # one word per package
+  missing=$(arch-chroot "$r" pacman -T $want 2>/dev/null || true)
+  # Only what the repositories carry (Arch Linux ARM lacks a few), so one absent package never fails the upgrade.
+  avail=()
+  for p in $missing; do if arch-chroot "$r" pacman -Si "$p" >/dev/null 2>&1; then avail+=("$p"); fi; done
+  if (( ${#avail[@]} )); then pm -S --noconfirm --needed "${avail[@]}"; fi
+fi
+# Packages nothing needs any more (pulled in by one since removed), except what Takumi's lists name: they go
+# here, in the new room, where starting the room before it undoes it (docs/atomic-rooms.md). A failure here
+# leaves them, and never fails the update.
+orphans=$(arch-chroot "$r" pacman -Qdtq 2>/dev/null | update_unlisted || true)
+if [[ -n "$orphans" ]]; then
+  # shellcheck disable=SC2086 # one word per package
+  if arch-chroot "$r" pacman -Rns --noconfirm $orphans >/dev/null; then echo "removed $(wc -w <<< "$orphans" | tr -d ' ') packages nothing needed"
+  else echo "the packages nothing needs could not be removed; they stay" >&2; fi
+fi
+takumi hardware apply --root "$r" || echo "hardware: not every fix this computer needs was set up in room $name; takumi doctor says which (docs/hardware.md)" >&2

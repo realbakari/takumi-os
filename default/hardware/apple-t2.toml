@@ -1,0 +1,13 @@
+# Intel Macs with Apple's T2 chip (2018 to 2020): the keyboard, trackpad, sound and Wi-Fi go through the T2,
+# whose drivers are not in the kernel Arch ships. Nothing to set up; the note says what does not work.
+# t2linux: https://wiki.t2linux.org/
+title = "Mac with Apple's T2 chip"
+part = "computer"
+works = "no"
+says = "needs a kernel Takumi does not ship"
+
+[match]
+pci = ["106b:1801", "106b:1802"]
+
+[apply]
+note = "Macs with Apple's T2 chip (2018 to 2020) need a patched kernel that Takumi does not ship: the built-in keyboard, trackpad, sound and Wi-Fi do not work. A USB keyboard, mouse and Wi-Fi adapter do."

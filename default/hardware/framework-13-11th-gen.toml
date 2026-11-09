@@ -1,0 +1,13 @@
+# Framework Laptop 13, 11th Gen Intel Core: Framework's Linux guide for this model adds nvme.noacpi=1, so the
+# SSD does not drain the battery while the laptop sleeps.
+# Framework: https://knowledgebase.frame.work/ (the Linux guides for the 11th Gen Intel Core model)
+title = "Framework Laptop 13, 11th Gen Intel"
+part = "computer"
+
+[match]
+dmi_vendor = "^Framework$"
+dmi_product = "11th Gen Intel"
+
+[apply]
+cmdline = ["nvme.noacpi=1"]
+note = "Framework's own setting for this model: the SSD skips a power state that drains the battery while the laptop sleeps."

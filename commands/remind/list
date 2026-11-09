@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: The reminders and timers waiting to ring, soonest first, with the number that cancels each
+usage: [--json]
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; break; }; done
+declare -F remind_lines >/dev/null || { echo "takumi: the clock library is missing" >&2; exit 1; }
+case "${1:-}" in
+  --json) remind_json; exit 0 ;;
+  "") ;;
+  *) echo "usage: takumi remind list [--json]" >&2; exit 2 ;;
+esac
+lines=$(remind_lines)
+[[ -n "$lines" ]] || { echo "Nothing to remind you of"; exit 0; }
+now=$(clock_now)
+while IFS=$'\t' read -r id kind at made text; do
+  [[ -n "$id" ]] || continue
+  if [[ $kind == timer ]]; then
+    left=$(( at - now )); (( left > 0 )) || left=0
+    printf '%4s  %-26s %s\n' "$id" "timer, rings $(clock_say_when "$at")" "${text:-$(clock_length $(( at - made ))) timer} ($(clock_length "$left") left)"
+  else
+    printf '%4s  %-26s %s\n' "$id" "$(clock_say_when "$at")" "$text"
+  fi
+done <<< "$lines"

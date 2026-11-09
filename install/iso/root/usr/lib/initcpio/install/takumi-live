@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Takumi's setup disc (docs/iso.md): the system is takumi/root.sfs on the disc, read-only, with memory over
+# it (systemd.volatile=overlay on the kernel command line). The disc is found by its ISO 9660 UUID, which
+# install/iso/build.sh writes to /etc/takumi/live-media before it builds this initramfs: a disc made on
+# another day is never mistaken for this one.
+
+build() {
+    local uuid units=$BUILDROOT/etc/systemd/system
+    uuid=$(< "${TAKUMI_LIVE_MEDIA:-/etc/takumi/live-media}")
+    map add_module isofs squashfs loop overlay 'sr_mod?' 'cdrom?'
+    # A CD's filesystem is looked at, and its UUID linked, only after cdrom_id has seen a disc in the drive.
+    add_udev_rule 60-cdrom_id.rules
+    add_systemd_unit systemd-volatile-root.service
+    mkdir -p "$units/initrd-root-fs.target.requires"
+    cat > "$units/run-takumi-media.mount" <<UNIT
+[Unit]
+Description=Takumi setup disc
+DefaultDependencies=no
+Before=sysroot.mount
+
+[Mount]
+What=/dev/disk/by-uuid/$uuid
+Where=/run/takumi/media
+Type=iso9660
+Options=ro
+UNIT
+    cat > "$units/sysroot.mount" <<UNIT
+[Unit]
+Description=Takumi setup system
+DefaultDependencies=no
+Requires=run-takumi-media.mount
+After=run-takumi-media.mount
+Before=initrd-root-fs.target
+
+[Mount]
+What=/run/takumi/media/takumi/root.sfs
+Where=/sysroot
+Type=squashfs
+Options=ro,loop
+UNIT
+    ln -sf ../sysroot.mount "$units/initrd-root-fs.target.requires/sysroot.mount"
+}
+
+help() {
+    cat <<HELP
+Starts Takumi's setup disc: mounts the disc by its UUID and its system image, read-only, as the root.
+systemd.volatile=overlay on the kernel command line puts memory over it.
+HELP
+}

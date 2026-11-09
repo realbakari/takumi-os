@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set the time zone by city, country or zone name; asks which city when none is given
+usage: [city | country | Area/Zone]
+example: takumi clock zone Lisbon
+example: takumi clock zone "New York"
+risk: 1
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/weather.sh"; . "$l/core.sh"; break; }; done
+declare -F clock_place >/dev/null && declare -F weather_find >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh): with no place, or one that is not found, the Core asks "Which city?" until one
+# is. A town the zone table does not name ("San Francisco") is looked up on Open-Meteo's place search. The
+# change goes through timedated, which lets the person at the computer make it without a password; only
+# when it refuses is the password asked, in the Core. Exit status: 0 set, or already so · 3 an answer was
+# needed and none came · 4 no such place, or one with several time zones · 1 it could not be changed.
+command -v timedatectl >/dev/null || core_fail 1 "The time zone is kept by systemd's timedated, which is not here"
+place="$*"
+if [[ -z "$place" ]]; then core_ask place "Which city?" || core_fail 3 "Nothing changed"; fi
+while :; do
+  [[ -n "$(clock_find "$place")" ]] || core_note "Looking for $place on Open-Meteo…"
+  rc=0; found=$(clock_place "$place") || rc=$?
+  (( rc == 0 )) && break
+  if (( rc == 4 )); then why="$place has several time zones: try $(clock_several "$found")"; else why="No time zone found for $place"; fi
+  core_wrong "$why"
+  [[ "${TAKUMI_CORE:-}" == 1 ]] || core_fail 4 "$why"
+  core_ask place "Which city?" || core_fail 3 "Nothing changed"
+done
+IFS=$'\t' read -r zone city _ <<< "$found"
+now=$(clock_now)
+if [[ "$zone" == "$(clock_zone)" ]]; then core_done "The time zone is already $city's: $(clock_hm "$now" "$zone")"; exit 0; fi
+if ! clock_set_zone "$zone"; then
+  core_sudo "Changing the time zone needs your password" timedatectl set-timezone "$zone" >/dev/null 2>&1 \
+    || core_fail 1 "The time zone did not change"   # /etc/localtime
+fi
+said="Time zone: $city · $(clock_hm "$now" "$zone")"
+core_in_core || takumi notice clock "Time zone: $city" "the clock says $(clock_hm "$now" "$zone")" >/dev/null 2>&1 || true
+core_done "$said"

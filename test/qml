@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Contract checks for shell/: tokens, theme roles, icons and component names. Runs without Quickshell.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+status=0
+qml=$(find shell -name '*.qml' -o -name '*.js' | sort)
+
+defined() { grep -oE "(property [a-z]+ |readonly property [a-z]+ |function )[a-zA-Z_]+" "$1" | awk '{print $NF}' | sort -u; }
+style_defs=$(defined shell/Look/Style.qml)
+theme_defs=$(defined shell/Look/Theme.qml)
+for tok in $(grep -ohE '\bStyle\.[a-zA-Z_]+' $qml | sed 's/Style\.//' | sort -u); do
+  grep -qx "$tok" <<< "$style_defs" || { echo "Style.$tok is used but not defined"; status=1; }
+done
+for tok in $(grep -ohE '\bTheme\.[a-zA-Z_]+' $qml | sed 's/Theme\.//' | sort -u); do
+  grep -qx "$tok" <<< "$theme_defs" || { echo "Theme.$tok is used but not defined"; status=1; }
+done
+
+icons=$(grep -oE '^\s+[a-zA-Z]+:\s*"' shell/Look/Icons.js | tr -d ' :"' | sort -u)
+used=$( { grep -ohE '^\s*name:\s*"[a-zA-Z]+"' $qml | sed -E 's/.*"([a-zA-Z]+)"/\1/';
+          grep -ohE 'icon:\s*"[a-zA-Z]+"' shell/Core/*.qml | sed -E 's/.*"([a-zA-Z]+)"/\1/';
+          grep -ohE '\? "[a-zA-Z]+" : "[a-zA-Z]+"' shell/Core/Rest.qml | grep -oE '"[a-zA-Z]+"' | tr -d '"';
+          grep -hE 'takumi notice [a-zA-Z]+' commands/*/* lib/*.sh | grep -vE '^[[:space:]]*#' | grep -oE 'takumi notice [a-zA-Z]+' | awk '{print $3}'; } | sort -u)
+for i in $used; do grep -qx "$i" <<< "$icons" || { echo "icon \"$i\" is used but not in Icons.js"; status=1; }; done
+# Glyphs that rows bring with them: in Palette rows (glyph:"wifi") and in a command's ABOUT block (glyph: globe).
+glyphs=$( { grep -ohE 'glyph: ?"[a-zA-Z]+"' commands/*/* | sed -E 's/.*"([a-zA-Z]+)"/\1/';
+            grep -ohE '^glyph: [a-zA-Z]+$' commands/*/* | sed -E 's/^glyph: //'; } | sort -u)
+for g in $glyphs; do grep -qx "$g" <<< "$icons" || { echo "glyph \"$g\" is used by a row but not in Icons.js"; status=1; }; done
+
+builtin=" Item Rectangle Text TextInput Image Canvas Row Column Repeater ListView GridView BorderImage CaptureSession ScreencopyView VideoOutput MouseArea Timer NumberAnimation ColorAnimation
+ SequentialAnimation ParallelAnimation PauseAnimation PropertyAction ScriptAction Behavior Connections Gradient GradientStop TextMetrics Translate Shape ShapePath PathSvg PathText RectangularShadow QtObject Component
+ Process SplitParser StdioCollector FileView IpcHandler PanelWindow Variants Scope ShellRoot Singleton SystemClock Region LazyLoader 
+ WlSessionLock WlSessionLockSurface PamContext FloatingWindow NotificationServer IconImage Grid FocusScope WheelHandler "
+local=" $(find shell -name '*.qml' -exec basename {} .qml \; | tr '\n' ' ') "
+for f in $(find shell -name '*.qml'); do
+  for t in $(grep -oE '^\s*(component [A-Z][A-Za-z]+: )?[A-Z][A-Za-z]+\s*\{' "$f" | sed -E 's/component [A-Z][A-Za-z]+: //; s/[ {]//g' | sort -u); do
+    [[ "$builtin" == *" $t "* || "$local" == *" $t "* ]] && continue
+    grep -qE "component $t:" "$f" && continue
+    echo "$f: unknown component $t"; status=1
+  done
+done
+
+# A custom property named like one every Item already has (top, width, state…) stops the whole shell from
+# loading ("Cannot override FINAL property"), so catch it here rather than in the VM.
+taken='top|bottom|left|right|horizontalCenter|verticalCenter|baseline|x|y|z|width|height|data|state|states|parent|children|visible|enabled|opacity|scale|rotation|clip|focus|anchors|layer|transform|smooth|antialiasing'
+if grep -nE "^\s*(readonly |required )*property [a-zA-Z<>]+ ($taken)(:|\s*$)" $qml; then echo "a property above is named like one every Item already has"; status=1; fi
+
+if command -v node >/dev/null; then
+  for j in shell/Look/*.js; do sed '/^\.pragma/d' "$j" > "${TMPDIR:-/tmp}/takumi-js-check.js"; node --check "${TMPDIR:-/tmp}/takumi-js-check.js" || { echo "syntax: $j"; status=1; }; done
+  # The Sky's opening parts the old scene where paint() drew its horizon: the line it strokes at HZ.
+  { sed '/^\.pragma/d' shell/Look/Sky.js; cat <<'JS'
+const ys = [];
+const ctx = new Proxy({}, { get: (o, k) => k === "createLinearGradient" ? (x0, y0, x1, y1) => { ys.push(y0, y1); return { addColorStop() {} }; }
+  : k === "createRadialGradient" ? () => ({ addColorStop() {} })
+  : k === "measureText" ? () => ({ width: 0 }) : (k in o ? o[k] : () => {}), set: (o, k, v) => { o[k] = v; return true; } });
+let tx = 0, ty = 0, sc = 1;
+ctx.translate = (x, y) => { tx = x; ty = y; }; ctx.scale = s => { sc = s; };
+ctx.moveTo = (x, y) => ys.push(y); ctx.rect = (x, y, w, h) => ys.push(y + h);
+const bad = [];
+for (const [W, H] of [[1440, 900], [2560, 1440], [1080, 1920]]) for (const name of ["ion", "ember", "washi", "kuro"]) {
+  ys.length = 0; paint(ctx, W, H, { accent: "#5ad7ff", background: "#0b0f14", surface: "#111821", foreground: "#d9e2ec" }, "day", 0.5, name);
+  const y = horizon(W, H, name), hz = (y - ty) / sc;
+  if (!ys.includes(hz) && !ys.some(v => Math.abs(v - hz) < 1e-6)) bad.push(name + " at " + W + "x" + H + ": " + hz);
+}
+if (bad.length) { console.log("Sky.js horizon() is not where paint() draws it: " + bad.join(", ")); process.exit(1); }
+JS
+  } > "${TMPDIR:-/tmp}/takumi-sky-check.js"
+  node "${TMPDIR:-/tmp}/takumi-sky-check.js" || status=1
+fi
+# qmllint reads every file; only its syntax errors fail the check (Quickshell's own imports are unknown to
+# it, so its other advice is noise here). Qt keeps it outside PATH on Arch.
+ql=$(command -v qmllint || ls /usr/lib/qt6/bin/qmllint /usr/lib/qt/bin/qmllint 2>/dev/null | head -n 1 || true)
+if [[ -n "$ql" ]]; then
+  # shellcheck disable=SC2046 # one argument per file
+  bad=$("$ql" $(find shell -name '*.qml') 2>&1 | grep '\[syntax\]' || true)
+  [[ -z "$bad" ]] || { echo "$bad"; status=1; }
+else echo "   (qmllint not installed; QML not compiled here)"; fi
+# A Quickshell.Io type without its import shows only when the shell loads, and then the whole shell refuses.
+for f in $qml; do
+  grep -qE '(^[[:space:]]*|: )(Process|StdioCollector|SplitParser|FileView|IpcHandler)[[:space:]]*\{' "$f" || continue
+  grep -q '^import Quickshell.Io' "$f" || { echo "$f uses Quickshell.Io types without importing Quickshell.Io"; status=1; }
+done
+
+echo "   $(echo "$qml" | wc -l | tr -d ' ') shell files, $(echo "$used" | wc -w | tr -d ' ') icons, $(echo "$glyphs" | wc -w | tr -d ' ') row glyphs, tokens checked"
+exit $status

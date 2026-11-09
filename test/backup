@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+# Contract checks for backups (lib/backup.sh, commands/backup/*, the Palette's backup rows) against fake restic, rclone,
+# udisksctl, lsblk, secret-tool and systemd: the disks and clouds offered, setup's conversation and its key card, going
+# on with backups already on a disk, the hourly rules (charger, once an hour, a disk away for a week), the words for a
+# failure, restore by date, a new key, turning backups off, and that the key never reaches an argument, a log or a file.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; backup checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-backup.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+t=$(cd "$t" && pwd -P)
+export FAKE=$t/fake HOME=$t/home XDG_RUNTIME_DIR=$t/run TAKUMI_POWER_SUPPLY=$t/supply
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR" "$t/commands/notice" "$TAKUMI_POWER_SUPPLY/AC"
+jqdir=$(dirname "$(command -v jq)")
+# The fakes first, then the router, then only the system's own folders: a restic or rclone installed elsewhere is never reached.
+export PATH="$t/bin:$repo/bin:/usr/bin:/bin:$jqdir"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"
+unset TAKUMI_CORE
+
+fake() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$t/bin/$1"; chmod +x "$t/bin/$1"; }
+# Every fake writes its arguments to $FAKE/calls, so a key on any command line would show there.
+fake restic '
+printf "restic %s\n" "$*" >> "$FAKE/calls"
+repo="" pc="" pf="" args=()
+while (( $# )); do
+  case "$1" in --repo) repo=$2; shift 2 ;; --password-command) pc=$2; shift 2 ;; --password-file) pf=$2; shift 2 ;; *) args+=("$1"); shift ;; esac
+done
+case "$repo" in rclone:*) r=${repo#rclone:}; dir="$FAKE/cloud/${r%%:*}/${r#*:}" ;; *) dir=$repo ;; esac
+pw=""
+if [[ -n "$pc" ]]; then pw=$(eval "$pc") || { echo "Fatal: reading the password from the command failed" >&2; exit 1; }
+elif [[ -n "$pf" ]]; then pw=$(cat "$pf"); fi
+if [[ "${args[0]}" == init ]]; then
+  [[ ! -f "$dir/config" ]] || { echo "Fatal: create repository at $repo failed: config file already exists" >&2; exit 1; }
+  mkdir -p "$dir"; echo "{\"version\":2,\"id\":\"r1\"}" > "$dir/config"; echo "k1 $pw" > "$dir/.keys"; echo "created restic repository r1"; exit 0
+fi
+[[ -f "$dir/config" ]] || { echo "Fatal: repository does not exist: unable to open config file" >&2; exit 10; }
+cur=$(awk -v p="$pw" "\$2 == p { print \$1; exit }" "$dir/.keys")
+[[ -n "$cur" ]] || { echo "Fatal: wrong password or no key found" >&2; exit 12; }
+case "${args[0]} ${args[1]:-}" in
+  "cat config") cat "$dir/config" ;;
+  "backup "*)
+    for ((i = 0; i < ${#args[@]}; i++)); do [[ "${args[$i]}" == --exclude-file ]] && cp "${args[$((i + 1))]}" "$FAKE/excludes"; done
+    rc=$(cat "$FAKE/backup-rc" 2>/dev/null || echo 0)
+    echo "{\"message_type\":\"status\",\"percent_done\":0.5}"
+    if [[ $rc == 0 || $rc == 3 ]]; then
+      if [[ -f "$FAKE/unchanged" ]]; then echo "{\"message_type\":\"summary\",\"total_bytes_processed\":41200000000,\"total_files_processed\":91234}"
+      else echo "{\"message_type\":\"summary\",\"snapshot_id\":\"5a1f0c\",\"total_bytes_processed\":41200000000,\"total_files_processed\":91234}"; fi
+    else cat "$FAKE/backup-error" >&2 2>/dev/null; fi
+    exit "$rc" ;;
+  "forget "*|"prune "*) ;;
+  "key list") echo "[{\"current\":true,\"id\":\"$cur\",\"userName\":\"me\"}]" ;;
+  "key add") n=$(( $(wc -l < "$dir/.keys") + 1 )); for ((i = 0; i < ${#args[@]}; i++)); do [[ "${args[$i]}" == --new-password-file ]] && echo "k$n $(cat "${args[$((i + 1))]}")" >> "$dir/.keys"; done; true ;;
+  "key remove") [[ "${args[2]}" != "$cur" ]] || { echo "refusing to remove key currently used" >&2; exit 1; }
+                grep -v "^${args[2]} " "$dir/.keys" > "$dir/.keys.new"; mv "$dir/.keys.new" "$dir/.keys" ;;
+esac'
+fake secret-tool '
+printf "secret-tool %s\n" "$*" >> "$FAKE/calls"
+[[ ! -f "$FAKE/nokeyring" ]] || exit 1
+case "$1" in store) cat > "$FAKE/keyring" ;; lookup) [[ -f "$FAKE/keyring" ]] || exit 1; cat "$FAKE/keyring" ;; clear) rm -f "$FAKE/keyring" ;; esac'
+fake lsblk 'printf "lsblk %s\n" "$*" >> "$FAKE/calls"; cat "$FAKE/lsblk.json"'
+fake udisksctl '
+printf "udisksctl %s\n" "$*" >> "$FAKE/calls"
+dev=""; prev=""; for a; do [[ "$prev" == -b ]] && dev=$a; prev=$a; done
+case "$1" in
+  mount) mp="$FAKE/media/$(jq -r --arg d "$dev" ".. | objects | select(.path? == \$d) | .label" "$FAKE/lsblk.json")"; mkdir -p "$mp"
+         jq --arg d "$dev" --arg m "$mp" "(.. | objects | select(.path? == \$d)) |= (.mountpoint = \$m | .fsavail = 820000000000)" "$FAKE/lsblk.json" > "$FAKE/l.new"
+         mv "$FAKE/l.new" "$FAKE/lsblk.json"; echo "Mounted $dev at $mp" ;;
+  unmount) jq --arg d "$dev" "(.. | objects | select(.path? == \$d)) |= (.mountpoint = null | .fsavail = null)" "$FAKE/lsblk.json" > "$FAKE/l.new"
+           mv "$FAKE/l.new" "$FAKE/lsblk.json"; echo "Unmounted $dev" ;;
+esac'
+fake rclone '
+printf "rclone %s\n" "$*" >> "$FAKE/calls"
+for last; do :; done
+case "$1" in
+  listremotes) cat "$FAKE/remotes" 2>/dev/null ;;
+  lsd) r=${2%%:*}; [[ ! -f "$FAKE/cloud-down" ]] && grep -q "^$r: " "$FAKE/remotes" 2>/dev/null ;;
+  lsf) d="$FAKE/cloud/${last%%:*}/${last#*:}"; for c in "$d"/*/config; do [[ -f "$c" ]] && echo "$(basename "$(dirname "$c")")/config"; done; exit 0 ;;
+  config)
+    case "$2" in
+      delete) grep -v "^$3: " "$FAKE/remotes" > "$FAKE/remotes.new" 2>/dev/null || true; mv "$FAKE/remotes.new" "$FAKE/remotes" ;;
+      create) echo "NOTICE: If your browser does not open automatically go to the following link: http://127.0.0.1:53682/auth?state=Zk3pQ9x" >&2
+              xdg-open "http://127.0.0.1:53682/auth?state=Zk3pQ9x"; sleep 2   # the person signs in
+              [[ ! -f "$FAKE/signin-fails" ]] || { echo "Failed to configure token: canceled" >&2; exit 1; }
+              printf "%s: %s\n" "$3" "$4" >> "$FAKE/remotes" ;;
+    esac ;;
+esac'
+fake systemctl '
+printf "systemctl %s\n" "$*" >> "$FAKE/calls"
+case "$*" in
+  *is-active*takumi-backup-restore*) [[ -f "$FAKE/restore-active" ]]; exit $? ;;
+  *stop*takumi-backup-restore*) rm -f "$FAKE/restore-active"; rm -rf "$HOME/Backups/"* ;;
+esac
+exit 0'
+fake systemd-run 'printf "systemd-run %s\n" "$*" >> "$FAKE/calls"; case " $* " in *" mount "*) mkdir -p "$HOME/Backups/2026-11-09 14.00"; touch "$FAKE/restore-active" ;; esac'
+fake systemd-escape 'p=${3#/}; printf "%s.device\n" "$(printf "%s" "$p" | sed "s/-/\\\\x2d/g; s|/|-|g")"'
+fake uname 'if [[ "${1:-}" == -n ]]; then echo test-laptop.local; else exec /usr/bin/uname "$@"; fi'
+fake gio 'printf "gio %s\n" "$*" >> "$FAKE/calls"'
+fake fusermount 'printf "fusermount %s\n" "$*" >> "$FAKE/calls"'
+fake sudo 'printf "sudo %s\n" "$*" >> "$FAKE/calls"'
+fake qrencode 'printf "qrencode %s\n" "$*" >> "$FAKE/calls"; cat > /dev/null; printf "##  ##\n  ##  \n"'
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"; chmod +x "$t/commands/notice/main"
+
+disks() {
+  cat > "$FAKE/lsblk.json" <<'JSON'
+{"blockdevices":[
+ {"path":"/dev/nvme0n1","type":"disk","size":512110190592,"fstype":null,"label":null,"uuid":null,"mountpoint":null,"fsavail":null,"tran":"nvme","rm":false,"hotplug":false,"model":"Samsung SSD 980","vendor":null,
+  "children":[{"path":"/dev/nvme0n1p1","type":"part","size":1073741824,"fstype":"vfat","label":null,"uuid":"AAAA-0001","mountpoint":"/efi","fsavail":900000000},
+              {"path":"/dev/nvme0n1p2","type":"part","size":511000000000,"fstype":"crypto_LUKS","label":"takumi","uuid":"luks-1","mountpoint":null,"fsavail":null,
+               "children":[{"path":"/dev/mapper/takumi","type":"crypt","size":510000000000,"fstype":"btrfs","label":null,"uuid":"root-1","mountpoint":"/","fsavail":300000000000}]}]},
+ {"path":"/dev/sdb","type":"disk","size":1000204886016,"fstype":null,"label":null,"uuid":null,"mountpoint":null,"fsavail":null,"tran":"usb","rm":false,"hotplug":true,"model":"PSSD T7","vendor":"Samsung ",
+  "children":[{"path":"/dev/sdb1","type":"part","size":1000202273280,"fstype":"exfat","label":"T7","uuid":"1234-ABCD","mountpoint":null,"fsavail":null}]},
+ {"path":"/dev/sdc","type":"disk","size":2000398934016,"fstype":null,"label":null,"uuid":null,"mountpoint":null,"fsavail":null,"tran":"usb","rm":"0","hotplug":"1","model":"Expansion","vendor":"Seagate",
+  "children":[{"path":"/dev/sdc1","type":"part","size":209715200,"fstype":"vfat","label":"EFI","uuid":"EFI-2","mountpoint":null,"fsavail":null},
+              {"path":"/dev/sdc2","type":"part","size":"2000189177856","fstype":"apfs","label":"Mac Backup","uuid":"apfs-2","mountpoint":null,"fsavail":null}]}]}
+JSON
+}
+unplug() { jq '.blockdevices |= map(select(.path != "/dev/sdb"))' "$FAKE/lsblk.json" > "$FAKE/l.new"; mv "$FAKE/l.new" "$FAKE/lsblk.json"; }
+reset() {
+  rm -rf "${FAKE:?}"/* "${HOME:?}"/.config "${HOME:?}"/.local "${HOME:?}/Backups" "${XDG_RUNTIME_DIR:?}"/*
+  disks; echo 1 > "$TAKUMI_POWER_SUPPLY/AC/online"
+  : > "$FAKE/calls"; : > "$FAKE/notices"; : > "$FAKE/remotes"
+}
+n=0
+check() { n=$((n + 1)); if eval "$2"; then :; else echo "backup: $1"; status=1; fi; }
+lib() { bash -c '. lib/backup.sh; "$@"' _ "$@"; }
+talk() { local answers=$1 rc=0; shift; printf '%b' "$answers" | TAKUMI_CORE=1 takumi "$@" 2>&1 || rc=$?; echo "rc=$rc"; }
+rows() { takumi palette backup "$1"; }
+cardof() { sed -n 's/^card //p' <<< "$1"; }
+shown='^([0-9]{4}-){7}[0-9]{4}$'   # a key as the card shows it
+toml() { cat "$HOME/.config/takumi/backup.toml"; }
+
+reset
+# --- Words and the list of what is skipped ---
+now=$(date +%s)
+check "sizes in words" '[[ "$(lib backup_size 41200000000)|$(lib backup_size 1500000000000)|$(lib backup_size 820000000)|$(lib backup_size 999)" == "41 GB|1.5 TB|820 MB|999 bytes" ]]'
+check "times in words" '[[ "$(lib backup_ago $((now - 20)) $now)|$(lib backup_ago $((now - 180)) $now)|$(lib backup_ago $((now - 7300)) $now)" == "just now|3 min ago|2 h ago" ]]'
+check "a long time ago says the day" '[[ "$(lib backup_ago $((now - 40 * 86400)) $now)" == "on "* ]]'
+key=$(lib backup_new_key)
+check "a new key: 32 digits, never the same twice" '[[ "$key" =~ ^[0-9]{32}$ && "$(lib backup_new_key)" != "$key" ]]'
+check "the key shown in eight groups of four" '[[ "$(lib backup_key_shown 12345678901234567890123456789012)" == "1234-5678-9012-3456-7890-1234-5678-9012" ]]'
+check "a typed key: dashes and spaces dropped; anything else kept" '[[ "$(lib backup_key_typed "1234-5678 9012-3456-7890-1234-5678-9012")" == 12345678901234567890123456789012 && "$(lib backup_key_typed "my own pass")" == "my own pass" ]]'
+check "this computer's folder is its short host name" '[[ "$(lib backup_host)" == test-laptop ]]'
+lib backup_seed
+skips=$(lib backup_skips)
+check "a home without backup.toml gets Takumi's, skipping caches, the Trash and Steam games" 'grep -qx .cache <<< "$skips" && grep -qx .local/share/Trash <<< "$skips" && grep -qx .local/share/Steam/steamapps/common <<< "$skips" && grep -qx "**/node_modules" <<< "$skips"'
+check "comments are not folders" '! grep -q "#\|apps keep" <<< "$skips" && [[ $(grep -c . <<< "$skips") -ge 15 ]]'
+lib backup_excludes "$t/ex"
+check "restic's patterns start at the home folder, and the restore folder is never backed up" 'grep -qx "$HOME/.cache" "$t/ex" && grep -qx "$HOME/Backups" "$t/ex" && ! grep -qv "^$HOME/" "$t/ex"'
+
+# --- The disks and clouds offered ---
+d=$(lib backup_disks)
+check "a USB disk by its name and size; the computer's own disk never" '[[ "$(jq -r "select(.uuid == \"1234-ABCD\") | [.name, .model, .sizeText, (.ok|tostring)] | join(\"|\")" <<< "$d")" == "T7|Samsung PSSD T7|1 TB|true" ]] && ! grep -q "root-1\|AAAA-0001" <<< "$d"'
+check "a Mac disk is offered with why it cannot be used; a tiny partition is not offered" '[[ "$(jq -r "select(.uuid == \"apfs-2\") | .why" <<< "$d")" == "It is formatted for a Mac, and this computer cannot write to that" ]] && ! grep -q EFI-2 <<< "$d"'
+printf 'nas: sftp\n' > "$FAKE/remotes"
+r=$(rows backup)
+check "before setup: set up, each disk, each cloud, the remotes rclone has" '[[ "$(jq -r .title <<< "$r" | tr "\n" "|")" == "Set up backups|Back up to T7|Mac Backup cannot hold backups|Back up to Google Drive|Back up to Dropbox|Back up to OneDrive|Back up to pCloud|Back up to Box|Back up to nas|" ]]'
+check "the disk row says what it is and sets it up in the Core" '[[ "$(jq -c "select(.title == \"Back up to T7\") | [.subtitle, .converse, .run]" <<< "$r")" == "[\"Samsung PSSD T7 · 1 TB · Enter sets it up\",true,[\"takumi\",\"backup\",\"setup\",\"disk:1234-ABCD\"]]" ]]'
+check "a cloud row runs setup with the cloud, and an rclone remote with remote:" '[[ "$(jq -c "select(.title == \"Back up to Google Drive\" or .title == \"Back up to nas\") | .run[3]" <<< "$r" | tr "\n" " ")" == "\"google-drive\" \"remote:nas\" " ]]'
+check "rows are JSON with an id, a title and a kind" 'jq -e "select(.id and .title and .kind) | true" <<< "$r" >/dev/null'
+check "other words list nothing" '[[ -z "$(rows firefox)" && -z "$(rows ba)" ]]'
+check "restore and time machine find the setup rows too" '[[ -n "$(rows restore)" && "$(rows "time machine" | jq -r .title | head -n 1)" == "Set up backups" ]]'
+: > "$FAKE/remotes"
+
+# --- Setup on a USB disk: the conversation, the card, the key only in the keyring ---
+said=$(talk '' backup setup disk:1234-ABCD)
+check "setup speaks: opening, looking, preparing, then a card ($(tail -n 1 <<< "$said"))" '[[ "$(grep -v "^card " <<< "$said" | tr "\n" "|")" == "note Opening T7…|note Looking for backups on T7…|note Preparing T7 for backups…|rc=0|" ]]'
+card=$(cardof "$said")
+key=$(cat "$FAKE/keyring" 2>/dev/null || true)
+check "the card: the key in eight groups, a code to scan, and that it is the only copy" '[[ "$(jq -r .secret <<< "$card")" =~ $shown && "$(jq -r ".kicker + \"|\" + .title + \"|\" + .secretLabel" <<< "$card")" == "Backup key|Your backup key|Key" && "$(jq -c .qr <<< "$card")" == "[\"101\",\"010\"]" && "$(jq -r .detail <<< "$card")" == "This card is your only copy if the computer is lost"* ]]'
+check "the keyring keeps the same key, digits only" '[[ "$key" =~ ^[0-9]{32}$ && "$(jq -r .secret <<< "$card" | tr -d -)" == "$key" ]]'
+check "restic made the repository on the disk, reading the key from the keyring" 'grep -q "^restic --repo $FAKE/media/T7/Takumi Backups/test-laptop --password-command secret-tool lookup service takumi-backup init$" "$FAKE/calls"'
+check "the disk was opened through udisks2, letting it ask, then closed again" 'grep -qx "udisksctl mount -b /dev/sdb1" "$FAKE/calls" && grep -qx "udisksctl unmount --no-user-interaction -b /dev/sdb1" "$FAKE/calls"'
+check "backup.toml: the place, and the skip list as it was" '[[ "$(lib backup_get kind)|$(lib backup_get name)|$(lib backup_get disk)|$(lib backup_get folder)" == "disk|T7|1234-ABCD|Takumi Backups/test-laptop" ]] && [[ "$(lib backup_skips)" == "$skips" ]] && grep -q "^# Your home folder is backed up" "$HOME/.config/takumi/backup.toml"'
+check "every hour from now on, and when the disk is plugged in" 'grep -qx "systemctl --user enable --now takumi-backup.timer" "$FAKE/calls" && [[ -L "$HOME/.config/systemd/user/dev-disk-by\\x2duuid-1234\\x2dABCD.device.wants/takumi-backup.service" ]]'
+check "the first backup starts at once, in its service, as asked for" 'grep -qx "systemctl --user start --no-block takumi-backup.service" "$FAKE/calls" && [[ -f "$XDG_RUNTIME_DIR/takumi/backup-asked" ]]'
+check "the key is on no command line, in no log and in no file but the keyring" '! grep -q "$key" "$FAKE/calls" && ! grep -rq "$key" "$HOME" && ! grep -q "$key" "$FAKE/media/T7/Takumi Backups/test-laptop/config"'
+
+# --- A backup ---
+: > "$FAKE/calls"; : > "$FAKE/notices"
+out=$(takumi backup now --auto); rc=$?
+check "the asked-for first backup runs, says so twice, and names the size ($out)" '[[ $rc == 0 && "$out" == "Backed up to T7 · 41 GB" ]] && [[ "$(cut -d"|" -f1,2 "$FAKE/notices" | tr "\n" " ")" == "drive|Backing up to T7 drive|Backed up to T7 " ]] && [[ ! -f "$XDG_RUNTIME_DIR/takumi/backup-asked" ]]'
+check "restic backs up the home folder with the skip list, caches marked as such and .nobackup folders left out" 'grep -q "^restic --repo $FAKE/media/T7/Takumi Backups/test-laptop --password-command secret-tool lookup service takumi-backup backup $HOME --json --exclude-file $XDG_RUNTIME_DIR/takumi/backup-excludes --exclude-caches --exclude-if-present .nobackup --skip-if-unchanged --retry-lock 2m$" "$FAKE/calls" && grep -qx "$HOME/.cache" "$FAKE/excludes"'
+check "kept like a time machine: hourly for a day, daily for a month, weekly after; space given back weekly" 'grep -q " forget --keep-within-hourly 1d --keep-within-daily 1m --keep-weekly unlimited$" "$FAKE/calls" && grep -q " prune$" "$FAKE/calls" && [[ -s "$HOME/.local/state/takumi/backup/pruned" ]]'
+check "the disk the backup opened is closed after it" '[[ "$(grep -c "^udisksctl mount --no-user-interaction -b /dev/sdb1$" "$FAKE/calls")" == 1 && "$(grep -c "^udisksctl unmount" "$FAKE/calls")" == 1 ]]'
+st=$(takumi backup status)
+check "status: when and how much, and where ($st)" '[[ "$st" == "Backed up just now · 41 GB"$'"'"'\n'"'"'"On T7, every hour on the charger" ]]'
+check "status --json for scripts" '[[ "$(takumi backup status --json | jq -r "[.state, .place, (.bytes|tostring), (.present|tostring)] | join(\"|\")")" == "done|T7|41200000000|true" ]]'
+: > "$FAKE/calls"
+takumi backup now --auto >/dev/null
+check "within the hour the timer does nothing" '! grep -q "^restic" "$FAKE/calls"'
+jq '.when -= 7200' "$HOME/.local/state/takumi/backup/last.json" > "$t/l" && mv "$t/l" "$HOME/.local/state/takumi/backup/last.json"
+echo 0 > "$TAKUMI_POWER_SUPPLY/AC/online"; mkdir -p "$TAKUMI_POWER_SUPPLY/BAT0"; echo 60 > "$TAKUMI_POWER_SUPPLY/BAT0/capacity"; echo Discharging > "$TAKUMI_POWER_SUPPLY/BAT0/status"
+takumi backup now --auto >/dev/null
+check "on battery the timer waits for the charger" '! grep -q "^restic" "$FAKE/calls"'
+echo 1 > "$TAKUMI_POWER_SUPPLY/AC/online"; : > "$FAKE/notices"
+takumi backup now --auto >/dev/null
+check "on the charger, an hour later, it backs up without a word" 'grep -q "^restic .* backup " "$FAKE/calls" && [[ ! -s "$FAKE/notices" ]]'
+jq '.when -= 7200' "$HOME/.local/state/takumi/backup/last.json" > "$t/l" && mv "$t/l" "$HOME/.local/state/takumi/backup/last.json"; touch "$FAKE/unchanged"
+takumi backup now --auto >/dev/null
+check "nothing changed: no new snapshot, still counted as backed up now" '[[ "$(jq -r "[.bytes, .snapshot] | map(tostring) | join(\"|\")" "$HOME/.local/state/takumi/backup/last.json")" == "41200000000|" && "$(takumi backup status | head -n 1)" == "Backed up just now · 41 GB" ]]'
+rm -f "$FAKE/unchanged"
+out=$(takumi backup now); rc=$?
+check "takumi backup now from the Core or a script hands over to the service ($out)" '[[ $rc == 0 && "$out" == "Backing up to T7" && -f "$XDG_RUNTIME_DIR/takumi/backup-asked" ]]'
+rm -f "$XDG_RUNTIME_DIR/takumi/backup-asked"
+mkdir -p "$XDG_RUNTIME_DIR/takumi/backup.lock"; sleep 30 & echo $! > "$XDG_RUNTIME_DIR/takumi/backup.lock/pid"; : > "$FAKE/calls"
+jq '.when -= 7200' "$HOME/.local/state/takumi/backup/last.json" > "$t/l" && mv "$t/l" "$HOME/.local/state/takumi/backup/last.json"
+takumi backup now --auto >/dev/null
+check "one backup at a time" '! grep -q "^restic" "$FAKE/calls"'
+kill "$(cat "$XDG_RUNTIME_DIR/takumi/backup.lock/pid")" 2>/dev/null || true; wait 2>/dev/null || true; rm -rf "$XDG_RUNTIME_DIR/takumi/backup.lock"
+
+# --- A disk that is away ---
+unplug; : > "$FAKE/notices"; : > "$FAKE/calls"
+takumi backup now --auto >/dev/null
+check "a disk away for a day: nothing said" '[[ ! -s "$FAKE/notices" ]] && ! grep -q "^restic" "$FAKE/calls"'
+echo $(( $(date +%s) - 8 * 86400 )) > "$HOME/.local/state/takumi/backup/seen"
+takumi backup now --auto >/dev/null; takumi backup now --auto >/dev/null
+check "a disk away for 7 days: said once a week" '[[ "$(cat "$FAKE/notices")" == "usb|Backup disk not seen for 7 days|Plug in T7 to back up|-1|10|" ]]'
+: > "$XDG_RUNTIME_DIR/takumi/backup-asked"
+out=$(takumi backup now --auto) && rc=0 || rc=$?
+check "asked for while the disk is away: 3 and plug it in ($out)" '[[ $rc == 3 && "$out" == "Plug in T7 to back up" ]]'
+check "the Palette waits for the disk" '[[ "$(rows backup | jq -r "select(.id == \"backup:status\") | .subtitle + \"|\" + .glyph")" == "Waiting for T7: plug it in to back up|usb" ]]'
+disks
+
+# --- Failures, in words, once a day ---
+jq '.when -= 7200' "$HOME/.local/state/takumi/backup/last.json" > "$t/l" && mv "$t/l" "$HOME/.local/state/takumi/backup/last.json"
+echo 1 > "$FAKE/backup-rc"; echo "Fatal: unable to save snapshot: write /x: no space left on device" > "$FAKE/backup-error"; : > "$FAKE/notices"
+out=$(takumi backup now --auto) && rc=0 || rc=$?
+check "a full disk is said in words ($out)" '[[ $rc == 1 && "$out" == "T7 is full" && "$(cut -d"|" -f2,3 "$FAKE/notices")" == "The backup did not finish|T7 is full" ]]'
+: > "$FAKE/notices"; takumi backup now --auto >/dev/null || true
+check "the same trouble is not said again the same day" '[[ ! -s "$FAKE/notices" ]]'
+echo 12 > "$FAKE/backup-rc"; : > "$FAKE/backup-error"
+out=$(takumi backup now --auto) && rc=0 || rc=$?
+check "a key that does not open them ($out)" '[[ $rc == 1 && "$out" == "The key in your keyring does not open the backups on T7" ]]'
+check "the Palette says the trouble" '[[ "$(rows backup | jq -r "select(.id == \"backup:status\") | .subtitle + \"|\" + .glyph")" == "The key in your keyring does not open the backups on T7|warn" ]]'
+rm -f "$FAKE/backup-rc" "$FAKE/backup-error"
+takumi backup now --auto >/dev/null
+check "a good backup clears the trouble" '[[ ! -f "$HOME/.local/state/takumi/backup/problem" ]]'
+
+# --- The rows once set up ---
+r=$(rows backup)
+check "after setup: status, now, restore, what is skipped, a new key, off" '[[ "$(jq -r .id <<< "$r" | tr "\n" " ")" == "backup:status backup:now backup:restore backup:skip backup:key backup:off " ]]'
+check "the status row reads like the brief: Backed up … · 41 GB" '[[ "$(jq -r "select(.id == \"backup:status\") | .title" <<< "$r")" == "Backed up just now · 41 GB" ]]'
+check "a new key and turning off ask first" '[[ "$(jq -r "select(.risk == 1) | .id" <<< "$r" | tr "\n" " ")" == "backup:key backup:off " ]]'
+check "what is skipped opens backup.toml" '[[ "$(jq -c "select(.id == \"backup:skip\") | .run" <<< "$r")" == "[\"gio\",\"open\",\"$HOME/.config/takumi/backup.toml\"]" ]]'
+check "back up now finds Back up now" 'grep -qx "Back up now" <<< "$(rows "back up now" | jq -r .title)"'
+
+# --- Setting up again goes on with the same backups ---
+: > "$FAKE/calls"
+said=$(talk '' backup setup disk:1234-ABCD)
+check "the same disk again: the backups go on, no new key ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "done Backups go to T7 every hour on the charger, with the backup key you already have.|rc=0|" ]] && ! grep -q " init$" "$FAKE/calls"'
+
+# --- Restore by date ---
+: > "$FAKE/calls"
+said=$(talk '' backup restore)
+check "restore opens the backups, one folder per date, in Files ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$(tail -n 2 <<< "$said" | head -n 1)" == "done Your backups are open in Files, by date. Copy back what you need; they close by themselves in four hours." ]] && grep -qx "gio open $HOME/Backups" "$FAKE/calls"'
+check "restic mount names each backup by its date, in its own unit that closes after four hours" 'grep -q "^systemd-run --user --quiet --collect --unit=takumi-backup-restore --property=RuntimeMaxSec=4h restic --repo $FAKE/media/T7/Takumi Backups/test-laptop --password-command secret-tool lookup service takumi-backup mount --path-template %T --time-template 2006-01-02 15.04 $HOME/Backups$" "$FAKE/calls"'
+check "while open, the Palette offers to close them" '[[ "$(rows restore | jq -r .id)" == backup:close ]]'
+jq '.when -= 7200' "$HOME/.local/state/takumi/backup/last.json" > "$t/l" && mv "$t/l" "$HOME/.local/state/takumi/backup/last.json"; : > "$FAKE/calls"
+takumi backup now --auto >/dev/null
+check "while open, backups go on but nothing is forgotten" 'grep -q " backup " "$FAKE/calls" && ! grep -q " forget " "$FAKE/calls"'
+said=$(talk '' backup restore --close)
+check "closing them" '[[ "$(tail -n 2 <<< "$said" | head -n 1)" == "done Your backups are closed." && ! -e "$HOME/Backups" && ! -f "$FAKE/restore-active" ]]'
+unplug
+said=$(talk '' backup restore)
+check "restore with the disk away: 3, plug it in" '[[ "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "Plug in T7 to see your backups.|rc=3|" ]]'
+disks
+
+# --- A new key for a lost card ---
+old=$(cat "$FAKE/keyring"); : > "$FAKE/calls"
+said=$(talk '' backup key)
+new=$(cat "$FAKE/keyring")
+card=$(cardof "$said")
+check "a new key: the card shows it, the keyring has it, the old one no longer opens the backups" '[[ "$new" != "$old" && "$(jq -r .secret <<< "$card" | tr -d -)" == "$new" && "$(jq -r .title <<< "$card")" == "Your new backup key" ]] && ! grep -q " $old$" "$FAKE/media/T7/Takumi Backups/test-laptop/.keys"'
+check "neither key went on a command line" '! grep -q "$old" "$FAKE/calls" && ! grep -q "$new" "$FAKE/calls"'
+
+# --- A new computer: the backups of another, opened with their key ---
+reset
+mkdir -p "$FAKE/media/T7/Takumi Backups/old-laptop"; echo "{}" > "$FAKE/media/T7/Takumi Backups/old-laptop/config"
+echo "k1 11112222333344445555666677778888" > "$FAKE/media/T7/Takumi Backups/old-laptop/.keys"
+said=$(talk 'yes\n9999-0000-9999-0000-9999-0000-9999-0000\n1111-2222-3333-4444-5555-6666-7777-8888\n' backup setup disk:1234-ABCD)
+check "it offers the other computer's backups and asks for their key, again after a wrong one" '[[ "$(grep -E "^(confirm|secret|wrong|done)" <<< "$said" | tr "\n" "|")" == "confirm T7 holds the backups of old-laptop. Go on with them here? You need their backup key.|secret The backup key for old-laptop|wrong That key does not open these backups|secret The backup key for old-laptop|done Backups go on to T7, with the backups of old-laptop, every hour on the charger.|" ]]'
+check "the keyring keeps the key that worked; backup.toml points at those backups" '[[ "$(cat "$FAKE/keyring")" == 11112222333344445555666677778888 && "$(lib backup_get folder)" == "Takumi Backups/old-laptop" ]]'
+check "the typed key reached restic on a pipe only" '! grep -q "1111222233334444\|9999-0000" "$FAKE/calls" && grep -q -- "--password-file /dev/fd/" "$FAKE/calls"'
+reset
+mkdir -p "$FAKE/media/T7/Takumi Backups/old-laptop"; echo "{}" > "$FAKE/media/T7/Takumi Backups/old-laptop/config"; echo "k1 x" > "$FAKE/media/T7/Takumi Backups/old-laptop/.keys"
+said=$(talk 'no\n' backup setup disk:1234-ABCD)
+check "saying no starts new backups beside them, with a new key" '[[ -n "$(cardof "$said")" && -f "$FAKE/media/T7/Takumi Backups/test-laptop/config" && "$(lib backup_get folder)" == "Takumi Backups/test-laptop" ]]'
+
+# --- Choosing in the Core, and what cannot be chosen ---
+reset
+said=$(talk 'yes\n' backup setup)
+check "with one disk plugged in it asks about that one, by name and size" '[[ "$(grep "^confirm" <<< "$said")" == "confirm Back up to T7 (1 TB)? Esc for a cloud instead" ]] && [[ -n "$(cardof "$said")" ]]'
+reset
+said=$(talk 'no\nfloppy\n' backup setup)
+check "Esc asks for a cloud by name; a wrong name is asked again" '[[ "$(grep -E "^(ask|wrong)" <<< "$said" | tr "\n" "|")" == "ask Back up to Google Drive, Dropbox, OneDrive, pCloud or Box? Or plug in a USB disk, then type disk|wrong That is not one of them|ask Back up to Google Drive, Dropbox, OneDrive, pCloud or Box? Or plug in a USB disk, then type disk|" ]] && [[ "$(tail -n 1 <<< "$said")" == rc=3 ]]'
+said=$(talk '' backup setup disk:apfs-2)
+check "a Mac disk is refused with why: 5" '[[ "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "Mac Backup cannot hold backups. It is formatted for a Mac, and this computer cannot write to that.|rc=5|" ]]'
+said=$(talk '' backup setup floppy)
+check "a place Takumi does not know: 2" '[[ "$(tail -n 1 <<< "$said")" == rc=2 ]]'
+touch "$FAKE/nokeyring"
+said=$(talk '' backup setup disk:1234-ABCD)
+check "no keyring: nothing is made, and it says why" '[[ "$(tail -n 2 <<< "$said" | head -n 1)" == "Backups keep their key in your login keyring, and it did not answer. Log out and back in, then try again." ]] && [[ ! -d "$FAKE/media/T7/Takumi Backups/test-laptop" ]]'
+rm -f "$FAKE/nokeyring"
+
+# --- A cloud, signed in through rclone in the browser ---
+reset
+said=$(talk '' backup setup google-drive)
+check "rclone signs in to Google Drive, seeing only its own files, and Takumi opens its page ($(tail -n 1 <<< "$said"))" 'grep -qx "rclone config create takumi-backup drive scope=drive.file" "$FAKE/calls" && grep -qx "gio open http://127.0.0.1:53682/auth?state=Zk3pQ9x" "$FAKE/calls"'
+check "the Core says where to sign in" 'grep -qx "note Sign in to Google Drive in your browser, then allow rclone" <<< "$said"'
+check "the backups go to the cloud through rclone, with a card" 'grep -q "^restic --repo rclone:takumi-backup:Takumi Backups/test-laptop --password-command secret-tool lookup service takumi-backup init$" "$FAKE/calls" && [[ -n "$(cardof "$said")" && "$(lib backup_get kind)|$(lib backup_get remote)" == "cloud|takumi-backup" ]]'
+check "a cloud has no plug-in start" '! grep -q device <<< "$(ls "$HOME/.config/systemd/user/" 2>/dev/null)"'
+: > "$FAKE/calls"
+said=$(talk '' backup setup google-drive)
+check "signed in already: no second sign-in" '! grep -q "config create" "$FAKE/calls" && [[ "$(tail -n 2 <<< "$said" | head -n 1)" == "done Backups go to Google Drive every hour on the charger, with the backup key you already have." ]]'
+reset; touch "$FAKE/signin-fails"
+said=$(talk '' backup setup dropbox)
+check "a sign-in that does not finish: 6" '[[ "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "Signing in to Dropbox did not finish. Choose it again to try once more.|rc=6|" ]] && [[ -z "$(lib backup_get kind)" ]]'
+rm -f "$FAKE/signin-fails"
+
+# --- Turning backups off ---
+reset
+talk '' backup setup disk:1234-ABCD >/dev/null
+: > "$FAKE/calls"
+out=$(takumi backup off)
+check "off: the timer and the plug-in start go, the place is cleared, the skip list stays ($out)" '[[ "$out" == "Backups are off. The backups made so far stay on T7." ]] && grep -qx "systemctl --user disable --now takumi-backup.timer" "$FAKE/calls" && [[ -z "$(lib backup_get kind)" && "$(lib backup_skips)" == "$skips" ]] && ! grep -q device <<< "$(ls "$HOME/.config/systemd/user/" 2>/dev/null)"'
+out=$(takumi backup now) && rc=0 || rc=$?
+check "after off, takumi backup now says how to set up: 2" '[[ $rc == 2 && "$out" == "Backups are not set up. Type backup in the Core to choose a disk or a cloud." ]]'
+
+# --- A computer without the tools asks to install them ---
+if ! PATH=/usr/bin:/bin command -v restic >/dev/null; then
+  reset; mv "$t/bin/restic" "$t/restic"
+  said=$(talk 'no\n' backup setup disk:1234-ABCD)
+  check "without restic: asked first; no means nothing changed (3)" '[[ "$(grep "^confirm" <<< "$said")" == "confirm Backups need restic from Arch'"'"'s packages. Install now? It asks for your password." && "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "Nothing changed. Backups need restic.|rc=3|" ]]'
+  talk 'yes\n' backup setup disk:1234-ABCD >/dev/null
+  check "yes installs it through sudo, the password asked in the Core" 'grep -qx "sudo -A pacman -S --needed --noconfirm restic" "$FAKE/calls"'
+  mv "$t/restic" "$t/bin/restic"
+fi
+
+echo "   $n backup checks against fake restic, rclone, udisks2 and a fake keyring"
+exit $status

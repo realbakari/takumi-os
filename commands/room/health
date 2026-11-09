@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Judge a new room by whether its desktop comes up
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_current >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+# Runs once per boot before boot-complete.target (takumi-room-health.service). Only a room on its first
+# start is judged. The shell writes /run/takumi/desktop-ready when it has loaded.
+cur=$(rooms_current); [[ -n "$cur" ]] || exit 0
+[[ "$(state_get "$cur" status)" == staged ]] || exit 0
+timeout=${TAKUMI_ROOM_HEALTH_TIMEOUT:-240}
+for ((t = 0; t < timeout; t += 2)); do
+  [[ -e /run/takumi/desktop-ready ]] && exit 0
+  sleep 2
+done
+# Takumi's login screen is in charge: it writes the same mark when it appears, so no mark means no screen.
+if systemctl is-enabled --quiet greetd.service 2>/dev/null; then
+  state_set "$cur" status failed
+  state_set "$cur" reason "the login screen did not appear"
+  echo "takumi: room $cur did not reach the login screen; starting the previous system" >&2
+  systemctl reboot
+  exit 1
+fi
+# Another login manager: if nobody logged in there is nothing to judge, so the room is accepted.
+user_on_seat=no
+for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+  [[ "$(loginctl show-session "$s" -p Class --value 2>/dev/null)" == user && "$(loginctl show-session "$s" -p Seat --value 2>/dev/null)" == seat0 ]] && user_on_seat=yes
+done
+[[ "$user_on_seat" == yes ]] || exit 0
+state_set "$cur" status failed
+state_set "$cur" reason "the desktop did not start"
+echo "takumi: room $cur did not reach a desktop; starting the previous system" >&2
+systemctl reboot
+exit 1

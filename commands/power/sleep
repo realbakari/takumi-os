@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Lock, then sleep
+risk: 0
+title: Sleep
+words: suspend sleep standby
+glyph: moon
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; break; }; done
+# The same sleep as the lid's and the one after no use: it may hibernate after some hours (docs/power.md).
+verb=suspend
+if declare -F power_sleep_verb >/dev/null; then verb=$(power_sleep_verb); fi
+takumi lock || true
+sleep 1
+systemctl "$verb"

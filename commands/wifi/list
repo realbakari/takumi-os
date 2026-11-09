@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Nearby Wi-Fi networks: the one in use, then saved ones, then the rest
+usage: [--json] [--rescan]
+example: takumi wifi list --rescan
+risk: 0
+words: wifi wi-fi wireless networks nearby
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/wifi.sh "$(dirname "$(readlink -f "$0")")/../../lib/wifi.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F wifi_scan >/dev/null || { echo "takumi: the Wi-Fi library is missing" >&2; exit 1; }
+
+json=no; rescan=no
+for a in "$@"; do
+  case "$a" in --json) json=yes ;; --rescan) rescan=yes ;; *) echo "usage: takumi wifi list [--json] [--rescan]" >&2; exit 2 ;; esac
+done
+command -v nmcli >/dev/null || { echo "NetworkManager is not installed" >&2; exit 1; }
+if ! wifi_present; then [[ $json == yes ]] || echo "There is no Wi-Fi on this computer"; exit 0; fi
+if ! wifi_on; then [[ $json == yes ]] || echo "Wi-Fi is off. Turn it on with: takumi switch wifi"; exit 0; fi
+
+# One JSON object per network: name, signal (0-100), kind (open owe psk sae wep enterprise), saved, active.
+rows=$(wifi_scan "$rescan" | SAVED="$(wifi_saved | cut -f2-)" jq -Rc '
+  (env.SAVED | split("\n")) as $saved
+  | split("\t") | (.[3:] | join("\t")) as $name
+  | {name: $name, signal: (.[1] | tonumber), kind: .[2], saved: ($saved | any(. == $name)), active: (.[0] == "1")}' |
+  jq -sc 'sort_by([(.active | not), (.saved | not), -.signal]) | .[]')
+if [[ $json == yes ]]; then [[ -z "$rows" ]] || printf '%s\n' "$rows"; exit 0; fi
+[[ -n "$rows" ]] || { echo "No networks nearby"; exit 0; }
+jq -r '[(if .active then "*" else " " end),
+        (if .signal >= 67 then "▂▄▆" elif .signal >= 34 then "▂▄ " else "▂  " end),
+        (if .active then "connected" elif .saved then "saved" elif .kind == "open" then "open"
+         elif .kind == "owe" then "open, encrypted" elif .kind == "enterprise" then "work or school" else "password" end),
+        .name] | join("\t")' <<< "$rows" | while IFS="$(printf '\t')" read -r mark sig what n; do
+  printf ' %s %s  %-16s %s\n' "$mark" "$sig" "$what" "$n"
+done

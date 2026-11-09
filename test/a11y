@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# Contract checks for accessibility (commands/switch/reader, pointer, sticky, contrast, the accessibility file
+# defaults.kdl includes and the keys that reach them) against fakes of Orca, speech-dispatcher, gsettings,
+# systemd, sudo and keyd that record their arguments. The keyd file is a copy of Harmony's in a temp folder.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; accessibility checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-a11y.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home TAKUMI_KEYD_CONF=$t/keyd/default.conf
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$t/keyd"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice" "$t/commands/theme"   # fakes in front of the real ones
+check() { if eval "$2"; then :; else echo "a11y: $1"; status=1; fi; }
+
+log() { printf '#!/bin/sh\nprintf "%s %%s\\n" "$*" >> "$FAKE/calls"\n%s\n' "$1" "${2:-}" > "$t/bin/$1"; }
+log gsettings
+log spd-say
+log systemctl
+log keyd
+log orca 'touch "$FAKE/orca-running"'
+log setsid 'exec "$@"'
+log pkill 'rm -f "$FAKE/orca-running"'
+log pgrep '[ -e "$FAKE/orca-running" ]'
+# sudo: -n works only when $FAKE/nopasswd exists; -A asks, and $FAKE/refuse says no. Either way it runs the rest.
+cat > "$t/bin/sudo" <<'FAKE'
+#!/bin/sh
+printf 'sudo %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  -n) [ -e "$FAKE/nopasswd" ] || exit 1; shift ;;
+  -A) [ -e "$FAKE/refuse" ] && exit 1; shift ;;
+esac
+exec "$@"
+FAKE
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+printf '#!/bin/sh\nprintf "theme set %%s\\n" "$1" >> "$FAKE/calls"; mkdir -p "$HOME/.config/takumi"; echo "$1" > "$HOME/.config/takumi/theme"\n' > "$t/commands/theme/set"
+chmod +x "$t/bin/"* "$t/commands/notice/main" "$t/commands/theme/set"
+
+reset() { rm -rf "${FAKE:?}" "${HOME:?}"; mkdir -p "$FAKE" "$HOME"; : > "$FAKE/calls"; : > "$FAKE/notices"; cp etc/keyd/default.conf "$TAKUMI_KEYD_CONF"; }
+run() { local rc=0 out; out=$("$@" 2>&1) || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+access=$HOME/.config/niri/takumi/accessibility.kdl
+lines() { grep -v '^//' "$HOME/.config/niri/takumi/accessibility.kdl" 2>/dev/null || true; }
+# Orca starts in the background: wait a moment for the fake to say it runs.
+started() { local i; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [[ -e "$FAKE/orca-running" ]] && return 0; sleep 0.1; done; return 1; }
+
+# The screen reader.
+reset
+res=$(run commands/switch/reader)
+check "off, the key turns it on ($res)" '[[ "$res" == "0|Screen reader on" ]] && started'
+check "Orca starts in its own session and at every login" 'grep -qx "setsid orca" "$FAKE/calls" && grep -qx "orca " "$FAKE/calls" && [[ "$(lines)" == "spawn-at-startup \"orca\"" ]]'
+check "apps are told a screen reader is on" 'grep -qx "gsettings set org.gnome.desktop.a11y.applications screen-reader-enabled true" "$FAKE/calls"'
+check "a notice names the key to turn it off" 'grep -qx "vol|Screen reader on|Super+Ctrl+Enter turns it off|" "$FAKE/notices"'
+: > "$FAKE/calls"
+res=$(run commands/switch/reader on)
+check "on again: Orca is not started twice, the line not written twice" '[[ "$res" == "0|Screen reader on" ]] && ! grep -q "^orca" "$FAKE/calls" && [[ "$(lines)" == "spawn-at-startup \"orca\"" ]]'
+res=$(run commands/switch/reader)
+check "on, the key turns it off ($res)" '[[ "$res" == "0|Screen reader off" && ! -e "$FAKE/orca-running" && -z "$(lines)" ]]'
+check "off: Orca stops, speech says so, apps are told" 'grep -qx "pkill -x orca" "$FAKE/calls" && grep -qx "spd-say Screen reader off" "$FAKE/calls" && grep -qx "gsettings set org.gnome.desktop.a11y.applications screen-reader-enabled false" "$FAKE/calls"'
+rm "$t/bin/orca"
+res=$(run commands/switch/reader on)
+check "no Orca: 3, said in words, nothing written ($res)" '[[ "$res" == "3|The screen reader (Orca) is not installed: update Takumi to add it" && -z "$(lines)" ]]'
+log orca 'touch "$FAKE/orca-running"'; chmod +x "$t/bin/orca"
+res=$(run commands/switch/reader loud)
+check "a wrong word: 2" '[[ "$res" == 2\|* ]]'
+
+# The pointer.
+reset
+res=$(run commands/switch/pointer)
+check "normal, the key makes it bigger ($res)" '[[ "$res" == "0|Bigger pointer" && "$(lines)" == "cursor { xcursor-size 48; }" ]]'
+check "GTK, systemd and the next login get the size" 'grep -qx "gsettings set org.gnome.desktop.interface cursor-size 48" "$FAKE/calls" && grep -qx "systemctl --user set-environment XCURSOR_SIZE=48" "$FAKE/calls" && grep -qx "XCURSOR_SIZE=48" "$HOME/.config/environment.d/60-takumi-pointer.conf"'
+commands/switch/reader on >/dev/null
+res=$(run commands/switch/pointer)
+check "bigger, the key brings it back ($res)" '[[ "$res" == "0|Normal pointer" && "$(lines)" == "spawn-at-startup \"orca\"" && ! -e "$HOME/.config/environment.d/60-takumi-pointer.conf" ]]'
+check "back to normal everywhere" 'grep -qx "gsettings set org.gnome.desktop.interface cursor-size 24" "$FAKE/calls" && grep -qx "systemctl --user unset-environment XCURSOR_SIZE" "$FAKE/calls"'
+commands/switch/pointer bigger >/dev/null; commands/switch/pointer bigger >/dev/null
+check "each command keeps the other's line, and its own once" '[[ "$(lines | sort | tr "\n" "|")" == "cursor { xcursor-size 48; }|spawn-at-startup \"orca\"|" ]]'
+res=$(run commands/switch/pointer huge)
+check "a wrong word: 2" '[[ "$res" == 2\|* ]]'
+
+# Sticky keys, through keyd.
+reset
+cp "$TAKUMI_KEYD_CONF" "$t/harmony.conf"
+said=$(TAKUMI_CORE=1 commands/switch/sticky </dev/null; echo "rc=$?")
+check "in the Core: a note, the password asked through sudo -A, done ($said)" '[[ "$said" == "note Turning sticky keys on…"$'"'"'\n'"'"'"done Sticky keys on: tap Shift, Ctrl, Alt or Super, then the key"$'"'"'\n'"'"'"rc=0" ]] && grep -q "^sudo -A .*/switch/sticky --system on$" "$FAKE/calls"'
+k=$TAKUMI_KEYD_CONF
+check "Shift, Ctrl and Alt are oneshot, and lock on a second tap" 'grep -qx "leftshift = oneshot(shift)" "$k" && grep -qx "rightcontrol = oneshot(control)" "$k" && grep -qx "leftalt = oneshot(alt)" "$k" && grep -qx "leftshift = toggle(shift)" "$k" && grep -qx "leftalt = toggle(alt)" "$k"'
+check "Super stays Harmony's Command key, now oneshot" 'grep -qx "leftmeta = oneshot(cmd)" "$k" && grep -qx "rightmeta = oneshot(cmd)" "$k" && ! grep -q "layer(cmd)" "$k" && grep -qx "c = copy" "$k"'
+check "the block sits in [main], before Harmony's layer" '[[ "$(grep -n "^\[main\]$" "$k" | cut -d: -f1)" -lt "$(grep -n "^leftshift = oneshot" "$k" | cut -d: -f1)" && "$(grep -n "^leftshift = oneshot" "$k" | cut -d: -f1)" -lt "$(grep -n "^\[cmd:M\]$" "$k" | cut -d: -f1)" ]]'
+check "keyd reads it again" 'grep -qx "keyd reload" "$FAKE/calls"'
+cp "$k" "$t/once.conf"
+commands/switch/sticky on </dev/null >/dev/null
+check "on twice: the same file" 'cmp -s "$k" "$t/once.conf"'
+: > "$FAKE/calls"; touch "$FAKE/nopasswd"
+said=$(TAKUMI_CORE=1 commands/switch/sticky </dev/null; echo "rc=$?")
+check "with a sudoers rule, no password: off ($said)" '[[ "$said" == *"done Sticky keys off"*"rc=0" ]] && ! grep -q "^sudo -A" "$FAKE/calls"'
+check "off gives Harmony's file back exactly" 'cmp -s "$k" "$t/harmony.conf"'
+rm -f "$FAKE/nopasswd"; touch "$FAKE/refuse"
+said=$(TAKUMI_CORE=1 commands/switch/sticky on </dev/null; echo "rc=$?")
+check "no password: 3, and nothing changed ($said)" '[[ "$said" == *"Sticky keys need your password"*"rc=3" ]] && cmp -s "$k" "$t/harmony.conf"'
+rm -f "$FAKE/refuse" "$k"
+commands/switch/sticky on </dev/null >/dev/null
+check "Harmony off: a file of sticky keys alone, Super oneshot as plain Meta" '[[ "$(head -n 1 "$k")" == "# Made by takumi switch sticky"* ]] && grep -qx "leftmeta = oneshot(meta)" "$k" && grep -qx "\[ids\]" "$k"'
+commands/switch/sticky off </dev/null >/dev/null
+check "and off removes it" '[[ ! -e "$k" ]]'
+rm "$t/bin/keyd"
+res=$(run commands/switch/sticky on)
+check "no keyd: 4 ($res)" '[[ "$res" == "4|Sticky keys need keyd, which is not installed" ]]'
+log keyd; chmod +x "$t/bin/keyd"
+check "the root part refuses to run as you" '[[ "$(TAKUMI_KEYD_CONF= commands/switch/sticky --system on 2>&1; echo "|$?")" == *"runs as root"*"|1" ]]'
+
+# High contrast.
+reset
+mkdir -p "$HOME/.config/takumi"; echo ion > "$HOME/.config/takumi/theme"
+res=$(run commands/switch/contrast)
+check "a dark theme: Kuro ($res)" '[[ "$res" == "0|High contrast on" ]] && grep -qx "theme set kuro" "$FAKE/calls" && [[ "$(cat "$HOME/.local/state/takumi/contrast")" == ion ]]'
+check "apps take their high-contrast look" 'grep -qx "gsettings set org.gnome.desktop.a11y.interface high-contrast true" "$FAKE/calls"'
+res=$(run commands/switch/contrast)
+check "off: your theme comes back ($res)" '[[ "$res" == "0|High contrast off" ]] && grep -qx "theme set ion" "$FAKE/calls" && [[ ! -e "$HOME/.local/state/takumi/contrast" ]] && grep -qx "gsettings set org.gnome.desktop.a11y.interface high-contrast false" "$FAKE/calls"'
+reset; mkdir -p "$HOME/.config/takumi"; echo kiln > "$HOME/.config/takumi/theme"
+commands/switch/contrast on >/dev/null
+check "a light theme: Shiro" 'grep -qx "theme set shiro" "$FAKE/calls"'
+: > "$FAKE/calls"
+commands/switch/contrast on >/dev/null
+check "on again: no theme change" '! grep -q "^theme set" "$FAKE/calls"'
+reset; mkdir -p "$HOME/.config/takumi"; echo kuro > "$HOME/.config/takumi/theme"
+commands/switch/contrast >/dev/null
+check "Kuro with nothing kept: off goes to Ion" 'grep -qx "theme set ion" "$FAKE/calls"'
+res=$(run commands/switch/contrast loud)
+check "a wrong word: 2" '[[ "$res" == 2\|* ]]'
+
+# Where a person finds them: the Palette's rows, the keys, and niri reading the file.
+m=$(takumi --manifest)
+rows=$(jq -r '.[] | select(.group == "switch" and (.name == "reader" or .name == "pointer" or .name == "sticky" or .name == "contrast"))
+  | select(.words | split(" ") | index("accessibility")) | .title' <<< "$m" | sort | tr '\n' '|')
+check "every word accessibility finds the four rows ($rows)" '[[ "$rows" == "High contrast|Pointer size|Screen reader|Sticky keys|" ]]'
+rows=$(jq -r '.[] | select(.group == "switch") | select(.words | split(" ") | index("accessibility")) | .title' <<< "$m" | sort | tr '\n' '|')
+check "and zoom and animations with them ($rows)" '[[ "$rows" == "Animations|High contrast|Pointer size|Screen reader|Sticky keys|Zoom|" ]]'
+check "sticky keys asks in the Core, the rest just switch" '[[ "$(jq -r ".[] | select(.group == \"switch\" and .name == \"sticky\") | .converse" <<< "$m")" == true && "$(jq -r ".[] | select(.group == \"switch\" and .name == \"reader\") | .converse" <<< "$m")" == false ]]'
+d=config/niri/takumi/defaults.kdl
+check "niri reads the accessibility file, and a missing one is no error" 'grep -qx "include optional=true \"accessibility.kdl\"" "$d"'
+check "the screen reader keys work at the lock screen" '[[ $(grep -cE "^    Mod\+(Ctrl\+Return|F5) allow-when-locked=true .*\{ spawn \"takumi\" \"switch\" \"reader\"; \}$" "$d") -eq 2 ]]'
+check "Super+U opens the Core on accessibility" 'grep -qE "^    Mod\+U .*\"core\" \"search\" \"accessibility\"; \}$" "$d"'
+
+# Zoom: the shell draws it (shell/Core/Zoom.qml); takumi switch zoom asks it over IPC. The fake shell keeps a level.
+reset
+cat > "$t/bin/qs" <<'FAKE'
+#!/bin/sh
+printf 'qs %s\n' "$*" >> "$FAKE/calls"
+[ -e "$FAKE/no-shell" ] && exit 1
+l=$(cat "$FAKE/zoom" 2>/dev/null || echo off)
+case "$5 $6" in
+  "zoom toggle") [ "$l" = off ] && l=2 || l=off ;;
+  "zoom start") [ "$l" = off ] && l=2 ;;
+  "zoom hide") l=off ;;
+  "zoom closer") [ "$l" = off ] && l=2 || l=$((l + 1)) ;;
+  "zoom farther") [ "$l" = off ] || { [ "$l" -le 2 ] && l=off || l=$((l - 1)); } ;;
+esac
+echo "$l" > "$FAKE/zoom"
+[ "$l" = off ] && echo off || echo "on $l"
+FAKE
+chmod +x "$t/bin/qs"
+res=$(run commands/switch/zoom)
+check "off, the row turns it on ($res)" '[[ "$res" == "0|Zoom on, 2 times" ]] && grep -qx "qs -c takumi ipc call zoom toggle" "$FAKE/calls" && grep -q "^search|Zoom 2×|" "$FAKE/notices"'
+res=$(run commands/switch/zoom closer)
+check "closer ($res)" '[[ "$res" == "0|Zoom on, 3 times" ]]'
+res=$(run commands/switch/zoom); res2=$(run commands/switch/zoom off)
+check "on, the row turns it off; off stays off ($res, $res2)" '[[ "$res" == "0|Zoom off" && "$res2" == "0|Zoom off" ]]'
+touch "$FAKE/no-shell"
+res=$(run commands/switch/zoom on)
+check "no shell: 3, said ($res)" '[[ "$res" == "3|Zoom needs the desktop'"'"'s shell, which is not running" ]]'
+res=$(run commands/switch/zoom wide)
+check "a wrong word: 2" '[[ "$res" == 2\|* ]]'
+d=config/niri/takumi/defaults.kdl
+check "the keys: Super+Alt+= closer, - farther, 0 off, arrows move it" 'grep -qE "^    Mod\+Alt\+Equal .*\"zoom\" \"closer\"; \}$" "$d" && grep -qE "^    Mod\+Alt\+Minus .*\"zoom\" \"farther\"; \}$" "$d" && grep -qE "^    Mod\+Alt\+0 .*\"zoom\" \"hide\"; \}$" "$d" && [[ $(grep -cE "^    Mod\+Alt\+(Left|Right|Up|Down) +\{ spawn .*\"zoom\" \"pan\" \"(left|right|up|down)\"; \}$" "$d") -eq 4 ]]'
+z=shell/Core/Zoom.qml
+check "the shell answers each call the keys and the command make" 'for f in toggle:toggle start:turnOn hide:turnOff closer:closer farther:farther pan:pan state:said; do grep -qE "function ${f%%:*}\(.*\): string \{ return zoom\.${f#*:}\(" shell/shell.qml || return 1; done; grep -q "^    Zoom { id: zoom; niri: niriService }" shell/shell.qml'
+check "the strip takes no input and no keyboard, keeps its band for itself, and never shows itself" 'grep -q "mask: Region {}" "$z" && grep -q "keyboardFocus: WlrKeyboardFocus.None" "$z" && grep -q "exclusiveZone: band" "$z" && grep -q "Math.max(band, " "$z"'
+
+# Animations: niri's (motion.kdl) and the shell's (reduce_motion) together.
+reset
+mfile=$HOME/.config/niri/takumi/motion.kdl; toml=$HOME/.config/takumi/shell.toml
+mkdir -p "${toml%/*}"; printf 'font_size = 16\nreduce_motion = false\n' > "$toml"
+res=$(run commands/switch/motion)
+check "on, the row turns them off: niri and the shell ($res)" '[[ "$res" == "0|Animations off" ]] && grep -qx "animations { off; }" "$mfile" && grep -qx "reduce_motion = true" "$toml" && grep -qx "font_size = 16" "$toml" && [[ $(grep -c reduce_motion "$toml") -eq 1 ]]'
+res=$(run commands/switch/motion)
+check "off, back on: the file goes, the shell moves again ($res)" '[[ "$res" == "0|Animations on" && ! -e "$mfile" ]] && grep -qx "reduce_motion = false" "$toml" && grep -qx "font_size = 16" "$toml"'
+res=$(run commands/switch/motion on); res2=$(run commands/switch/motion slow)
+check "on twice is on; a wrong word: 2 ($res)" '[[ "$res" == "0|Animations on" && ! -e "$mfile" && "$res2" == 2\|* ]]'
+
+echo "   $(grep -c '^check ' "$0") accessibility checks against fake Orca, speech, gsettings, sudo and keyd"
+exit $status

@@ -1,0 +1,926 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Takumi Preview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* Tokens mirror shell/Look/Style.qml and Theme.qml. Tints are alphas of the foreground. */
+  :root {
+    --accent:#5ad7ff; --background:#0b0f14; --surface:#111821; --foreground:#d9e2ec;
+    --fg:217 226 236; --ac:90 215 255; --bg:11 15 20; --sf:17 24 33;
+    --red:#ff6b81; --yellow:#ffd166; --green:#7ee787; --cyan:#5ad7ff; --blue:#6ea8fe; --magenta:#c792ea; --muted:#5c6b7a;
+    --gap:10px; --r-window:12px; --r-core:18px; --core-h:38px; --row:44px;
+    --enter:160ms; --exit:110ms; --quick:120ms; --retint:1500ms; --morph:300ms;
+    --ease:cubic-bezier(.2,.8,.2,1); --spring:cubic-bezier(.3,1.25,.4,1);
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; overflow:hidden; background:var(--background); color:var(--foreground);
+    font-family:Inter, system-ui, sans-serif; font-optical-sizing:auto; font-size:13px; font-weight:450; -webkit-font-smoothing:antialiased; font-variant-numeric:tabular-nums; }
+  body { transition: background var(--retint), color var(--retint); }
+  .mono { font-family:"JetBrains Mono", ui-monospace, monospace; font-weight:400; }
+  .micro { font-size:10.5px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:rgb(var(--fg) / .45); }
+  svg.ico { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; flex:none; }
+
+  /* ---- Sky: drawn by the shell. A flat poster, recomputed from the palette and the clock. ---- */
+  #sky { position:fixed; inset:0; z-index:0; width:100%; height:100%; display:block; }
+
+  /* ---- The Strip ---- */
+  #strip-viewport { position:fixed; inset:0; z-index:1; overflow:hidden; transition: opacity 400ms var(--ease), scale 400ms var(--ease); }
+  body.locked #strip-viewport { opacity:0; scale:.985; pointer-events:none; }
+  #strip { position:absolute; top:var(--gap); bottom:calc(var(--core-h) + var(--gap) * 2); left:0; display:flex; gap:var(--gap); padding:0 var(--gap);
+    transition: transform 440ms var(--ease), scale 320ms var(--ease), bottom var(--enter) var(--ease); }
+  #strip.max { bottom:var(--gap); }
+  #strip-viewport.overview #strip { scale:.55; transform-origin:left center; }
+  .col { height:100%; flex:none; overflow:hidden; position:relative; border-radius:var(--r-window); background:var(--background); color:var(--foreground);
+    box-shadow:0 0 0 1px rgb(var(--fg) / .10), 0 14px 36px rgb(0 0 0 / .35);
+    transition: background var(--retint), color var(--retint), box-shadow var(--quick), width 280ms var(--ease); }
+  .col.focused { box-shadow:0 0 0 2px var(--accent), 0 14px 36px rgb(0 0 0 / .35); }
+  .dim { color:rgb(var(--fg) / .62); } .faint { color:rgb(var(--fg) / .40); }
+
+  /* App mocks. Apps draw their own chrome (niri has no title bars) and take the theme's palette. */
+  .ff { display:flex; flex-direction:column; height:100%; background:var(--surface); }
+  .ff-top { display:flex; align-items:center; gap:8px; padding:8px 10px; }
+  .ff-tab { display:flex; align-items:center; gap:8px; padding:6px 12px; border-radius:8px; font-size:12px; color:rgb(var(--fg) / .6); }
+  .ff-tab.on { background:var(--background); color:var(--foreground); }
+  .ff-tab .fav { width:12px; height:12px; }
+  .ff-url { flex:1; display:flex; align-items:center; gap:8px; margin-left:8px; padding:6px 12px; border-radius:8px; background:var(--background); font-size:12px; color:rgb(var(--fg) / .6); }
+  .ff-url b { color:var(--foreground); font-weight:500; }
+  .ff-page { flex:1; overflow:hidden; background:var(--background); position:relative; }
+  .site { padding:56px 48px 0; }
+  .site .em { width:44px; height:44px; margin-bottom:28px; }
+  .site h1 { font-size:46px; line-height:1.02; margin:0 0 16px; letter-spacing:-.035em; font-weight:650; max-width:13ch; }
+  .site h1 em { font-style:normal; color:var(--accent); }
+  .site p { color:rgb(var(--fg) / .62); max-width:46ch; line-height:1.6; font-size:14.5px; margin:0 0 26px; }
+  .site .cta { display:flex; gap:10px; }
+  .site .btn { padding:9px 16px; border-radius:9px; font-size:13px; font-weight:550; }
+  .site .btn.p { background:var(--foreground); color:var(--background); }
+  .site .btn.s { box-shadow:inset 0 0 0 1px rgb(var(--fg) / .2); }
+  .site .grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:1px; margin-top:46px; background:rgb(var(--fg) / .10); border-top:1px solid rgb(var(--fg) / .10); }
+  .site .grid div { background:var(--background); padding:18px 18px 22px; }
+  .site .grid b { display:block; font-size:13px; font-weight:600; margin:10px 0 4px; }
+  .site .grid span { font-size:12px; color:rgb(var(--fg) / .55); line-height:1.5; }
+  .site .grid .n { font-size:10.5px; font-weight:600; letter-spacing:.12em; color:var(--accent); }
+
+  .term { height:100%; padding:14px 16px; font-size:12.5px; line-height:1.6; white-space:pre; overflow:hidden; }
+  .term .p { color:var(--accent); } .term .g { color:var(--green); } .term .y { color:var(--yellow); } .term .b { color:var(--blue); } .term .m { color:rgb(var(--fg) / .42); } .term .h { color:var(--foreground); font-weight:500; }
+
+  .nv { display:flex; flex-direction:column; height:100%; }
+  .nv-tabs { display:flex; font-size:11.5px; background:var(--surface); }
+  .nv-tabs span { padding:6px 14px; color:rgb(var(--fg) / .5); } .nv-tabs span.on { background:var(--background); color:var(--foreground); box-shadow:inset 0 2px 0 var(--accent); }
+  .nv-buf { flex:1; padding:8px 0; font-size:12.5px; line-height:1.62; white-space:pre; overflow:hidden; }
+  .nv-buf .ln { display:block; padding-right:12px; }
+  .nv-buf .ln.cur { background:rgb(var(--fg) / .05); }
+  .nv-buf .no { display:inline-block; width:44px; padding-right:14px; text-align:right; color:rgb(var(--fg) / .28); }
+  .nv-buf .cur .no { color:var(--yellow); }
+  .nv-buf .gs { display:inline-block; width:3px; height:1.1em; vertical-align:-3px; margin-right:9px; background:transparent; }
+  .nv-buf .gs.a { background:var(--green); } .nv-buf .gs.c { background:var(--blue); }
+  .k { color:var(--magenta); } .s { color:var(--green); } .c { color:rgb(var(--fg) / .38); font-style:italic; } .f { color:var(--blue); } .v { color:var(--cyan); } .n { color:var(--yellow); } .o { color:var(--red); }
+  .nv-bar { display:flex; align-items:center; font-size:11px; background:var(--surface); color:rgb(var(--fg) / .62); }
+  .nv-bar .mode { background:var(--accent); color:var(--background); font-weight:600; padding:4px 10px; letter-spacing:.06em; }
+  .nv-bar span { padding:4px 10px; }
+
+  .fm { display:flex; height:100%; background:var(--background); }
+  .fm-side { width:168px; padding:14px 8px; background:var(--surface); }
+  .fm-side .micro { padding:6px 10px 6px; display:block; }
+  .fm-side div { display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:7px; font-size:12.5px; color:rgb(var(--fg) / .72); }
+  .fm-side div.on { background:rgb(var(--fg) / .08); color:var(--foreground); }
+  .fm-side div svg { color:rgb(var(--fg) / .5); width:15px; height:15px; }
+  .fm-main { flex:1; padding:16px 18px; }
+  .fm-crumb { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:550; margin-bottom:18px; }
+  .fm-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(92px, 1fr)); gap:14px 8px; }
+  .fm-item { display:flex; flex-direction:column; align-items:center; gap:8px; font-size:12px; padding:8px 4px; border-radius:8px; }
+  .fm-item.sel { background:rgb(var(--ac) / .14); }
+  .fm-item svg { width:52px; height:44px; }
+
+  .bt { height:100%; padding:10px 12px; font-size:11.5px; line-height:1.5; white-space:pre; overflow:hidden; }
+  .bt .box { color:rgb(var(--fg) / .3); } .bt .t { color:var(--accent); } .bt .g1 { color:var(--green); } .bt .g2 { color:var(--yellow); } .bt .g3 { color:var(--red); } .bt .m { color:rgb(var(--fg) / .45); }
+
+  /* ---- The Core: the only shell object. Rest: status. Notice: it widens. Open: it grows into the Palette. ---- */
+  #scrim { position:fixed; inset:0; z-index:8; background:rgb(var(--bg) / .30); opacity:0; pointer-events:none; transition:opacity var(--exit); }
+  #scrim.open { opacity:1; pointer-events:auto; transition:opacity var(--enter); }
+  #core { position:fixed; left:50%; bottom:var(--gap); translate:-50% 0; z-index:10; height:var(--core-h); width:var(--w, 420px); border-radius:var(--r-core);
+    overflow:hidden; display:grid; grid-template-rows:100%; grid-template-columns:100%;
+    background:rgb(var(--sf) / .94); box-shadow:0 0 0 1px rgb(var(--fg) / .11), inset 0 1px 0 rgb(var(--fg) / .07), 0 18px 48px rgb(0 0 0 / .45);
+    transition: width var(--morph) var(--spring), height var(--morph) var(--spring), border-radius var(--morph) var(--ease), bottom 360ms var(--ease), background var(--retint); }
+  #core.hidden, body.locked #core { bottom:calc(-1 * var(--core-h) - var(--gap) * 3); }
+  /* Light (shell/Core/Core.qml): a sheen down the top, a rim brightest at the top and the accent while lit, an aura. */
+  #core { background-image:linear-gradient(to bottom, rgb(var(--fg) / .05), transparent 120px); box-shadow:0 18px 48px rgb(0 0 0 / .45); }
+  #core::before { content:""; position:absolute; inset:0; border-radius:inherit; padding:1px; pointer-events:none; z-index:3;
+    background:linear-gradient(to bottom, rgb(var(--fg) / .24), rgb(var(--fg) / .09) 28px, rgb(var(--fg) / .05));
+    -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude; transition:background var(--enter); }
+  #core.open::before, #core.notice::before { background:linear-gradient(to bottom, rgb(var(--ac) / .6), rgb(var(--fg) / .09) 28px, rgb(var(--fg) / .05)); }
+  #core.open, #core.notice { box-shadow:0 18px 48px rgb(0 0 0 / .45), 0 0 56px rgb(var(--ac) / .26); }
+  /* One selection that glides from row to row, and rows that come in one after another as the Core opens. */
+  #rows { position:relative; }
+  #hl { position:absolute; left:10px; right:10px; height:var(--row); border-radius:11px; background:rgb(var(--ac) / .11); pointer-events:none;
+    transition:top 150ms var(--ease); z-index:0; }
+  #hl::before { content:""; position:absolute; left:0; top:12px; bottom:12px; width:2px; border-radius:1px; background:var(--accent); }
+  .row { z-index:1; }
+  #core.opening .row { animation:rowin var(--enter) var(--ease) both; }
+  @keyframes rowin { from { opacity:0; translate:0 8px; } }
+  #core.open { height:min(var(--open-h, 440px), calc(100vh - 40px)); width:min(640px, calc(100vw - 20px)); border-radius:22px; }
+  #core > * { grid-area:1/1; min-height:0; min-width:0; }
+  .face { display:flex; align-items:center; gap:16px; padding:0 16px 0 12px; height:var(--core-h); align-self:end; white-space:nowrap; transition:opacity var(--exit); }
+  #rest { opacity:1; } #core.open #rest, #core.notice #rest { opacity:0; pointer-events:none; transition:opacity 70ms; }
+  #notice { opacity:0; pointer-events:none; } #core.notice #notice { opacity:1; transition:opacity var(--enter) 80ms; }
+  .face .sep { width:1px; height:14px; background:rgb(var(--fg) / .12); }
+  .face .em { width:16px; height:16px; cursor:pointer; }
+  #ticks { display:flex; flex-direction:column; gap:3px; }
+  #ticks i { display:block; width:9px; height:2px; border-radius:1px; background:rgb(var(--fg) / .28); cursor:pointer; transition:background var(--quick), width var(--enter) var(--ease); }
+  #ticks i.on { background:var(--accent); width:13px; }
+  #map { display:flex; gap:3px; height:12px; }
+  #map i { display:block; border-radius:2.5px; background:rgb(var(--fg) / .2); transition:background var(--quick), width 280ms var(--ease); cursor:pointer; }
+  #map i.on { background:var(--accent); }
+  #map .empty { width:34px; background:none; box-shadow:inset 0 0 0 1px rgb(var(--fg) / .2); }
+  #clock { display:flex; align-items:baseline; gap:8px; } #clock b { font-weight:600; font-size:13.5px; letter-spacing:-.01em; }
+  #status { display:flex; align-items:center; gap:14px; color:rgb(var(--fg) / .65); }
+  #status svg.ico { width:15px; height:15px; }
+  .bat { display:flex; align-items:center; gap:6px; } .bat-ico { position:relative; width:19px; height:10px; }
+  .bat-ico .o { position:absolute; inset:0 2px 0 0; box-shadow:inset 0 0 0 1px rgb(var(--fg) / .6); border-radius:3px; }
+  .bat-ico .nub { position:absolute; right:0; top:3px; width:2px; height:4px; border-radius:1px; background:rgb(var(--fg) / .6); }
+  .bat-ico .f { position:absolute; left:2px; top:2px; height:6px; border-radius:1.5px; background:rgb(var(--fg) / .7); }
+  #notice .em { cursor:default; }
+  #notice .title { font-weight:600; }
+  #notice .dim { color:rgb(var(--fg) / .62); }
+  .row .sub.armed { color:var(--accent); }
+  #notice .meter { width:120px; height:4px; border-radius:2px; background:rgb(var(--fg) / .14); overflow:hidden; }
+  #notice .meter i { display:block; height:100%; background:var(--accent); border-radius:2px; transition:width 160ms var(--ease); }
+  #notice code { font-family:"JetBrains Mono", monospace; font-size:11.5px; color:var(--accent); }
+
+  #open { display:flex; flex-direction:column; height:100%; overflow:hidden; opacity:0; pointer-events:none; transition:opacity 90ms; }
+  #core.open #open { opacity:1; pointer-events:auto; transition:opacity var(--enter) 100ms; }
+  #rows { flex:1; min-height:0; overflow:auto; display:flex; flex-direction:column-reverse; padding:10px 10px 6px; gap:2px; scrollbar-width:none; }
+  #plan { display:none; align-items:center; gap:6px; flex-wrap:wrap; padding:0 18px 10px; }
+  #plan.show { display:flex; }
+  #plan code { font:400 11px "JetBrains Mono", monospace; color:var(--foreground); padding:3px 8px; border-radius:6px; box-shadow:inset 0 0 0 1px rgb(var(--ac) / .45); }
+  #plan .micro { margin-right:4px; color:var(--accent); }
+  #field { height:52px; margin:0 10px 10px; border-radius:13px; background:rgb(var(--fg) / .06); display:flex; align-items:center; padding:0 14px 0 12px; gap:12px; flex:none; }
+  #field .em { width:18px; height:18px; }
+  #q { flex:1; border:0; background:none; outline:none; color:var(--foreground); font:500 16.5px Inter, sans-serif; letter-spacing:-.012em; caret-color:var(--accent); }
+  #q::placeholder { color:rgb(var(--fg) / .38); }
+  #field kbd { font:500 10px Inter, sans-serif; letter-spacing:.08em; color:rgb(var(--fg) / .45); box-shadow:inset 0 0 0 1px rgb(var(--fg) / .16); border-radius:5px; padding:3px 6px; }
+  /* A question borrows the field (shell/Core/Open.qml): a lock for the emblem, a second input, Show. */
+  #field { position:relative; overflow:hidden; transition:box-shadow var(--quick); }
+  #field .ask-ico, #secret { display:none; }
+  #field.asking .em, #field.asking #q { display:none; }
+  #field.asking .ask-ico { display:flex; color:var(--accent); } #field.asking .ask-ico svg { width:18px; height:18px; }
+  #field.asking #secret { display:block; }
+  #secret { flex:1; min-width:0; border:0; background:none; outline:none; color:var(--foreground); font:500 16.5px Inter, sans-serif; letter-spacing:-.012em; caret-color:var(--accent); }
+  #secret.reveal { font-family:"JetBrains Mono", monospace; } #secret::placeholder { color:rgb(var(--fg) / .38); }
+  #field kbd.show { color:var(--accent); box-shadow:inset 0 0 0 1px rgb(var(--ac) / .45); cursor:pointer; }
+  #field.err { box-shadow:inset 0 0 0 1px var(--red); }
+  #field.shake { animation:shake 230ms; }
+  @keyframes shake { 22% { translate:-8px 0; } 52% { translate:8px 0; } 78% { translate:-5px 0; } }
+  #field.busy::after { content:""; position:absolute; bottom:0; left:-28%; width:28%; height:2px; border-radius:1px; background:var(--accent); animation:sweep 1100ms ease-in-out infinite; }
+  @keyframes sweep { to { left:100%; } }
+  .row.busy::before { opacity:1; animation:breathe 760ms ease-in-out infinite alternate; }
+  @keyframes breathe { to { opacity:.2; } }
+  .row .sub.busy { color:var(--accent); } .row .sub.err { color:var(--red); }
+  #netmark { display:flex; cursor:pointer; } #netmark.attn { color:var(--accent); }
+  /* A card in place of the rows: a code to scan, then what it is (shell/Core/Card.qml). */
+  .card { display:flex; align-items:center; gap:22px; height:196px; padding:0 18px 0 4px; }
+  .card .qr { width:168px; height:168px; border-radius:14px; background:#fff; display:flex; align-items:center; justify-content:center; flex:none; }
+  .card .qr svg { width:148px; height:148px; fill:#14161b; }
+  .card .info { display:flex; flex-direction:column; gap:6px; min-width:0; }
+  .card .kicker { color:var(--accent); } .card .t { font-size:16.5px; font-weight:600; } .card .d { color:rgb(var(--fg) / .62); }
+  .card .sec { font:400 14px "JetBrains Mono", monospace; margin-top:-2px; } .card .h { font-size:11.5px; color:rgb(var(--fg) / .40); }
+  @media (prefers-reduced-motion: reduce) { #field.busy::after, .row.busy::before { animation:none; } }
+  .row { position:relative; display:flex; align-items:center; height:var(--row); flex:none; padding:0 12px 0 12px; border-radius:11px; cursor:pointer; gap:12px; transition:background var(--quick), scale var(--quick) var(--ease); }
+  .row:hover:not(.cur) { background:rgb(var(--fg) / .05); } .row:active { scale:.975; }
+  .row::before { content:""; position:absolute; left:0; top:12px; bottom:12px; width:2px; border-radius:1px; background:var(--accent); opacity:0; transition:opacity var(--quick); }
+  .row.busy::before { opacity:1; }
+  .row .ico-slot { width:30px; height:30px; border-radius:8px; display:flex; align-items:center; justify-content:center; flex:none; color:rgb(var(--fg) / .72); background:rgb(var(--fg) / .06); }
+  .row.cur .ico-slot { color:var(--accent); background:rgb(var(--ac) / .14); }
+  .row .sw { display:flex; gap:2px; } .row .sw i { width:5px; height:14px; border-radius:1.5px; }
+  .row .txt { flex:1; min-width:0; } .row .t { font-size:14px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; letter-spacing:-.005em; }
+  .row .t .hl { color:var(--accent); }
+  .row .sub { font-size:11.5px; color:rgb(var(--fg) / .55); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:1px; }
+  .row .tr { display:flex; align-items:center; gap:10px; flex:none; }
+  .row .tier { font:600 10px Inter, sans-serif; letter-spacing:.08em; color:var(--accent); box-shadow:inset 0 0 0 1px rgb(var(--ac) / .45); border-radius:5px; padding:2px 5px; }
+  .row .key { font:500 11px Inter, sans-serif; color:rgb(var(--fg) / .32); width:22px; text-align:right; }
+  .empty { flex:1; display:flex; flex-direction:column; gap:6px; align-items:center; justify-content:center; color:rgb(var(--fg) / .42); }
+  .empty b { color:rgb(var(--fg) / .7); font-weight:550; }
+
+  /* ---- Lock: the sky, the time, the emblem. ---- */
+  #lock { position:fixed; inset:0; z-index:20; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:0; opacity:0; pointer-events:none; transition:opacity 500ms var(--ease); }
+  body.locked #lock { opacity:1; pointer-events:auto; }
+  #lock .em { width:30px; height:30px; margin-bottom:26px; }
+  #lock .time { font-size:clamp(72px, 15vh, 150px); font-weight:300; letter-spacing:-.055em; line-height:.9; font-feature-settings:"tnum" 1, "ss01" 1; }
+  #lock .date { margin-top:16px; }
+  #lock .pw { margin-top:44px; display:flex; align-items:center; gap:10px; height:44px; padding:0 20px; border-radius:22px; width:240px;
+    background:rgb(var(--sf) / .55); box-shadow:0 0 0 1px rgb(var(--fg) / .24); transition:box-shadow var(--quick); }
+  #lock .pw.typing { box-shadow:0 0 0 1px rgb(var(--ac) / .6), 0 0 36px rgb(var(--ac) / .26); }
+  #lock .pw i.on { animation:pop var(--enter) cubic-bezier(.3, 1.6, .5, 1) both; }
+  @keyframes pop { from { scale:.3; } }
+  .twinkle { animation:twinkle var(--p) ease-in-out var(--d) infinite alternate; }
+  @keyframes twinkle { from { opacity:.15; } to { opacity:.9; } }
+  #lock .pw i { width:7px; height:7px; border-radius:50%; background:var(--foreground); opacity:0; transition:opacity 90ms; }
+  #lock .pw i.on { opacity:.9; }
+  #lock .pw .hint { font-size:12px; color:rgb(var(--fg) / .45); }
+  #lock .who { margin-top:14px; }
+
+  /* Preview-only controls, not part of the OS */
+  #controls { position:fixed; top:12px; right:12px; z-index:40; border-radius:10px; background:rgb(18 18 22 / .84); color:#ddd; backdrop-filter:blur(14px); font-size:12px; }
+  #controls h4 { margin:0; padding:7px 12px; font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:#aaa; cursor:pointer; user-select:none; }
+  #controls .body { display:none; padding:0 12px 10px; width:260px; }
+  #controls.open .body { display:block; }
+  #controls label { display:flex; justify-content:space-between; align-items:center; margin:6px 0; }
+  #controls select, #controls button { font:12px Inter, sans-serif; background:#2a2a30; color:#eee; border:1px solid #444; border-radius:6px; padding:4px 8px; }
+  #controls .btns { display:flex; gap:6px; margin-top:6px; } #controls button { flex:1; cursor:pointer; }
+  #controls kbd { font-family:"JetBrains Mono", monospace; background:#111; border:1px solid #444; border-radius:4px; padding:1px 5px; font-size:11px; }
+  #controls .hint { color:#bbb; line-height:1.8; margin-top:8px; }
+  @media (max-width:720px) { #controls { display:none; } }
+</style>
+</head>
+<body>
+<svg id="sky" preserveAspectRatio="xMidYMid slice" viewBox="0 0 1600 1000" aria-hidden="true"></svg>
+<div id="strip-viewport"><div id="strip"></div></div>
+<div id="scrim"></div>
+
+<div id="core">
+  <div id="rest" class="face"></div>
+  <div id="notice" class="face"></div>
+  <div id="open">
+    <div id="rows"></div>
+    <div id="plan"></div>
+    <div id="field"><span class="em-slot"></span><span class="ask-ico"></span><input id="q" placeholder="Open, find, switch, change, or just say it" autocomplete="off" spellcheck="false"><input id="secret" type="password" autocomplete="off" spellcheck="false"><kbd id="fk">ESC</kbd></div>
+  </div>
+</div>
+
+<div id="lock">
+  <span class="em-slot"></span>
+  <div class="time" id="lock-time"></div>
+  <div class="date micro" id="lock-date"></div>
+  <div class="pw" id="pw"><span class="hint">Type your password</span></div>
+  <div class="who micro">takumi</div>
+</div>
+
+<div id="controls">
+  <h4>Preview ▾</h4>
+  <div class="body">
+    <div class="hint" id="live"></div>
+    <label>Theme <select id="c-theme"></select></label>
+    <label>Phase <select id="c-phase"><option value="auto">auto (clock)</option><option>dawn</option><option>day</option><option>dusk</option><option>night</option></select></label>
+    <div class="btns"><button id="c-open">Core</button><button id="c-lock">Lock</button><button id="c-vol">Notice</button></div>
+    <div class="hint">Wi-Fi: click its mark, or type <b>wifi</b>. The password for Attic: 5G is <b>starlight attic</b>; Hotel Lobby has a sign-in page.</div>
+    <div class="hint"><kbd>Ctrl</kbd>+<kbd>Space</kbd> Core · <kbd>L</kbd> lock · <kbd>V</kbd> volume<br><kbd>←</kbd><kbd>→</kbd> strip · <kbd>↑</kbd><kbd>↓</kbd> workspace · <kbd>R</kbd> width<br><kbd>M</kbd> maximize · <kbd>O</kbd> overview · <kbd>Q</kbd> close</div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let DATA, theme = "ion", phase = "day", phaseMode = "auto", P = null;
+const schedule = { dawn: 330, day: 480, dusk: 1050, night: 1230 };
+const nowMin = () => { const d = new Date(); return d.getHours()*60 + d.getMinutes(); };
+const clockPhase = () => { const m = nowMin(); return (m >= schedule.night || m < schedule.dawn) ? "night" : m >= schedule.dusk ? "dusk" : m >= schedule.day ? "day" : "dawn"; };
+const hex = h => [1,3,5].map(i => parseInt(h.slice(i, i+2), 16));
+const rgb = h => hex(h).join(" ");
+const luma = h => { const [r, g, b] = hex(h); return (0.2126*r + 0.7152*g + 0.0722*b) / 255; };
+const hashStr = s => { let h = 2166136261 >>> 0; s = String(s || "ion"); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h || 7; };
+const mix = (a, b, t) => { const A = hex(a), B = hex(b); return "#" + A.map((v, i) => Math.max(0, Math.min(255, Math.round(v + (B[i]-v)*t))).toString(16).padStart(2, "0")).join(""); };
+const rng = seed => () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+
+/* ---------- Icons: one stroke set, 24 grid, 1.6 stroke ---------- */
+const I = {
+  globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.5 3.8 5.5 3.8 9s-1.2 6.5-3.8 9c-2.6-2.5-3.8-5.5-3.8-9S9.4 5.5 12 3z"/>',
+  term:'<rect x="3" y="4.5" width="18" height="15" rx="3"/><path d="M7.5 9.5l3 2.5-3 2.5M12.5 15h4"/>',
+  folder:'<path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
+  edit:'<path d="M14.5 5.5l4 4L9 19H5v-4z"/><path d="M12.5 7.5l4 4"/>',
+  pulse:'<path d="M3 12h4l2.5-6 4 12 2.5-6H21"/>',
+  toggle:'<rect x="3" y="7" width="18" height="10" rx="5"/><circle cx="16" cy="12" r="2.6"/>',
+  cmd:'<path d="M9 9V6.5A2.5 2.5 0 1 0 6.5 9H9zm0 0h6m-6 0v6m6-6V6.5A2.5 2.5 0 1 1 17.5 9H15zm0 0v6m0 0h-6m6 0v2.5a2.5 2.5 0 1 0 2.5-2.5H15zm-6 0H6.5A2.5 2.5 0 1 0 9 17.5V15z"/>',
+  sun:'<circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4"/>',
+  quote:'<path d="M5 6.5h14a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1-1.5 1.5h-7l-4 3v-3H5A1.5 1.5 0 0 1 3.5 15V8A1.5 1.5 0 0 1 5 6.5z"/>',
+  eq:'<path d="M6 9.5h12M6 14.5h12"/>',
+  wifi:'<path d="M2.5 9a14 14 0 0 1 19 0M5.5 12.5a9.5 9.5 0 0 1 13 0M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r=".6" fill="currentColor"/>',
+  wifi2:'<path d="M5.5 12.5a9.5 9.5 0 0 1 13 0M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r=".6" fill="currentColor"/>',
+  wifi1:'<path d="M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r=".6" fill="currentColor"/>',
+  wifiOff:'<path d="M2.5 9a14 14 0 0 1 4.5-2.8M10.5 5.6A14 14 0 0 1 21.5 9M8.5 16a5 5 0 0 1 7 0M3 3l18 18"/>',
+  wired:'<path d="M5 5.5h14v9.5h-3.5v3h-7v-3H5zM9 9v2.5M12 9v2.5M15 9v2.5"/>',
+  qr:'<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2.5v2.5H14zM20 17.5V20h-2.5"/>',
+  vol:'<path d="M4 10v4h3.5L12 18V6L7.5 10H4z"/><path d="M15.5 9.5a3.5 3.5 0 0 1 0 5M18 7a7 7 0 0 1 0 10"/>',
+  home:'<path d="M4 11l8-6.5 8 6.5V19a1 1 0 0 1-1 1h-4.5v-5h-5v5H5a1 1 0 0 1-1-1z"/>',
+  clock:'<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  down:'<path d="M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 19.5h14"/>',
+  img:'<rect x="3.5" y="5" width="17" height="14" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M20.5 15.5l-5-5-9 8.5"/>',
+  doc:'<path d="M7 3.5h7l4 4V20a.5.5 0 0 1-.5.5h-10A.5.5 0 0 1 7 20z"/><path d="M14 3.5v4h4"/>',
+  power:'<path d="M12 3.5v8M7.2 6.2a7.5 7.5 0 1 0 9.6 0"/>',
+  restart:'<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4.5v4.2h-4.2"/>',
+  logout:'<path d="M14.5 4.5h3a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-3M10 16.5L5.5 12 10 7.5M5.5 12h10"/>',
+  lock:'<path d="M7 11h10a1.5 1.5 0 0 1 1.5 1.5v6A1.5 1.5 0 0 1 17 20H7a1.5 1.5 0 0 1-1.5-1.5v-6A1.5 1.5 0 0 1 7 11zM8.5 11V8a3.5 3.5 0 0 1 7 0v3"/>',
+  bt:'<path d="M7 7.5l10 9-5 4.5V3l5 4.5-10 9"/>',
+  moon:'<path d="M19 14.5A7.5 7.5 0 0 1 9.5 5a7.5 7.5 0 1 0 9.5 9.5z"/>',
+  mute:'<path d="M4 10v4h3.5L12 18V6L7.5 10H4zM16 10l4 4M20 10l-4 4"/>',
+};
+const icon = (n, cls = "ico") => `<svg class="${cls}" viewBox="0 0 24 24">${I[n] ?? I.cmd}</svg>`;
+
+/* ---------- Emblem: 匚, the box open to the right, with one lit column. The strip continues. ---------- */
+const emblem = (cls = "em") => `<svg class="${cls}" viewBox="0 0 64 64" aria-label="Takumi"><rect width="64" height="64" rx="18" fill="var(--accent)"/><text x="32" y="33.5" text-anchor="middle" dominant-baseline="central" font-family="'Noto Sans CJK JP','Hiragino Sans','PingFang SC','Noto Sans JP',sans-serif" font-weight="900" font-size="47" fill="var(--background)">匠</text></svg>`;
+
+/* ---------- Sky: procedural poster synced with shell/Look/Sky.js ---------- */
+function drawSky() {
+  const W = 1600, H = 1000, p = P, night = phase === "night", light = luma(p.background) > 0.45;
+  const seed = hashStr(theme || "ion"), r = rng(seed), archetype = seed % 6;
+  const HZ = 665 + Math.round((r() - 0.5) * 65);
+  const secPool = [p.cyan || p.accent, p.blue || p.accent, p.magenta || p.accent, p.yellow || p.accent, p.green || p.accent];
+  const secondary = secPool[seed % secPool.length], tertiary = secPool[(seed + 2) % secPool.length];
+  const glow = light ? ({ dawn:.22, day:.10, dusk:.24, night:.14 }[phase] || .12) : ({ dawn:.34, day:.16, dusk:.38, night:.10 }[phase] || .16);
+  const top = mix(mix(p.background, p.surface, light ? .65 : .7), secondary, light ? .08 : .14);
+  const mid = mix(p.surface, tertiary, light ? .06 : .10), hz = mix(p.background, p.accent, glow);
+  const seaTop = mix(p.background, secondary, light ? .08 : .10), seaBot = mix(p.background, p.surface, light ? .42 : .55);
+  const m = nowMin();
+  let t;
+  if (phaseMode !== "auto") t = { dawn:.12, day:.5, dusk:.86, night:.62 }[phase];
+  else if (!night) t = Math.min(1, Math.max(0, (m - schedule.dawn) / (schedule.night - schedule.dawn)));
+  else { const span = 1440 - schedule.night + schedule.dawn, into = (m - schedule.night + 1440) % 1440; t = into / span; }
+  const R = night ? 48 : 88, sx = 220 + t * 1160, sy = HZ - Math.sin(Math.PI * t) * (night ? 500 : 450) + (night ? 0 : 24);
+  const haloR = R * (night ? 3.1 : phase === "day" ? 2.5 : 3.5), haloA = light ? .22 : ({ dawn:.36, day:.19, dusk:.38, night:.25 }[phase] || .2);
+  const hzStop = (HZ / H).toFixed(4), midStop = ((HZ / H) * .52).toFixed(4);
+  let s = `<defs>
+    <radialGradient id="g-halo" gradientUnits="userSpaceOnUse" cx="${sx}" cy="${sy}" r="${haloR}" fx="${sx}" fy="${sy}"><stop offset="${(R*.55/haloR).toFixed(3)}" stop-color="${p.accent}" stop-opacity="${haloA}"/><stop offset=".5" stop-color="${secondary}" stop-opacity="${(haloA*.35).toFixed(3)}"/><stop offset="1" stop-color="${p.accent}" stop-opacity="0"/></radialGradient>
+    <radialGradient id="g-vig" gradientUnits="userSpaceOnUse" cx="${W/2}" cy="${H*.45}" r="${W*.92}"><stop offset="${(.34/.92).toFixed(3)}" stop-color="${p.background}" stop-opacity="0"/><stop offset="1" stop-color="${p.background}" stop-opacity="${light ? .14 : .46}"/></radialGradient>
+    <linearGradient id="g-sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${top}"/><stop offset="${midStop}" stop-color="${mid}"/><stop offset="${hzStop}" stop-color="${hz}"/><stop offset="${hzStop}" stop-color="${seaTop}"/><stop offset="1" stop-color="${seaBot}"/></linearGradient>
+    <clipPath id="above"><rect x="0" y="0" width="${W}" height="${HZ}"/></clipPath>
+    <mask id="crescent"><rect width="${W}" height="${H}" fill="#fff"/><circle cx="${sx + R*.42}" cy="${sy - R*.22}" r="${R*.92}" fill="#000"/></mask>
+    <filter id="grain" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency=".85" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
+  </defs>
+  <rect width="${W}" height="${H}" fill="url(#g-sky)"/>`;
+  if (night && !light) {
+    const starCount = 85 + (seed % 55);
+    for (let i = 0; i < starCount; i++) { const x = r()*W, y = r()*HZ*.9, a = .14 + r()*.55; s += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(.6 + r()*1.25).toFixed(2)}" fill="${p.foreground}" opacity="${a.toFixed(2)}"/>`; }
+    s += `<defs><linearGradient id="g-ray" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${p.accent}" stop-opacity="0"/><stop offset=".12" stop-color="${p.accent}"/><stop offset="1" stop-color="${p.accent}" stop-opacity="0"/></linearGradient></defs><g style="mix-blend-mode:screen">`;
+    for (const [ay, ady, aa, aseed] of [[110 + (seed % 60), 42, .13, seed + 3], [185 + (seed % 50), -36, .08, seed + 5]]) {
+      const ar = rng(aseed), p1 = ar() * 6.28, p2 = ar() * 6.28;
+      for (let x = -10; x <= W + 10; x += 4) { const u = Math.min(1, Math.max(0, x / W)), tp = ay + Math.sin(u * 3.1 + p1) * ady + Math.sin(u * 7.7 + p2) * ady * .3;
+        const h = 60 + 80 * (.5 + .5 * Math.sin(u * 9 + p2)) + ar() * 26, env = Math.sin(Math.PI * u) ** .7, a = aa * env * (.3 + .7 * (.5 + .5 * Math.sin(u * 15 + p1))) * (.75 + ar() * .25);
+        if (a >= .004) s += `<rect x="${x - 3}" y="${tp.toFixed(1)}" width="6" height="${h.toFixed(1)}" fill="url(#g-ray)" opacity="${a.toFixed(3)}"/>`; }
+    }
+    s += `</g>`;
+    const tr = rng(seed + 11); for (let i = 0; i < 16; i++) s += `<circle class="twinkle" style="--p:${(1200 + tr()*1800).toFixed(0)}ms;--d:${(tr()*3000).toFixed(0)}ms" cx="${(tr()*W).toFixed(1)}" cy="${(40 + tr()*HZ*.7).toFixed(1)}" r="${(.8 + tr()*.6).toFixed(2)}" fill="${p.foreground}"/>`;
+  }
+  const glowA = light ? .14 : ({ dawn:.22, day:.11, dusk:.25, night:.16 }[phase] || .14);
+  s += `<defs><linearGradient id="g-bloom" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${p.accent}" stop-opacity="0"/><stop offset=".6" stop-color="${secondary}" stop-opacity="${(glowA*.55).toFixed(3)}"/><stop offset="1" stop-color="${p.accent}" stop-opacity="${glowA}"/></linearGradient></defs><rect x="0" y="${HZ - 220}" width="${W}" height="220" fill="url(#g-bloom)"/>`;
+  s += `<g clip-path="url(#above)"><rect x="${sx - haloR}" y="${sy - haloR}" width="${haloR*2}" height="${haloR*2}" fill="url(#g-halo)"/>`;
+  if (archetype === 2 && !night) {
+    const deg = (-0.22 * 180 / Math.PI).toFixed(1);
+    s += `<g transform="rotate(${deg} ${sx} ${sy})"><ellipse cx="${sx}" cy="${sy}" rx="${(R*2.2).toFixed(1)}" ry="${(R*.52).toFixed(1)}" fill="none" stroke="${secondary}" stroke-opacity="${light ? .22 : .28}" stroke-width="1.6"/><ellipse cx="${sx}" cy="${sy}" rx="${(R*3.1).toFixed(1)}" ry="${(R*.78).toFixed(1)}" fill="none" stroke="${p.accent}" stroke-opacity="${light ? .16 : .2}" stroke-width="1.1"/></g>`;
+  }
+  s += night
+    ? `<circle cx="${sx}" cy="${sy}" r="${R}" fill="${p.accent}" mask="url(#crescent)"/>`
+    : `<circle cx="${sx}" cy="${sy}" r="${R}" fill="${p.accent}" opacity="${phase === "day" ? (light ? .85 : .92) : 1}"/>` + (seed % 4 === 0 ? `<circle cx="${(sx - R*.08).toFixed(1)}" cy="${(sy + R*.06).toFixed(1)}" r="${(R*.84).toFixed(1)}" fill="${mix(p.background, p.surface, .45)}" opacity="${light ? .22 : .72}"/>` : "");
+  s += `</g>`;
+
+  const far = mix(hz, p.foreground, light ? .12 : .11), midTone = light ? mix(p.background, p.foreground, .19) : mix(p.surface, p.foreground, .16);
+  const near = light ? mix(p.background, p.foreground, .28) : mix(p.background, p.surface, .65), rimCol = mix(p.accent, p.foreground, light ? .18 : .32);
+  const ridgePath = (peak, segs, fill, rim, rimOp) => {
+    const step = W / segs;
+    let pts = `0,${HZ + 2} 0,${(HZ - 14 - r()*peak*.4).toFixed(1)} `;
+    let topPts = `0,${(HZ - 14 - r()*peak*.4).toFixed(1)} `;
+    topPts = "";
+    const firstY = (HZ - 14 - r()*peak*.4).toFixed(1);
+    pts = `0,${HZ + 2} 0,${firstY} `; topPts = `M0 ${firstY}`;
+    for (let i = 1; i <= segs; i++) {
+      const x = (i * step).toFixed(1), flank = 1 - Math.abs(i / segs - .5) * .55, y = (HZ - (10 + r()*peak*flank)).toFixed(1);
+      pts += `${x},${y} `; topPts += ` L${x} ${y}`;
+    }
+    pts += `${W},${HZ + 2}`;
+    s += `<polygon points="${pts}" fill="${fill}"/>`;
+    if (rim) s += `<path d="${topPts}" fill="none" stroke="${rim}" stroke-opacity="${rimOp}" stroke-width="1.2"/>`;
+  };
+  const waterSurf = () => {
+    s += `<rect x="0" y="${HZ}" width="${W}" height="1.2" fill="${p.foreground}" opacity="${light ? .20 : .18}"/>`;
+    for (let k = 1; k <= 26; k++) { const u = k / 26, y = HZ + (H - HZ) * u ** 1.7; s += `<rect x="0" y="${y.toFixed(1)}" width="${W}" height="${(.7 + u*1.6).toFixed(2)}" fill="${p.foreground}" opacity="${((light ? .05 : .045) + u*.055).toFixed(3)}"/>`; }
+    if (sy < HZ + R) for (let k = 0; k < 16; k++) { const u = k / 16, y = HZ + 6 + (H - HZ) * .62 * u ** 1.5, w = R * (night ? 1.15 : 1.75) * (1 - u*.7) * (.55 + r()*.45);
+      s += `<rect x="${(sx - w/2 + (r()-.5)*14).toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${(2 + u*3).toFixed(1)}" rx="1.5" fill="${k % 3 === 0 ? secondary : p.accent}" opacity="${((night ? .38 : .55) * (1 - u)).toFixed(2)}"/>`; }
+  };
+
+  if (archetype === 0) {
+    const tower = (x, w, h, fill, lit) => {
+      s += `<rect x="${x}" y="${HZ - h}" width="${w}" height="${h}" fill="${fill}"/>`;
+      if (lit && h > 34 && r() < .45) { const sw = Math.max(3, Math.round(w * (.45 + r()*.25))), sh = 8 + Math.floor(r()*Math.min(30, h*.35)); s += `<rect x="${x + Math.round((w - sw)/2)}" y="${HZ - h - sh}" width="${sw}" height="${sh}" fill="${fill}"/>`; h += sh; }
+      if (lit && h > 50 && r() < .24) s += `<rect x="${x + Math.round(w/2) - 1}" y="${HZ - h - 26 - Math.floor(r()*24)}" width="1.6" height="${30 + Math.floor(r()*24)}" fill="${fill}"/>`;
+      if (lit && night && h > 24) for (let j = 0; j < 4; j++) if (r() < .36) s += `<rect x="${x + 2 + Math.floor(r()*Math.max(1, w - 5))}" y="${HZ - h + 6 + Math.floor(r()*Math.max(1, h - 12))}" width="2" height="3" fill="${j % 2 === 0 ? p.accent : secondary}" opacity=".82"/>`;
+    };
+    const cluster = (x0, x1, peak, fill, lit, gapMax) => { let x = x0; while (x < x1) { const w = 6 + Math.floor(r()*(lit ? 26 : 36)), u = (x - x0) / (x1 - x0), env = Math.sin(Math.PI * u) ** .8; tower(x, w, 6 + Math.floor((r()*.65 + .35) * peak * env), fill, lit); x += w + 2 + Math.floor(r()*gapMax) + (r() < .08 ? 18 : 0); } };
+    cluster(0, 620, 80, far, false, 4); cluster(1060, 1600, 62, far, false, 4);
+    cluster(30, 540, 165, near, true, 7); cluster(1180, 1570, 108, near, true, 7);
+    waterSurf();
+  } else if (archetype === 1) {
+    ridgePath(165, 22, far, secondary, light ? .18 : .22);
+    ridgePath(110, 16, midTone, p.accent, light ? .22 : .28);
+    ridgePath(58, 12, near, rimCol, .30);
+    waterSurf();
+  } else if (archetype === 2) {
+    ridgePath(72, 18, far, secondary, .22);
+    s += `<rect x="0" y="${HZ}" width="${W}" height="1.4" fill="${p.foreground}" opacity="${light ? .18 : .22}"/>`;
+    for (let k = 1; k <= 18; k++) {
+      const u = k / 18, cy = HZ + (H - HZ) * (u ** 1.55); let d = "";
+      for (let px = 0; px <= W; px += 40) { const y = (cy + Math.sin(px * .005 + k * .45 + seed) * (6 + u * 18)).toFixed(1); d += (px === 0 ? `M0 ${y}` : ` L${px} ${y}`); }
+      s += `<path d="${d}" fill="none" stroke="${k % 3 === 0 ? p.accent : p.foreground}" stroke-opacity="${k % 3 === 0 ? (.20 + u*.18).toFixed(2) : (.06 + u*.08).toFixed(2)}" stroke-width="${(.8 + u*1.4).toFixed(2)}"/>`;
+    }
+  } else if (archetype === 3) {
+    ridgePath(95, 14, far, secondary, .16);
+    s += `<path d="M0 ${HZ} L0 ${HZ - 36} Q210 ${HZ - 74} 420 ${HZ} Z" fill="${near}"/><path d="M1140 ${HZ} Q1360 ${HZ - 62} 1600 ${HZ - 28} L1600 ${HZ} Z" fill="${near}"/>`;
+    const px0 = 385 + Math.round(r() * 55), pierCol = mix(near, p.foreground, .25);
+    s += `<rect x="${px0}" y="${HZ - 14}" width="175" height="3" fill="${pierCol}"/>`;
+    for (let k = 0; k < 4; k++) s += `<rect x="${px0 + 28 + k*42}" y="${HZ - 14}" width="3" height="28" fill="${pierCol}"/>`;
+    s += `<circle cx="${px0 + 168}" cy="${HZ - 22}" r="3.6" fill="${p.accent}"/>`;
+    waterSurf();
+  } else if (archetype === 4) {
+    ridgePath(60, 12, far, secondary, .14);
+    for (let i = 0; i < 22; i++) {
+      const side = i % 2 === 0 ? 30 + r()*390 : W - 30 - r()*390, lean = (r() - .5)*60, th = 140 + r()*330, tw = 3 + r()*7;
+      s += `<path d="M${side.toFixed(1)} ${HZ + 4} Q${(side + lean*.45).toFixed(1)} ${(HZ - th*.52).toFixed(1)} ${(side + lean).toFixed(1)} ${(HZ - th).toFixed(1)}" fill="none" stroke="${i % 3 === 0 ? near : midTone}" stroke-width="${tw.toFixed(1)}"/>`;
+    }
+    for (let i = 0; i < 3; i++) {
+      const mry = HZ - 45 + i * 26;
+      s += `<rect x="0" y="${mry - 14}" width="${W}" height="28" fill="${p.surface}" opacity="${light ? .22 : .18}"/>`;
+    }
+    waterSurf();
+  } else {
+    for (let i = 0; i < 4; i++) {
+      const u0 = i / 3, baseY = HZ - 145 + u0 * 235, tilt = (i % 2 === 0 ? -1 : 1) * (24 + r()*18);
+      const hL = baseY + tilt, hR = baseY - tilt * .75 + (r() - .5) * 18, col = i === 0 ? far : i === 1 ? midTone : mix(p.background, p.surface, .36 + u0 * .38);
+      const c1 = hL + (tilt < 0 ? -52 : 34), c2 = hR + (tilt < 0 ? 44 : -48);
+      s += `<path d="M0 ${H} L0 ${hL.toFixed(1)} C${W*.34} ${c1.toFixed(1)} ${W*.67} ${c2.toFixed(1)} ${W} ${hR.toFixed(1)} L${W} ${H} Z" fill="${col}" stroke="${i === 1 ? p.accent : rimCol}" stroke-opacity="${(light ? .26 : .30 - u0*.04).toFixed(2)}" stroke-width="1.5"/>`;
+    }
+  }
+  s += `<rect width="${W}" height="${H}" fill="url(#g-vig)"/><rect width="${W}" height="${H}" filter="url(#grain)" opacity=".06"/>`;
+  $("#sky").innerHTML = s;
+}
+
+function applyTheme() {
+  P = DATA.themes[theme][phase]; const r = document.documentElement.style;
+  for (const k of ["accent","background","surface","foreground","muted","red","yellow","green","cyan","blue","magenta"]) r.setProperty("--" + k, P[k]);
+  r.setProperty("--fg", rgb(P.foreground)); r.setProperty("--ac", rgb(P.accent)); r.setProperty("--bg", rgb(P.background)); r.setProperty("--sf", rgb(P.surface));
+  $("#c-theme").value = theme; $("#c-phase").value = phaseMode === "auto" ? "auto" : phase;
+  $("#live").innerHTML = `<b>${theme}</b> / <b>${phase}</b> from themes/*/theme.toml`;
+  drawSky(); renderRest(); renderStrip(false);
+}
+const setTheme = t => { if (DATA.themes[t]) { theme = t; applyTheme(); notice("sun", "Theme " + cap(t)); } };
+const setPhase = p => { phaseMode = p; phase = p === "auto" ? clockPhase() : p; applyTheme(); notice("sun", cap(p), p === "auto" ? "the sky follows the clock" : "the sky follows your choice"); };
+
+/* ---------- Apps: dense, real, themed ---------- */
+const nvimCode = [
+  ['c','#!/usr/bin/env bash'],
+  ['', '<span class="k">:</span> &lt;&lt;<span class="s">'ABOUT'</span>'],
+  ['c','summary: Print the phase in effect: dawn, day, dusk or night'],
+  ['c','risk: 0'],
+  ['', '<span class="s">ABOUT</span>'],
+  ['', '<span class="k">set</span> -euo pipefail'],
+  ['', '<span class="v">cfg</span>=<span class="s">"$HOME/.config/takumi/phase.toml"</span>'],
+  ['', '<span class="f">get</span>() { <span class="k">sed</span> -n <span class="s">"s/^$1 *= *\\"\\(.*\\)\\"/\\1/p"</span> <span class="s">"$cfg"</span> | <span class="k">head</span> -1; }', 'c'],
+  ['', '<span class="v">override</span>=$(<span class="f">get</span> phase)'],
+  ['', '<span class="k">if</span> [[ -n <span class="s">"$override"</span> &amp;&amp; <span class="s">"$override"</span> != auto ]]; <span class="k">then</span>'],
+  ['', '  <span class="k">echo</span> <span class="s">"$override"</span>; <span class="k">exit</span> <span class="n">0</span>'],
+  ['', '<span class="k">fi</span>'],
+  ['', '<span class="f">tmin</span>() { <span class="k">local</span> <span class="v">h</span>=${1%%:*} <span class="v">m</span>=${1##*:}; <span class="k">echo</span> $((<span class="n">10</span>#$h * <span class="n">60</span> + <span class="n">10</span>#$m)); }', 'a'],
+  ['', '<span class="v">now</span>=$(<span class="f">tmin</span> <span class="s">"$(date +%H:%M)"</span>)', 'a'],
+  ['', '<span class="v">dawn</span>=$(<span class="f">tmin</span> <span class="s">"${TAKUMI_DAWN:-$(get dawn)}"</span>)'],
+  ['', '<span class="v">dusk</span>=$(<span class="f">tmin</span> <span class="s">"${TAKUMI_DUSK:-$(get dusk)}"</span>)'],
+  ['', '<span class="k">if</span>   (( now &gt;= night || now &lt; dawn )); <span class="k">then</span> <span class="k">echo</span> night', 'cur'],
+  ['', '<span class="k">elif</span> (( now &gt;= dusk )); <span class="k">then</span> <span class="k">echo</span> dusk'],
+  ['', '<span class="k">elif</span> (( now &gt;= day ));  <span class="k">then</span> <span class="k">echo</span> day'],
+  ['', '<span class="k">else</span> <span class="k">echo</span> dawn; <span class="k">fi</span>'],
+];
+const apps = {
+  firefox: { title:"Firefox", sub:"Web browser", icon:"globe", w:2/3, body:() => `<div class="ff">
+    <div class="ff-top"><div class="ff-tab on"><svg class="fav" viewBox="0 0 64 64"><path d="M10 10h40v8H18v28h32v8H10z" fill="var(--foreground)"/><rect x="25" y="24" width="10" height="16" fill="var(--accent)"/></svg>Takumi OS</div><div class="ff-tab">niri · wiki</div>
+      <div class="ff-url">${icon("globe")}<b>takumi.sh</b></div></div>
+    <div class="ff-page"><div class="site">${emblem()}<h1>The desktop that <em>moves with you.</em></h1>
+      <p>For people done with Mac and Windows. One surface for everything, a desk you scroll instead of tile, updates you can undo in one reboot, and a sky that keeps time.</p>
+      <div class="cta"><span class="btn p">Install Takumi</span><span class="btn s">Read the manual</span></div></div>
+      <div class="site"><div class="grid">
+        <div><span class="n">01</span><b>Atomic rooms</b><span>Every update boots a new root. Yesterday is one reboot away.</span></div>
+        <div><span class="n">02</span><b>The Strip</b><span>Windows sit side by side. Nothing overlaps, nothing shrinks.</span></div>
+        <div><span class="n">03</span><b>Intent</b><span>Say it. See the exact commands. Approve once.</span></div></div></div></div></div>` },
+  foot: { title:"foot", sub:"Terminal", icon:"term", w:1/3, body:() => `<div class="term mono"><span class="p">~</span> <span class="g">❯</span> tk room list
+<span class="m">ROOM            STATUS   KERNEL</span>
+<span class="h">20261108-0930</span>   <span class="g">current</span>  6.18.1
+20261001-1412   good     6.17.4
+20260914-2210   <span class="y">pinned</span>   6.17.2
+
+<span class="p">~</span> <span class="g">❯</span> tk theme set ember
+<span class="m">rendered ember/day → ~/.local/state</span>
+
+<span class="p">~</span> <span class="g">❯</span> tk intent "dim to 30 and mute"
+  takumi display brightness 30   <span class="m"># tier 0</span>
+  takumi audio volume mute       <span class="m"># tier 0</span>
+<span class="g">✓</span> ran 2 commands
+
+<span class="p">~</span> <span class="g">❯</span> <span class="m">▍</span></div>` },
+  notes: { title:"Neovim", sub:"takumi phase current", icon:"edit", w:1/2, body:() => `<div class="nv"><div class="nv-tabs mono"><span class="on">takumi phase current</span><span>Theme.qml</span><span>phase.toml</span></div>
+    <div class="nv-buf mono">${nvimCode.map(([cls, html, g], i) => `<span class="ln ${g === "cur" ? "cur" : ""}"><span class="gs ${g === "a" ? "a" : g === "c" ? "c" : ""}"></span><span class="no">${i+1}</span>${cls ? `<span class="${cls}">${html}</span>` : html}</span>`).join("")}</div>
+    <div class="nv-bar mono"><span class="mode">NORMAL</span><span>main</span><span>commands/phase/current</span><span style="margin-left:auto">bash</span><span>14:3</span></div></div>` },
+  files: { title:"Files", sub:"Home", icon:"folder", w:1/2, body:() => {
+      const fold = `<svg viewBox="0 0 52 44"><path d="M2 8a4 4 0 0 1 4-4h12l5 5h23a4 4 0 0 1 4 4v25a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4z" fill="var(--accent)" opacity=".85"/><path d="M2 15h48v23a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4z" fill="var(--accent)"/></svg>`;
+      const file = `<svg viewBox="0 0 52 44"><path d="M15 2h16l9 9v29a2 2 0 0 1-2 2H15a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" fill="rgb(var(--fg) / .18)"/><path d="M31 2v9h9" fill="rgb(var(--fg) / .3)"/></svg>`;
+      return `<div class="fm"><div class="fm-side"><span class="micro">Places</span><div class="on">${icon("home")}Home</div><div>${icon("clock")}Recent</div><div>${icon("down")}Downloads</div><div>${icon("img")}Pictures</div><div>${icon("doc")}Documents</div><span class="micro" style="margin-top:12px">Rooms</span><div>${icon("folder")}20261108-0930</div><div>${icon("folder")}20261001-1412</div></div>
+      <div class="fm-main"><div class="fm-crumb">${icon("home")}Home</div><div class="fm-grid">
+      ${["Design","Documents","Downloads","Music","Pictures","Projects"].map((n,i)=>`<div class="fm-item ${i===5?"sel":""}">${fold}${n}</div>`).join("")}
+      ${["notes.md","sky.svg","phase.toml"].map(n=>`<div class="fm-item">${file}${n}</div>`).join("")}</div></div></div>`; } },
+  btop: { title:"btop", sub:"System monitor", icon:"pulse", w:1/2, body:() => `<div class="bt mono"><span class="box">╭─</span><span class="t">cpu</span><span class="box">────────────────────────────────╮</span>
+<span class="box">│</span> <span class="g1">⣀⣀⣠⣤⣶⣿⣶⣤⣄⣀⣀⣀⣠⣤⣤⣄⣀</span><span class="g2">⣠⣶⣿</span><span class="g1">⣶⣤⣀⣀⣀</span>   12% <span class="box">│</span>
+<span class="box">╰────────────────────────────────────╯</span>
+<span class="box">╭─</span><span class="t">mem</span><span class="box">──────────────╮╭─</span><span class="t">net</span><span class="box">──────────────╮</span>
+<span class="box">│</span> used <span class="g2">██████</span><span class="m">░░░░</span> 6.1G<span class="box">││</span> ↓ <span class="g1">1.2 MB/s</span>       <span class="box">│</span>
+<span class="box">│</span> free <span class="g1">████</span><span class="m">░░░░░░</span> 9.9G<span class="box">││</span> ↑ <span class="g3">80 kB/s</span>        <span class="box">│</span>
+<span class="box">╰──────────────────╯╰──────────────────╯</span>
+<span class="m">  pid name          cpu   mem</span>
+ 2104 firefox       4.1%  1.9G
+ 2310 niri          0.8%   96M
+ 2402 qs            0.6%  140M
+ 2511 foot          0.1%   22M</div>` },
+};
+let workspaces = [["notes","foot"],["firefox","files"],[]], wsIndex = 0, focus = 0, maximized = false;
+const colWidths = {};
+const screenW = () => $("#strip-viewport").clientWidth;
+const widthOf = i => colWidths[i+":"+wsIndex] ?? apps[workspaces[wsIndex][i]].w;
+function renderStrip(rebuild = true) {
+  const strip = $("#strip"), cols = workspaces[wsIndex], avail = screenW() - 20;
+  strip.classList.toggle("max", maximized);
+  if (rebuild || strip.children.length !== cols.length) {
+    strip.innerHTML = "";
+    cols.forEach((id, i) => { const el = document.createElement("div"); el.className = "col"; el.innerHTML = apps[id].body(); el.onclick = () => { focus = i; renderStrip(false); }; strip.appendChild(el); });
+  }
+  [...strip.children].forEach((el, i) => { el.classList.toggle("focused", i === focus);
+    el.style.width = (maximized && i === focus ? avail : Math.round(widthOf(i) * (avail - 10*(cols.length-1)))) + "px"; });
+  requestAnimationFrame(() => {
+    const el = strip.children[focus]; let x = parseFloat(strip.dataset.x || 0);
+    if (el) { const left = el.offsetLeft, right = left + parseFloat(el.style.width), vw = screenW();
+      if (cols.length === 1) x = (vw - parseFloat(el.style.width))/2 - left; else if (right + x > vw - 10) x = vw - 10 - right; else if (left + x < 10) x = 10 - left; }
+    else x = 0;
+    strip.dataset.x = x; strip.style.transform = `translateX(${x}px)`;
+  });
+  $("#core").classList.toggle("hidden", maximized);
+  renderRest();
+}
+const gotoWs = i => { wsIndex = i; focus = 0; maximized = false; renderStrip(); };
+const openApp = id => { workspaces[wsIndex].push(id); focus = workspaces[wsIndex].length - 1; maximized = false; renderStrip(); };
+const closeFocused = () => { const c = workspaces[wsIndex]; if (!c.length) return; c.splice(focus, 1); focus = Math.max(0, Math.min(focus, c.length-1)); maximized = false; renderStrip(); };
+
+/* ---------- The Core at rest ---------- */
+let vol = 40, batt = 84;
+function renderRest() {
+  const cols = workspaces[wsIndex], d = new Date();
+  $("#rest").innerHTML = `${emblem()}
+    <div id="ticks">${workspaces.map((_, i) => `<i class="${i===wsIndex?"on":""}" data-ws="${i}"></i>`).join("")}</div>
+    <div id="map">${cols.length ? cols.map((id, i) => `<i class="${i===focus?"on":""}" data-col="${i}" style="width:${Math.max(6, Math.round(widthOf(i)*56))}px" title="${apps[id].title}"></i>`).join("") : `<i class="empty"></i>`}</div>
+    <div class="sep"></div>
+    <div id="clock"><span class="dim">${d.toLocaleDateString(undefined, { weekday:"short", day:"numeric", month:"short" })}</span><b>${d.toLocaleTimeString(undefined, { hour:"2-digit", minute:"2-digit", hour12:false })}</b></div>
+    <div class="sep"></div>
+    <div id="status"><canvas id="phase" width="28" height="28" style="width:14px;height:14px"></canvas>${wifiMark()}
+      <div class="bat"><div class="bat-ico"><div class="o"></div><div class="nub"></div><div class="f" style="width:${Math.round(13*batt/100)}px"></div></div><span>${batt}%</span></div>
+      ${icon("vol")}</div>`;
+  $("#rest .em").onclick = openCore;
+  $("#netmark").onclick = () => openCoreOn("wifi");
+  $("#rest").querySelectorAll("#ticks i").forEach(t => t.onclick = () => gotoWs(+t.dataset.ws));
+  $("#rest").querySelectorAll("#map i[data-col]").forEach(t => t.onclick = () => { focus = +t.dataset.col; maximized = false; renderStrip(false); });
+  drawPhase();
+  if (!$("#core").classList.contains("open") && !$("#core").classList.contains("notice")) sizeTo("#rest");
+}
+function drawPhase() {
+  const c = $("#phase"); if (!c || !P) return; const ctx = c.getContext("2d"), r = 14, lit = { dawn:.35, day:1, dusk:.55, night:.12 }[phase];
+  ctx.clearRect(0,0,28,28); ctx.lineWidth = 2.6; ctx.strokeStyle = P.accent; ctx.fillStyle = P.accent;
+  ctx.beginPath(); ctx.arc(r, r, r-2.5, 0, Math.PI*2); ctx.stroke();
+  ctx.save(); ctx.beginPath(); ctx.arc(r, r, r-2.5, 0, Math.PI*2); ctx.clip(); ctx.fillRect(0, 0, 28*lit, 28); ctx.restore();
+}
+function sizeTo(sel) { const f = $(sel); f.style.width = "max-content"; const w = f.scrollWidth; f.style.width = ""; document.documentElement.style.setProperty("--w", w + "px"); $("#core").style.setProperty("--w", w + "px"); }
+
+/* ---------- Notices: the Core widens, says one thing, settles back (shell/Core/Notice.qml) ---------- */
+let noticeTimer;
+function notice(ic, title, detail = "", meter = null, ms = 1800) {
+  const core = $("#core"); if (core.classList.contains("open")) return;
+  $("#notice").innerHTML = `${icon(ic)}<span class="title">${title}</span>${detail ? `<span class="dim">${detail}</span>` : ""}${meter != null ? `<div class="meter"><i style="width:${meter}%"></i></div><span class="dim" style="width:26px;text-align:right">${meter}</span>` : ""}`;
+  core.classList.add("notice"); sizeTo("#notice");
+  clearTimeout(noticeTimer); noticeTimer = setTimeout(() => { core.classList.remove("notice"); sizeTo("#rest"); }, ms);
+}
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+
+/* ---------- The Core, open: the same providers, words and rules as shell/Core/Providers.qml ---------- */
+const APPS = Object.entries(apps).map(([id, a]) => ({ id:"app:"+id, title:a.title, sub:a.sub, icon:a.icon, kind:"App", score:1, run:() => openApp(id) }));
+let rows = [], cur = 0, armed = ""; const hist = {}, installed = new Set();
+// A question (a Wi-Fi password) and a card (sharing a network) borrow the Core, as in shell/Core/Open.qml.
+let ask = null, joining = false, revealPw = false, card = null, cardReveal = false, lastHl = null;
+function plan(q) {
+  const l = q.toLowerCase(), out = [];
+  if (/blue/.test(l)) out.push("switch bluetooth"); if (/wifi|wi-fi/.test(l)) out.push("switch wifi"); if (/night ?light|warm/.test(l)) out.push("switch nightlight");
+  if (/dim|bright/.test(l)) out.push("display brightness " + ((l.match(/(\d+)/)||[])[1] ?? "30"));
+  if (/mute|quiet|volume/.test(l)) out.push("audio volume " + (/mute|quiet/.test(l) ? "mute" : ((l.match(/(\d+)/)||[])[1] ?? "20")));
+  const m = l.match(/theme (\w+)/); if (m && DATA.themes[m[1]]) out.push("theme set " + m[1]);
+  if (/dark|night mode/.test(l)) out.push("phase set night");
+  return out;
+}
+// The first week's rows, shown in the empty Palette (takumi palette index start).
+function startRows() {
+  return [
+    !net.current && { id:"start:wifi", title:"Connect to Wi-Fi", sub:"Pick a network and type its password", icon:"wifi", kind:"Start", score:1.01, run:() => openCoreWith("wifi") },
+    { id:"start:look", title:"Pick a look", sub:"Fifty-five themes; the sky follows your clock", icon:"sun", kind:"Start", score:1, run:() => openCoreWith("theme") },
+    { id:"start:keys", title:"Keys you already know", sub:"Super works like Command: copy, paste, undo, in every app", icon:"cmd", kind:"Start", score:.99, run:() => openCoreWith("keys") },
+    { id:"start:apps", title:"Get your apps", sub:"Type an app's name: Spotify, Zoom, Steam, VS Code", icon:"down", kind:"Start", score:.98, run:() => openCoreWith("get") },
+    { id:"start:assistant", title:"Set up the assistant", sub:"It runs on this computer and asks before it acts", icon:"quote", kind:"Start", score:.97, interactive:true, run:() => notice("term", "Set up the assistant", "opens a terminal: it downloads a model") },
+  ].filter(r => r && !hist[r.id]);
+}
+// Every word of the query, anywhere in the row, hyphens ignored (the filter in takumi palette index).
+const wordsOf = q => q.toLowerCase().replace(/-/g, "").split(/\s+/).filter(Boolean);
+const matches = (q, ...s) => { const t = s.join(" ").toLowerCase().replace(/-/g, ""); return wordsOf(q).every(w => t.includes(w)); };
+function providers(q) {
+  const l = q.trim().toLowerCase(), out = [];
+  const has = (...s) => matches(q, ...s);
+  for (const a of APPS) if (has(a.title, a.sub)) out.push(a);
+  workspaces.forEach((ws, wi) => ws.forEach((id, i) => { const a = apps[id]; if (has(a.title, a.sub, "window"))
+    out.push({ id:"win:"+wi+i, title:a.title, sub:`${a.sub} · workspace ${wi+1}`, icon:a.icon, kind:"Window", score:1, run:() => { wsIndex=wi; focus=i; maximized=false; renderStrip(); } }); }));
+  // Commands in plain words; ones that need an argument are reached through their own rows, and Wi-Fi
+  // has rows of its own that know whether it is on.
+  for (const c of DATA.manifest) {
+    if (c.usage.includes("<") || ["migrate","notice","palette","greeter","session","wifi"].includes(c.group) || (c.group === "switch" && c.name === "wifi")) continue;
+    const name = c.name === "main" ? c.group : c.group+" "+c.name, title = c.title || "takumi "+name;
+    const sub = c.title ? `${c.summary} · takumi ${name}` : c.summary;
+    if (!has(title, sub, c.words)) continue;
+    out.push({ id:"cmd:"+name, title, sub, keywords:c.words, risk:c.risk, interactive:c.interactive, icon:c.glyph || "cmd",
+      kind: c.group === "power" ? "Power" : c.group === "switch" ? "Setting" : "Command", score:.8, run:() => runCmd(name, c, title) });
+  }
+  for (const k of DATA.keys) if (has(k.title, k.subtitle, k.keywords)) out.push({ id:"key:"+k.subtitle, title:k.title, sub:k.subtitle, keywords:k.keywords, icon:"cmd", kind:"Key", score:.45, run:() => {} });
+  for (const g of DATA.shelf) if (!installed.has(g.title) && has(g.title, g.subtitle, g.keywords))
+    out.push({ id:"get:"+g.title, title:g.title, sub:g.subtitle, keywords:g.keywords, risk:1, icon:"down", kind:"Get", score:.49, run:() => getApp(g.title.replace(/^Get /, "")) });
+  for (const t of Object.keys(DATA.themes)) if (has("theme", t)) out.push({ id:"theme:"+t, title:"Theme "+t, sub:"Switch theme, keep the phase", swatch:t, kind:"Theme", score:.7, run:() => setTheme(t) });
+  for (const p of ["dawn","day","dusk","night","auto"]) if (has("phase", p)) out.push({ id:"phase:"+p, title:"Phase "+p, sub: p==="auto" ? "Follow the clock" : "Pin the "+p+" sky", icon:"sun", kind:"Theme", score:.7, run:() => setPhase(p) });
+  out.push(...wifiRows(q));
+  if (/^[\d\s().+\-*/%^]+$/.test(q) && /\d/.test(q)) { try { const r = Function('"use strict";return ('+q.replace(/\^/g,"**")+')')(); if (Number.isFinite(r)) out.unshift({ id:"calc", title:String(r), sub:"Copy to clipboard", icon:"eq", kind:"Calc", score:1.1, run:() => notice("eq", "Copied", String(r)) }); } catch(e){} }
+  if (q.trim().includes(" ")) out.push({ id:"intent", title:q.trim(), sub:"Ask Intent", icon:"quote", kind:"Intent", score:.3, run:() => intent(q) });
+  // Boosts, as in Providers.qml: the title or a word of it starts with the query (.5), a search word does
+  // (.45), every word of a longer query is in the title (.4), the title holds it (.3). Intent's row is the
+  // query itself and takes none; steady rows (networks) ignore how often you picked them.
+  const qw = wordsOf(q);
+  for (const r of out) { const t = (r.title || "").toLowerCase(), tn = t.replace(/-/g, ""), words = (r.keywords || "").toLowerCase().split(/\s+/);
+    r.score += r.kind === "Intent" ? 0 : (t.startsWith(l) || t.split(/[\s·]+/).some(w => w.startsWith(l))) ? .5 : words.some(w => w && w.startsWith(l)) ? .45
+             : qw.length > 1 && qw.every(w => tn.includes(w)) ? .4 : t.includes(l) ? .3 : 0;
+    if (!r.steady) r.score += (hist[r.id]||0)*.05; }
+  return out.sort((a,b) => b.score-a.score).slice(0, 40);
+}
+function runCmd(name, c, title) {
+  if (c.interactive) return notice("term", title, "opens a terminal: it asks questions");
+  if (name === "theme list") return notice("sun", Object.keys(DATA.themes).length + " themes", "ion · ember · kiln · void · …");
+  if (name === "phase current") return notice("sun", cap(phase));
+  if (name === "version") return notice("cmd", "Takumi 0.1.0");
+  if (name === "lock") return lock();
+  if (c.group === "power") return notice(c.glyph, title, "in the preview, nothing happens");
+  if (c.group === "switch") return notice(c.glyph, title + " toggled");
+  notice("cmd", title);
+}
+function getApp(name) {
+  notice("down", "Getting " + name, "keep working; it arrives in the background", null, 2400);
+  setTimeout(() => { installed.add("Get " + name); notice("down", name + " is ready", "find it in the Core", null, 2600); }, 2800);
+}
+function intent(q) {
+  const p = plan(q);
+  for (const c of p) { const m = c.match(/^theme set (\w+)/); if (m) { theme = m[1]; } if (c === "phase set night") { phaseMode = "night"; phase = "night"; } }
+  if (p.some(c => /^(theme|phase)/.test(c))) applyTheme();
+  setTimeout(() => notice("quote", p.length ? `Ran ${p.length} command${p.length > 1 ? "s" : ""}` : "Nothing in the manifest does that"), 320);
+}
+
+/* ---------- Wi-Fi: the rows of takumi palette index wifi, the steps of takumi wifi join (docs/wifi.md) ---------- */
+// Demo networks. The share codes in data.json were made by qrencode in the VM, as the shell makes them.
+const net = {
+  on: true, current: "Takumi Home", portal: false,
+  list: [
+    { name:"Takumi Home", sig:82, kind:"psk", saved:true, pw:"lantern:42 moss" },
+    { name:"Corner Café", sig:71, kind:"open" },
+    { name:"Attic: 5G", sig:52, kind:"sae", pw:"starlight attic" },
+    { name:"Hotel Lobby", sig:38, kind:"open", portal:true },
+    { name:"eduroam", sig:21, kind:"enterprise" },
+  ],
+};
+const bars = s => s >= 67 ? 3 : s >= 34 ? 2 : 1;
+const signal = (b, cls = "ico") => b >= 3 ? icon("wifi", cls) : `<svg class="${cls}" viewBox="0 0 24 24"><g opacity=".22">${I.wifi}</g>${I[b === 2 ? "wifi2" : "wifi1"]}</svg>`;
+const here = () => net.list.find(n => n.name === net.current);
+function wifiMark() {
+  const n = net.on && here();
+  return `<span id="netmark" class="${net.portal ? "attn" : ""}" title="Wi-Fi">${n ? signal(bars(n.sig)) : icon("wifiOff")}</span>`;
+}
+function wifiRows(q) {
+  const l = q.trim().toLowerCase(), out = [];
+  const topic = l.length >= 3 && ["wifi", "wi-fi", "wireless", "network", "networks", "internet"].some(w => w.startsWith(l));
+  if (!net.on) return [{ id:"wifi:on", title:"Turn Wi-Fi on", sub:"Wi-Fi is off", icon:"wifi", kind:"Setting", keywords:"wifi wi-fi wireless network internet radio on", score:.95*.9,
+    run:() => { net.on = true; notice("wifi", "Wi-Fi on"); renderRest(); } }].filter(r => matches(q, r.title, r.sub, r.keywords));
+  const order = n => n.name === net.current ? 0 : n.saved ? 1 : 2;
+  for (const n of [...net.list].sort((a, b) => order(a) - order(b) || b.sig - a.sig)) {
+    if (!topic && !(l.length >= 3 && n.name.toLowerCase().includes(l))) continue;
+    const on = n.name === net.current;
+    const row = { id:"wifi:"+n.name, title:n.name, bars:bars(n.sig), kind:"Wi-Fi", steady:true, keywords:"wifi wi-fi wireless network internet join connect",
+      score:(on ? .99 : n.saved ? .9 + n.sig/1e4 : .8 + n.sig/1e4) * .9 };
+    if (on) Object.assign(row, net.portal ? { sub:"Connected · sign in to use the internet", run:() => signIn() } : { sub:"Connected · Enter to share", card:true });
+    else Object.assign(row, { sub:(n.saved ? "Saved" : n.kind === "enterprise" ? "Work or school sign-in" : n.kind === "open" ? "Open, no password" : "Needs a password") + (n.sig < 25 ? " · weak signal" : ""),
+      converse:true, net:n });
+    out.push(row);
+  }
+  out.push({ id:"wifi:hidden", title:"Join a hidden network", sub:"Type its name, then its password", icon:"wifi", kind:"Wi-Fi", keywords:"wifi wi-fi wireless hidden other network ssid join", converse:true, hidden:true, score:.5*.9 });
+  out.push({ id:"wifi:off", title:"Turn Wi-Fi off", sub:"Wi-Fi is on", icon:"wifiOff", kind:"Setting", keywords:"wifi wi-fi wireless radio off airplane", score:.45*.9,
+    run:() => { net.on = false; net.current = ""; net.portal = false; notice("wifiOff", "Wi-Fi off"); renderRest(); } });
+  if (!topic && net.current) {
+    out.push({ id:"wifi:share", title:"Share Wi-Fi", sub:"A code a phone camera can scan, and the password", icon:"qr", kind:"Wi-Fi", keywords:"share password qr code guest phone", card:true, score:.6*.9 });
+    out.push({ id:"wifi:signin", title:"Open the Wi-Fi sign-in page", sub:"For hotel, café and airport networks", icon:"globe", kind:"Wi-Fi", keywords:"sign in signin login hotel cafe café airport portal captive", score:.6*.9, run:() => signIn() });
+  }
+  for (const n of net.list.filter(x => x.saved)) out.push({ id:"wifi-forget:"+n.name, title:"Forget "+n.name, sub:"Removes it from this computer", icon:"wifiOff", kind:"Wi-Fi", keywords:"forget remove delete saved", risk:1, score:.5*.9,
+    run:() => { n.saved = false; if (net.current === n.name) { net.current = ""; net.portal = false; } notice("wifiOff", "Forgot " + n.name, "it asks for the password next time"); renderRest(); } });
+  return out.filter(r => matches(q, r.title, r.sub, r.keywords));
+}
+function signIn() { notice("globe", "Sign in to " + (net.current || "this network"), "the sign-in page opens in your browser", null, 2600); }
+
+// The preview plays the conversation the real join command holds through lib/core.sh: it asks only
+// for what the network needs.
+function beginJoin(r) {
+  if (r.hidden) return askFor(r, "", true, "name", "Type the network's name, then press Enter");
+  const n = r.net;
+  if (["psk", "sae"].includes(n.kind) && !n.saved) return askFor(r, n.name, false, "password", "Type the password, then press Enter");
+  ask = { row:r, name:n.name, hidden:false, need:"none", note:"", tone:"" };
+  startJoin("");
+}
+function askFor(row, name, hidden, need, note) {
+  ask = { row, name, hidden, need, note, tone:"" }; revealPw = false; $("#secret").value = "";
+  $("#field").classList.remove("err"); renderField(); renderRows();
+  setTimeout(() => $("#secret").focus(), 30);
+}
+function renderField() {
+  const f = $("#field"), k = $("#fk"), s = $("#secret"), pw = !!ask && ask.need === "password" && !joining;
+  f.classList.toggle("asking", !!ask); f.classList.toggle("busy", joining);
+  f.querySelector(".ask-ico").innerHTML = ask ? icon(ask.need === "password" ? "lock" : "wifi") : "";
+  s.type = ask && ask.need === "password" && !revealPw ? "password" : "text"; s.classList.toggle("reveal", revealPw);
+  s.readOnly = joining;
+  s.placeholder = !ask ? "" : joining ? `Joining ${ask.name}…` : ask.need === "name" ? "Network name" : ask.need === "password" ? "Password for " + ask.name : "Press Enter to try again";
+  k.textContent = pw ? (revealPw ? "HIDE" : "SHOW") : "ESC"; k.classList.toggle("show", pw);
+}
+function leaveAsk() { ask = null; joining = false; $("#secret").value = ""; $("#field").classList.remove("err"); renderField(); renderRows(); setTimeout(() => $("#q").focus(), 30); }
+function submitAsk() {
+  if (joining || !ask) return;
+  const v = $("#secret").value;
+  if (ask.need === "name") { const n = v.trim(); if (!n) return; return askFor({ ...ask.row, title:n }, n, true, "password", "Type its password, or press Enter if it has none"); }
+  if (ask.need === "password" && !v && !ask.hidden) return;
+  startJoin(v);
+}
+function startJoin(pw) {
+  const n = net.list.find(x => x.name === ask.name), wrong = !!(n && n.pw && !n.saved && pw !== n.pw);
+  joining = true; ask = { ...ask, note:`Joining ${ask.name}…`, tone:"busy" };
+  $("#field").classList.remove("err"); renderField(); renderRows();
+  setTimeout(() => {
+    joining = false;
+    const name = ask.name, open = $("#core").classList.contains("open");
+    let fail = "";
+    if (n && n.kind === "enterprise") fail = "Work and school networks are not in the Core yet";
+    else if (n && n.kind === "psk" && pw && (pw.length < 8 || pw.length > 63)) fail = "Wi-Fi passwords have 8 to 63 characters";
+    else if (wrong) fail = "That password did not work";
+    if (fail && !open) { ask = null; renderField(); return notice("wifiOff", "Could not join " + name, fail); }
+    if (fail) {
+      ask = { ...ask, need: pw ? "password" : ask.need, note:fail, tone:"error" }; renderField(); renderRows();
+      if (pw) { const f = $("#field"); f.classList.add("err"); f.classList.remove("shake"); void f.offsetWidth; f.classList.add("shake"); $("#secret").select(); }
+      return;
+    }
+    if (n) n.saved = true; else net.list.push({ name, sig:58, kind: pw ? "psk" : "open", saved:true, pw });
+    net.current = name; net.portal = false;
+    leaveAsk(); closeCore(); notice("wifi", "Connected to " + name); renderRest();
+    // The shell sees the sign-in page within seconds and opens it once (Sources/Poll.qml).
+    if (n && n.portal) setTimeout(() => { net.portal = true; renderRest(); notice("globe", "Sign in to " + name, "the sign-in page is opening", null, 2600); }, 2400);
+  }, wrong ? 2600 : 1500);
+}
+const escHtml = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+function openCard() {
+  const name = net.current, c = DATA.wifi?.[name], secret = c ? c.secret : (here()?.pw ?? "");
+  card = { kicker:"Share Wi-Fi", title:name, qr: c?.qr ?? [], secret, secretLabel: secret ? "Password" : "",
+    detail: !c ? "In the preview, only the demo networks have a code" : secret ? "Point a phone's camera at the code to join" : "An open network, no password. Point a phone's camera at the code to join" };
+  cardReveal = false; renderRows();
+}
+function cardHtml(c) {
+  const n = c.qr.length, path = c.qr.map((row, y) => [...row].map((v, x) => v === "1" ? `M${x} ${y}h1v1h-1z` : "").join("")).join("");
+  const qr = n ? `<div class="qr"><svg viewBox="0 0 ${n} ${n}" shape-rendering="crispEdges"><path d="${path}"/></svg></div>` : "";
+  const sec = c.secret ? `<span class="micro">${c.secretLabel}</span><div class="sec">${cardReveal ? escHtml(c.secret) : "••••••••••"}</div><div class="h">${cardReveal ? "Enter hides it" : "Enter shows it"}</div>` : "";
+  return `<div class="card">${qr}<div class="info"><span class="micro kicker">${c.kicker}</span><div class="t">${escHtml(c.title)}</div><div class="d">${c.detail}</div>${sec}</div></div>`;
+}
+
+const hl = (t, q) => { const i = t.toLowerCase().indexOf(q.toLowerCase()); return i < 0 || !q ? t : t.slice(0, i) + `<span class="hl">${t.slice(i, i + q.length)}</span>` + t.slice(i + q.length); };
+const swatch = t => { const p = DATA.themes[t][phase]; return `<div class="sw">${[p.background, p.surface, p.accent, p.foreground].map(c => `<i style="background:${c}"></i>`).join("")}</div>`; };
+function renderRows() {
+  const el = $("#rows"), q = $("#q").value.trim();
+  if (card) { el.innerHTML = cardHtml(card); $("#plan").className = ""; $("#plan").innerHTML = ""; $("#core").style.setProperty("--open-h", (16 + 196 + 62) + "px"); return; }
+  const shown = ask ? [{ ...ask.row, sub:ask.note, tone:ask.tone, risk:0 }] : rows, at = ask ? 0 : cur;
+  const pl = !ask && q.includes(" ") ? plan(q) : [];
+  $("#plan").className = pl.length ? "show" : ""; $("#plan").innerHTML = pl.length ? `<span class="micro">Will run</span>` + pl.map(c => `<code>takumi ${c}</code>`).join("") : "";
+  if (!shown.length) { el.innerHTML = q ? `<div class="empty"><b>Nothing matches</b><span>Press Enter to ask Intent instead</span></div>` : `<div class="empty"><b>Everything is one sentence away</b><span>Try “keys”, “wifi”, “theme” or “power”</span></div>`; fitOpen(0, false); return; }
+  el.innerHTML = shown.map((r, i) => {
+    const what = r.title.charAt(0).toLowerCase() + r.title.slice(1);
+    const sub = r.id === armed ? `<div class="sub armed">Press Enter again to ${what}</div>` : r.sub ? `<div class="sub ${r.tone === "busy" ? "busy" : r.tone === "error" ? "err" : ""}">${r.sub}</div>` : "";
+    return `<div class="row ${i===at?"cur":""} ${r.tone === "busy" ? "busy" : ""}" data-i="${i}" style="animation-delay:${Math.min(i, 8) * 18}ms"><div class="ico-slot">${r.bars ? signal(r.bars) : r.swatch ? swatch(r.swatch) : icon(r.icon)}</div>
+    <div class="txt"><div class="t">${r.kind === "Intent" ? `“${r.title}”` : ask ? escHtml(r.title) : hl(r.title, q)}</div>${sub}</div>
+    <div class="tr">${r.risk > 0 && !r.interactive ? `<span class="tier">ASKS</span>` : ""}<span class="micro">${r.kind}</span><span class="key">${i < 9 ? "⌥" + (i+1) : ""}</span></div></div>`; }).join("");
+  [...el.children].forEach(d => d.onclick = () => ask ? submitAsk() : run(+d.dataset.i)); el.children[at]?.scrollIntoView({ block:"nearest" });
+  const curRow = el.children[at], glide = document.createElement("div"); glide.id = "hl";
+  if (curRow) { glide.style.top = (lastHl ?? curRow.offsetTop) + "px"; el.prepend(glide); requestAnimationFrame(() => { glide.style.top = curRow.offsetTop + "px"; lastHl = curRow.offsetTop; }); }
+  fitOpen(shown.length, pl.length > 0);
+}
+// The open Core is only as tall as what it holds: field, plan, rows. It grows upward from the capsule.
+function fitOpen(n, hasPlan) {
+  const h = n ? 16 + n * 46 + (hasPlan ? 36 : 0) + 62 : 200;
+  $("#core").style.setProperty("--open-h", Math.min(440, h) + "px");
+}
+// A row above risk tier 0 asks in place: the first Enter arms it, the second runs it (shell/Core/Open.qml).
+const run = i => {
+  const r = rows[i]; if (!r) return;
+  if (r.converse) return beginJoin(r);
+  if (r.card) return openCard();
+  if ((r.risk ?? 0) > 0 && !r.interactive && armed !== r.id) { armed = r.id; renderRows(); return; }
+  armed = ""; hist[r.id] = (hist[r.id]||0)+1; closeCore(); r.run();
+};
+function refreshRows() { const q = $("#q").value; card = null; rows = q.trim() ? providers(q) : startRows(); cur = 0; armed = ""; renderRows(); }
+function openCore() {
+  const c = $("#core"); clearTimeout(noticeTimer); c.classList.remove("notice"); c.classList.add("open", "opening"); $("#scrim").classList.add("open");
+  lastHl = null; setTimeout(() => c.classList.remove("opening"), 450);
+  if (!joining) ask = null; renderField(); $("#q").value = ""; refreshRows(); setTimeout(() => (ask ? $("#secret") : $("#q")).focus(), 60);
+}
+function openCoreOn(text) { openCore(); $("#q").value = text; refreshRows(); }
+function openCoreWith(text) { setTimeout(() => openCoreOn(text), 240); }
+function closeCore() {
+  $("#core").classList.remove("open"); $("#scrim").classList.remove("open"); $("#q").blur(); $("#secret").blur();
+  if (!joining) { ask = null; $("#secret").value = ""; } card = null; $("#field").classList.remove("err"); renderField(); sizeTo("#rest");
+}
+$("#scrim").onclick = closeCore;
+$("#q").oninput = refreshRows;
+$("#q").onkeydown = e => {
+  if (card) {
+    if (e.key === "Escape") { card = null; renderRows(); e.preventDefault(); }
+    else if (e.key === "Enter") { cardReveal = !cardReveal; renderRows(); e.preventDefault(); }
+    e.stopPropagation(); return;
+  }
+  if (e.key === "Escape") { if ($("#q").value) { $("#q").value = ""; refreshRows(); } else closeCore(); }
+  else if (e.key === "ArrowUp") { cur = Math.min(cur+1, rows.length-1); armed = ""; renderRows(); e.preventDefault(); }     // results stack upward
+  else if (e.key === "ArrowDown") { cur = Math.max(cur-1, 0); armed = ""; renderRows(); e.preventDefault(); }
+  else if (e.key === "Enter") { if (rows.length) run(cur); else if ($("#q").value.trim()) { const q = $("#q").value; closeCore(); intent(q); } }
+  else if (e.ctrlKey && e.key === "u") { $("#q").value = ""; refreshRows(); }
+  else if ((e.metaKey || e.altKey) && e.key >= "1" && e.key <= "9") { run(+e.key-1); e.preventDefault(); }
+  e.stopPropagation();
+};
+// The question's own field: what you type here never reaches a provider.
+$("#secret").onkeydown = e => {
+  if (e.key === "Escape") { if (joining) closeCore(); else if ($("#secret").value) $("#secret").value = ""; else leaveAsk(); e.preventDefault(); }
+  else if (e.key === "Enter") { submitAsk(); e.preventDefault(); }
+  e.stopPropagation();
+};
+$("#fk").onclick = () => { if (ask && ask.need === "password" && !joining) { revealPw = !revealPw; renderField(); $("#secret").focus(); } };
+
+/* ---------- Lock ---------- */
+let typed = 0;
+function lock() { document.body.classList.add("locked"); closeCore(); typed = 0; renderPw(); tick(); }
+function unlock() { document.body.classList.remove("locked"); }
+function renderPw() { $("#pw").classList.toggle("typing", typed > 0); $("#pw").innerHTML = typed ? Array.from({ length: Math.min(typed, 16) }, () => `<i class="on"></i>`).join("") : `<span class="hint">Type your password</span>`; }
+
+document.addEventListener("keydown", e => {
+  if (document.body.classList.contains("locked")) {
+    if (e.key === "Enter") { if (typed) unlock(); } else if (e.key === "Backspace") { typed = Math.max(0, typed-1); renderPw(); } else if (e.key === "Escape") { typed = 0; renderPw(); } else if (e.key.length === 1) { typed++; renderPw(); }
+    e.preventDefault(); return;
+  }
+  if ($("#core").classList.contains("open")) return;
+  if (e.ctrlKey && e.code === "Space") { openCore(); e.preventDefault(); return; }
+  if (e.target.tagName === "SELECT") return;
+  const cols = workspaces[wsIndex];
+  switch (e.key) {
+    case "ArrowLeft": focus = Math.max(0, focus-1); maximized = false; renderStrip(false); break;
+    case "ArrowRight": focus = Math.min(cols.length-1, focus+1); maximized = false; renderStrip(false); break;
+    case "ArrowUp": if (wsIndex > 0) gotoWs(wsIndex-1); break;
+    case "ArrowDown": if (wsIndex < workspaces.length-1) gotoWs(wsIndex+1); break;
+    case "m": case "M": maximized = !maximized; renderStrip(false); break;
+    case "r": case "R": { const k = focus+":"+wsIndex, w = widthOf(focus); colWidths[k] = [1/3, 1/2, 2/3][([1/3, 1/2, 2/3].findIndex(x => Math.abs(x-w) < .01)+1) % 3]; maximized = false; renderStrip(false); break; }
+    case "o": case "O": $("#strip-viewport").classList.toggle("overview"); break;
+    case "q": case "Q": closeFocused(); break;
+    case "l": case "L": lock(); break;
+    case "v": case "V": vol = (vol + 10) % 110; notice("vol", "Volume", "", vol); break;
+    case "1": case "2": case "3": gotoWs(+e.key-1); break;
+    default: return;
+  }
+  e.preventDefault();
+});
+$("#c-open").onclick = openCore; $("#c-lock").onclick = lock; $("#c-vol").onclick = () => { vol = (vol + 10) % 110; notice("vol", "Volume", "", vol); };
+$("#controls h4").onclick = () => $("#controls").classList.toggle("open");
+$("#c-theme").onchange = e => setTheme(e.target.value);
+$("#c-phase").onchange = e => setPhase(e.target.value);
+$("#lock").onclick = () => { if (typed) unlock(); };
+
+function tick() {
+  const d = new Date();
+  $("#lock-time").textContent = d.toLocaleTimeString(undefined, { hour:"2-digit", minute:"2-digit", hour12:false });
+  $("#lock-date").textContent = d.toLocaleDateString(undefined, { weekday:"long", day:"numeric", month:"long" });
+  if (phaseMode === "auto" && clockPhase() !== phase) { phase = clockPhase(); applyTheme(); }
+  if (!$("#core").classList.contains("notice")) renderRest();
+}
+
+(async () => {
+  DATA = await (await fetch("data.json")).json();
+  $("#c-theme").innerHTML = Object.keys(DATA.themes).map(t => `<option>${t}</option>`).join("");
+  document.querySelectorAll(".em-slot").forEach(s => s.outerHTML = emblem());
+  phase = clockPhase(); applyTheme(); renderStrip(); tick(); setInterval(tick, 15000);
+  document.fonts?.ready.then(() => sizeTo("#rest"));
+  window.addEventListener("resize", () => renderStrip(false));
+})();
+</script>
+</body>
+</html>

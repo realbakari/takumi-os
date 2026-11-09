@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+# Contract checks for VPNs (lib/vpn.sh, commands/vpn/*, the Palette's VPN rows) against a fake nmcli and a fake
+# tailscale: names with colons, the rows the Core shows, importing WireGuard and OpenVPN files (a long name, a
+# taken name, the file chooser), the username and password asked in the Core and kept on stdin only, Tailscale
+# set up, signed in on a card and its exit nodes, and the line the resting Core reads.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; VPN checks skipped)"; exit 0; }
+repo=$PWD; status=0; n=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-vpn.XXXXXX")
+trap 'touch "$t/state/signed-in" 2>/dev/null; sleep 0.3; rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run
+mkdir -p "$t/bin" "$t/tsbin" "$FAKE" "$HOME/files" "$XDG_RUNTIME_DIR" "$t/commands/notice"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"   # fake takumi commands go in front of the real ones
+unset WAYLAND_DISPLAY DISPLAY
+
+# nmcli keeps its connections in $FAKE/list (UUID:TYPE:STATE:TIMESTAMP:NAME) and a plugin's data in $FAKE/data-<uuid>.
+cat > "$t/bin/nmcli" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE/calls"
+uuid_arg() { local a; for a in "$@"; do [[ "$prev" == uuid ]] && { echo "$a"; return; }; prev=$a; done; }
+field() { awk -F: -v u="$1" -v f="$2" '$1 == u { if (f == 5) { sub(/^[^:]*:[^:]*:[^:]*:[^:]*:/, ""); print } else print $f; exit }' "$FAKE/list"; }
+set_field() { awk -F: -v OFS=: -v u="$1" -v f="$2" -v v="$3" '$1 == u { if (f == 5) { $0 = $1 ":" $2 ":" $3 ":" $4 ":" v } else $f = v } { print }' "$FAKE/list" > "$FAKE/list.new"; mv "$FAKE/list.new" "$FAKE/list"; }
+prev=""; u=$(uuid_arg "$@")
+a=" $* "
+case "$a" in
+  *" -f UUID,TYPE,STATE,TIMESTAMP,NAME connection show "*) cat "$FAKE/list" ;;
+  *" -g connection.type connection show "*) t=$(field "$u" 2); echo "$t" ;;
+  *" -g vpn.service-type connection show "*) [[ "$(field "$u" 2)" == vpn ]] && echo org.freedesktop.NetworkManager.openvpn ;;
+  *" -g vpn.data connection show "*) cat "$FAKE/data-$u" 2>/dev/null ;;
+  *" -g connection.id connection show "*) field "$u" 5 ;;
+  *" connection import type "*)
+    all="$*"; file=${all##* file }; base=${file##*/}; name=${base%.*}
+    [[ -r "$file" ]] || { echo "Error: failed to read $file"; exit 1; }
+    if [[ "$a" == *" type openvpn "* && -e "$FAKE/noplugin" ]]; then echo "Error: failed to find VPN plugin for openvpn."; exit 1; fi
+    if [[ "$a" == *" type wireguard "* ]] && ! [[ "$name" =~ ^[A-Za-z0-9_=+.-]{1,15}$ ]]; then
+      echo 'Error: failed to import: The name of the WireGuard config must be a valid interface name followed by ".conf"'; exit 1; fi
+    new=$(printf '%08d-aaaa-bbbb-cccc-dddddddddddd' "$(wc -l < "$FAKE/list" | tr -d ' ')")
+    if [[ "$a" == *" type wireguard "* ]]; then echo "$new:wireguard:activating:1700000900:$name" >> "$FAKE/list"
+    else
+      echo "$new:vpn::1700000900:$name" >> "$FAKE/list"; mkdir -p "$HOME/.cert/nm-openvpn"; : > "$HOME/.cert/nm-openvpn/$name-ca.pem"
+      echo "ca = $HOME/.cert/nm-openvpn/$name-ca.pem, connection-type = password, dev = tun, password-flags = 1, remote = vpn.example.com:1194" > "$FAKE/data-$new"
+    fi
+    cp "$file" "$FAKE/imported"
+    echo "Connection '$name' ($new) successfully added." ;;
+  *" connection modify "*" connection.id "*) all="$*"; set_field "$u" 5 "${all##* connection.id }" ;;
+  *" connection modify "*" +vpn.data "*)
+    all="$*"; item=${all##* +vpn.data }; k=${item%%=*}; v=${item#*=}
+    d=$(cat "$FAKE/data-$u" 2>/dev/null); d=$(printf '%s' "$d" | awk -v k="$k" 'BEGIN { RS = ", "; ORS = "" } { sub(/\n$/, "") } $0 !~ ("^" k " = ") { printf "%s%s", (n++ ? ", " : ""), $0 }')
+    echo "${d:+$d, }$k = $v" > "$FAKE/data-$u" ;;
+  *" connection modify "*) : ;;
+  *" connection edit "*) cat >> "$FAKE/stdin"; echo "Connection 'x' (u) successfully updated." ;;
+  *" connection up "*)
+    r=$(head -n 1 "$FAKE/up"); if [[ $(wc -l < "$FAKE/up") -gt 1 ]]; then tail -n +2 "$FAKE/up" > "$FAKE/up.next"; mv "$FAKE/up.next" "$FAKE/up"; fi
+    case "$r" in
+      ok) set_field "$u" 3 activated; echo "Connection successfully activated" ;;
+      secrets) echo "Error: Connection activation failed: no valid VPN secrets"; exit 4 ;;
+      *) echo "Error: Connection activation failed: the connection attempt timed out"; exit 4 ;;
+    esac ;;
+  *" connection down "*) set_field "$u" 3 "" ;;
+  *" connection delete "*) grep -v "^$u:" "$FAKE/list" > "$FAKE/list.new" || true; mv "$FAKE/list.new" "$FAKE/list" ;;
+  *) echo "fake nmcli: unexpected: $*" >&2; exit 99 ;;
+esac
+FAKE
+# tailscale answers status from $FAKE/ts.json; up does what $FAKE/ts-up says, one word a try.
+cat > "$t/tsbin/tailscale" <<'FAKE'
+#!/usr/bin/env bash
+printf 'tailscale %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  status) [[ -f "$FAKE/ts.json" ]] || { echo "failed to connect to local tailscaled; it doesn't appear to be running"; exit 1; }; cat "$FAKE/ts.json" ;;
+  set) [[ "$*" == *--operator=* ]] && touch "$FAKE/operator"; exit 0 ;;
+  down) exit 0 ;;
+  up)
+    r=$(head -n 1 "$FAKE/ts-up"); if [[ $(wc -l < "$FAKE/ts-up") -gt 1 ]]; then tail -n +2 "$FAKE/ts-up" > "$FAKE/ts-up.next"; mv "$FAKE/ts-up.next" "$FAKE/ts-up"; fi
+    case "$r" in
+      ok) exit 0 ;;
+      denied) [[ -e "$FAKE/operator" ]] || { echo "Access denied: prefs write access denied"; exit 1; }
+              printf '\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n\n' >&2 ;;
+      flags) echo "Error: changing settings via 'tailscale up' requires mentioning all non-default flags. To proceed, either re-run your command with --reset or use the command below to explicitly mention the current value of all non-default settings:"
+             echo; printf '\ttailscale up --exit-node=100.64.0.7 --operator=ada\n'; exit 1 ;;
+      *) printf '\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n\n' >&2 ;;
+    esac
+    i=0; while (( i < 50 )); do [[ -e "$FAKE/signed-in" ]] && exit 0; sleep 0.1; i=$((i + 1)); done; exit 1 ;;
+esac
+FAKE
+cat > "$t/bin/sudo" <<'FAKE'
+#!/usr/bin/env bash
+while [[ "${1:-}" == -* ]]; do shift; done
+printf 'sudo[%s] %s\n' "${TAKUMI_SUDO_WHY:-}" "$*" >> "$FAKE/calls"
+exec "$@"
+FAKE
+cat > "$t/bin/systemctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "$FAKE/calls"
+case "$*" in
+  "is-active tailscaled.service") [[ -f "$FAKE/ts.json" ]] && echo active || { echo inactive; exit 3; } ;;
+  "enable --now tailscaled.service") [[ -f "$FAKE/ts.json" ]] || echo '{"BackendState":"NeedsLogin","Self":{"HostName":"takumi-laptop"}}' > "$FAKE/ts.json" ;;
+esac
+FAKE
+printf '#!/bin/sh\nprintf "pacman %%s\\n" "$*" >> "$FAKE/calls"\ncp "%s/tsbin/tailscale" "%s/bin/tailscale"\n' "$t" "$t" > "$t/bin/pacman"
+printf '#!/bin/sh\nprintf "gio %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/bin/gio"
+printf '#!/bin/sh\nprintf "qs %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/bin/qs"
+printf '#!/bin/sh\nprintf "zenity\\n" >> "$FAKE/calls"\ncat "$FAKE/chosen"\n' > "$t/bin/zenity"
+printf '#!/bin/sh\ncat > /dev/null; printf "##  ##\\n  ##  \\n"\n' > "$t/bin/qrencode"
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+chmod +x "$t/bin/"* "$t/tsbin/tailscale" "$t/commands/notice/main"
+
+ts_running() {  # Tailscale signed in, with an exit node at home and two Mullvad nodes in one city
+  cat > "$FAKE/ts.json" <<'JSON'
+{"BackendState":"Running","Self":{"HostName":"takumi-laptop"},"Peer":{
+ "n1":{"HostName":"home-server","DNSName":"home-server.tail1.ts.net.","TailscaleIPs":["100.64.0.7"],"Online":true,"ExitNodeOption":true,"ExitNode":false},
+ "n2":{"HostName":"phone","TailscaleIPs":["100.64.0.8"],"Online":true,"ExitNodeOption":false},
+ "n3":{"HostName":"us-nyc-wg-301","TailscaleIPs":["100.80.0.1"],"Online":true,"ExitNodeOption":true,"Location":{"Country":"USA","City":"New York, NY","Priority":50}},
+ "n4":{"HostName":"us-nyc-wg-302","TailscaleIPs":["100.80.0.2"],"Online":true,"ExitNodeOption":true,"Location":{"Country":"USA","City":"New York, NY","Priority":80}},
+ "n5":{"HostName":"old-box","TailscaleIPs":["100.64.0.9"],"Online":false,"ExitNodeOption":true}}}
+JSON
+}
+reset() {
+  rm -rf "${FAKE:?}"/* "$HOME/.cert" "${XDG_RUNTIME_DIR:?}"/* "$t/bin/tailscale"
+  printf '%s\n' "w1:wireguard::1700000300:Work" "o1:vpn::1700000200:School: Lab" "e1:802-11-wireless:activated:1700000400:Takumi Home" > "$FAKE/list"
+  mkdir -p "$HOME/.cert/nm-openvpn"; : > "$HOME/.cert/nm-openvpn/school-ca.pem"; : > "$HOME/keep.pem"
+  echo "ca = $HOME/.cert/nm-openvpn/school-ca.pem, cert = $HOME/keep.pem, connection-type = password, password-flags = 1, username = ada" > "$FAKE/data-o1"
+  echo ok > "$FAKE/up"; : > "$FAKE/calls"; : > "$FAKE/stdin"; : > "$FAKE/notices"
+}
+check() { n=$((n + 1)); if ! eval "$2"; then echo "   FAIL: $1"; status=1; fi; }
+lib() { bash -c '. lib/vpn.sh; "$@"' _ "$@"; }
+rows() { commands/palette/vpn "$1"; }
+talk() { local answers=$1; shift; printf '%b' "$answers" | TAKUMI_CORE=1 "$@" 2>&1; echo "rc=$?"; }
+said_last() { local answers=$1 out rc=0; shift; out=$(printf '%b' "$answers" | "$@" 2>&1) || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+tab=$(printf '\t')
+
+reset
+check "VPNs, most recent first, other connections left out, a colon in a name kept" '[[ "$(lib vpn_list | tr "\n" "|")" == "w1${tab}wireguard${tab}off${tab}Work|o1${tab}vpn${tab}off${tab}School: Lab|" ]]'
+check "a VPN by name, and its kind" '[[ "$(lib vpn_uuid "School: Lab")" == o1 && "$(lib vpn_kind o1)" == openvpn && "$(lib vpn_kind w1)" == wireguard ]]'
+check "what a VPN asks for" '[[ "$(lib vpn_needs o1)" == password && -z "$(lib vpn_needs w1)" ]]'
+check "a value in a list of options is escaped" '[[ "$(lib vpn_escape "a,b=c\\d")" == "a\\,b\\=c\\\\d" ]]'
+
+r=$(rows vpn)
+check "rows are JSON with an id, a title and a kind" '[[ -n "$r" ]] && jq -e "select(.id and .title and .kind) | true" <<< "$r" >/dev/null'
+check "VPN Work · Connect, in the Core" '[[ "$(jq -c "select(.id == \"vpn:Work\") | [.title, .subtitle, .converse, .run]" <<< "$r")" == "[\"VPN Work\",\"Connect\",true,[\"takumi\",\"vpn\",\"on\",\"Work\"]]" ]]'
+check "Import a VPN… and Set up Tailscale" '[[ "$(jq -r "select(.id == \"vpn:import\" or .id == \"vpn:tailscale\") | .title" <<< "$r" | tr "\n" "|")" == "Import a VPN…|Set up Tailscale|" ]]'
+check "no forget rows unless asked" '[[ "$r" != *vpn-forget* ]]'
+check "the order: most recently used first" '[[ "$(jq -sr "sort_by(-.score) | map(.title) | join(\"|\")" <<< "$r")" == "VPN Work|VPN School: Lab|Import a VPN…|Set up Tailscale" ]]'
+sed 's/^w1:wireguard::/w1:wireguard:activated:/' "$FAKE/list" > "$FAKE/l" && mv "$FAKE/l" "$FAKE/list"
+check "a connected VPN comes first, and Enter disconnects" '[[ "$(rows vpn | jq -sc "sort_by(-.score) | .[0] | [.title, .subtitle, .run]")" == "[\"VPN Work\",\"Connected · Enter to disconnect\",[\"takumi\",\"vpn\",\"off\",\"Work\"]]" ]]'
+check "three letters of a VPN's name find it" '[[ "$(rows scho | jq -r .title)" == "VPN School: Lab" ]]'
+check "forget lists the VPNs to forget, and asks" '[[ "$(rows "forget vpn" | jq -r "[.title, .risk] | join(\"/\")" | tr "\n" "|")" == "Forget VPN Work/1|Forget VPN School: Lab/1|" ]]'
+check "other words, two letters: nothing" '[[ -z "$(rows zebra)" && -z "$(rows vp)" ]]'
+check "the resting Core: the VPN in use" '[[ "$(takumi vpn state)" == "up Work" ]]'
+sed 's/^w1:wireguard:activated:/w1:wireguard:activating:/' "$FAKE/list" > "$FAKE/l" && mv "$FAKE/l" "$FAKE/list"
+check "the resting Core: a VPN starting" '[[ "$(takumi vpn state)" == "connecting Work" ]]'
+
+# Connecting and disconnecting, with the password asked in the Core and kept through nmcli's editor.
+reset
+check "a WireGuard VPN connects without a question" '[[ "$(said_last "" takumi vpn on Work)" == "0|Connected to VPN Work" ]] && grep -q "connection up uuid w1" "$FAKE/calls"'
+check "connected already says so" '[[ "$(said_last "" takumi vpn on Work)" == "0|Already connected to VPN Work" ]]'
+check "off disconnects" '[[ "$(said_last "" takumi vpn off Work)" == "0|Disconnected from VPN Work" ]] && grep -q "connection down uuid w1" "$FAKE/calls"'
+check "no VPN by that name: 5" '[[ "$(said_last "" takumi vpn on Nowhere)" == "5|There is no VPN called Nowhere" && "$(said_last "" takumi vpn off Nowhere)" == "5|There is no VPN called Nowhere" ]]'
+reset
+said=$(talk 'p,w=1\\x\n' takumi vpn on "School: Lab")
+check "a password left to a keyring is asked for first; the saved username is not" '[[ "$said" == "secret Password for VPN School: Lab"*"note Connecting to VPN School: Lab…"*"done Connected to VPN School: Lab"*"rc=0" ]] && [[ "$said" != *"ask Username"* ]]'
+check "the password goes to nmcli's editor on stdin, escaped, and never in arguments" 'grep -qxF "set vpn.secrets password=p\\,w\\=1\\\\x" "$FAKE/stdin" && ! grep -q "p,w" "$FAKE/calls"'
+check "kept with the profile from then on" 'grep -q "connection modify uuid o1 +vpn.data password-flags=0" "$FAKE/calls" && grep -q "password-flags = 0" "$FAKE/data-o1"'
+reset; echo "connection-type = password, password-flags = 0" > "$FAKE/data-o1"; printf 'secrets\nok\n' > "$FAKE/up"
+said=$(talk 'ada\nfirst\n\nsecond\n' takumi vpn on "School: Lab")
+want=$(printf '%s\n' "ask Username for VPN School: Lab" "secret Password for VPN School: Lab" "note Connecting to VPN School: Lab…" "wrong That username or password did not work" \
+  "ask Username, or Enter to keep ada" "secret Password for VPN School: Lab" "note Connecting to VPN School: Lab…" "done Connected to VPN School: Lab" "rc=0")
+check "no username: asked; a wrong password: asked again, Enter keeping the username" '[[ "$said" == "$want" ]] && [[ "$(grep "^set " "$FAKE/stdin" | tail -n 1)" == "set vpn.secrets password=second" ]] && grep -q "+vpn.data username=ada" "$FAKE/calls"'
+reset; echo "connection-type = password, password-flags = 0, username = ada" > "$FAKE/data-o1"; printf 'secrets\nsecrets\n' > "$FAKE/up"
+check "elsewhere, a second wrong password: 4" '[[ "$(said_last "\nagain\n" takumi vpn on "School: Lab")" == "4|That username or password did not work" ]]'
+reset; echo secrets > "$FAKE/up"
+check "a WireGuard VPN turned away asks nothing it cannot answer" '[[ "$(said_last "" takumi vpn on Work)" == "4|VPN Work asks for something Takumi cannot answer yet, such as a one-time code" ]]'
+reset
+out=$(takumi vpn forget "School: Lab")
+check "forget removes the profile and the certificates its file brought, nothing else" '[[ "$out" == "Forgot VPN School: Lab" ]] && grep -q "connection delete uuid o1" "$FAKE/calls" && [[ ! -e "$HOME/.cert/nm-openvpn/school-ca.pem" && -e "$HOME/keep.pem" ]] && grep -q "^lock|Forgot VPN School: Lab|" "$FAKE/notices"'
+rc=0; takumi vpn forget Nowhere >/dev/null || rc=$?
+check "forget, no VPN by that name: 5" '[[ $rc == 5 ]]'
+
+# Importing: OpenVPN with a username and a password, WireGuard with a long name, a taken name, the file chooser.
+reset; printf 'client\nremote vpn.example.com 1194\nauth-user-pass\n' > "$HOME/files/work.ovpn"
+said=$(talk 'ada\npass word\nno\n' takumi vpn import "$HOME/files/work.ovpn")
+check "an OpenVPN file is imported, never joining by itself" 'grep -qF "connection import type openvpn file $HOME/files/work.ovpn" "$FAKE/calls" && grep -q "connection modify uuid 00000003-aaaa-bbbb-cccc-dddddddddddd connection.autoconnect no" "$FAKE/calls"'
+check "its username and password are asked, and the password kept on stdin" '[[ "$said" == *"ask Username for VPN work"*"secret Password for VPN work"*"confirm Connect to VPN work now?"*"done Added VPN work. Type vpn to connect"*"rc=0" ]] && grep -qx "set vpn.secrets password=pass word" "$FAKE/stdin" && ! grep -q "pass word" "$FAKE/calls"'
+said=$(talk 'bob\npw\nno\n' takumi vpn import "$HOME/files/work.ovpn")
+check "a name taken by another VPN gets a number" '[[ "$said" == *"done Added VPN work 2. Type vpn to connect"* ]] && grep -q "connection.id work 2" "$FAKE/calls"'
+reset; printf '[Interface]\nPrivateKey = x\n' > "$HOME/files/Mullvad Sweden 12.conf"
+said=$(talk 'yes\n' takumi vpn import "$HOME/files/Mullvad Sweden 12.conf")
+check "a WireGuard file with a long name goes through a private copy with a short one, then keeps its name" 'grep -q "connection import type wireguard file $XDG_RUNTIME_DIR/takumi-vpn\.[A-Za-z0-9]*/mullvad-sweden\.conf" "$FAKE/calls" && grep -q "connection.id Mullvad Sweden 12" "$FAKE/calls"'
+check "the private copy is gone" '[[ -z "$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -name "takumi-vpn.*")" ]]'
+check "yes connects at once" '[[ "$said" == *"confirm Connect to VPN Mullvad Sweden 12 now?"*"done Connected to VPN Mullvad Sweden 12"*"rc=0" ]]'
+reset; printf '[Interface]\nPrivateKey = x\n' > "$HOME/files/home.conf"
+said=$(talk 'no\n' takumi vpn import "$HOME/files/home.conf")
+check "no: a WireGuard VPN that started by itself is stopped" '[[ "$said" == *"done Added VPN home. Type vpn to connect"* ]] && grep -q "connection down uuid 00000003-aaaa" "$FAKE/calls"'
+reset; echo "$HOME/files/work.ovpn" > "$FAKE/chosen"; printf 'client\nremote x 1194\n' > "$HOME/files/work.ovpn"
+said=$(printf 'ada\npw\nno\n' | WAYLAND_DISPLAY=wayland-1 TAKUMI_CORE=1 takumi vpn import 2>&1; echo "rc=$?")
+check "with no file, the Core steps aside for the file chooser" '[[ "$(grep -n "^qs .*call core close" "$FAKE/calls" | cut -d: -f1)" -lt "$(grep -n "^zenity" "$FAKE/calls" | cut -d: -f1)" ]] && [[ "$said" == *"done Added VPN work. Type vpn to connect"* ]]'
+reset; printf 'client\nremote x 1194\n' > "$HOME/files/office.ovpn"
+# shellcheck disable=SC2088 # the tilde is what a person types; the command expands it
+said=$(talk '~/files/office.ovpn\nada\npw\nno\n' takumi vpn import)
+check "without a screen the file's place is asked for" '[[ "$said" == "ask Where the VPN file is, such as ~/Downloads/work.ovpn"*"done Added VPN office. Type vpn to connect"* ]]'
+check "no answers: the VPN stays added, and says when it asks again" '[[ "$(said_last "" takumi vpn import "$HOME/files/office.ovpn")" == "3|VPN office 2 is added; it asks for its password when you connect" ]]'
+printf 'hello\n' > "$HOME/files/notes.txt"
+check "a file that is no VPN: said" '[[ "$(said_last "" takumi vpn import "$HOME/files/notes.txt")" == "1|Takumi adds WireGuard (.conf) and OpenVPN (.ovpn) files; notes.txt is neither" ]]'
+touch "$FAKE/noplugin"
+check "OpenVPN not installed: said" '[[ "$(said_last "" takumi vpn import "$HOME/files/office.ovpn")" == "1|OpenVPN is not installed on this computer (networkmanager-openvpn)" ]]'
+
+# Tailscale: installed and started with one reason given for the password, signed in on a card, exit nodes.
+reset
+said=$(talk 'yes\n' takumi vpn tailscale)
+check "set up asks first, then installs, starts and makes you its operator, giving one reason" '[[ "$said" == "confirm Tailscale links this computer with your other devices, wherever they are. Install it?"* ]] && [[ "$(grep -c "^sudo\[Setting up Tailscale needs your password\] " "$FAKE/calls")" == 3 ]] && grep -q "^pacman -S --needed --noconfirm tailscale$" "$FAKE/calls" && grep -q "^systemctl enable --now tailscaled.service$" "$FAKE/calls" && grep -q "^tailscale set --operator=$(id -un)$" "$FAKE/calls"'
+card=$(grep "^card " <<< "$said" | sed "s/^card //")
+check "signing in is a card: the code, and the link behind Enter" '[[ "$(jq -c "[.kicker, .title, .secretLabel, .secret, .qr]" <<< "$card")" == "[\"Tailscale\",\"Sign in to Tailscale\",\"Link\",\"https://login.tailscale.com/a/abc123\",[\"101\",\"010\"]]" ]] && [[ "$said" == *"rc=0" ]]'
+check "the sign-in page opens in the browser" 'grep -qx "gio open https://login.tailscale.com/a/abc123" "$FAKE/calls"'
+touch "$FAKE/signed-in"; i=0; while (( i < 50 )) && ! grep -q "Tailscale is on" "$FAKE/notices"; do sleep 0.1; i=$((i + 1)); done
+check "a notice says when this computer has joined" 'grep -q "^lock|Tailscale is on|this computer joined your tailnet|" "$FAKE/notices"'
+reset; cp "$t/tsbin/tailscale" "$t/bin/tailscale"; ts_running
+check "on already: said, nothing started" '[[ "$(said_last "" takumi vpn tailscale)" == "0|Tailscale is on" ]] && ! grep -q "^tailscale up" "$FAKE/calls"'
+echo '{"BackendState":"NeedsLogin","Self":{"HostName":"takumi-laptop"}}' > "$FAKE/ts.json"; echo denied > "$FAKE/ts-up"
+said=$(talk '' takumi vpn tailscale)
+check "turned away for not being its operator: made it, and asked again" 'grep -q "^tailscale set --operator=" "$FAKE/calls" && [[ "$(grep -c "^tailscale up" "$FAKE/calls")" == 2 ]] && [[ "$said" == *"card {"* ]]'
+touch "$FAKE/signed-in"; sleep 0.3; rm -f "$FAKE/signed-in"; : > "$FAKE/calls"; echo flags > "$FAKE/ts-up"; echo ok >> "$FAKE/ts-up"
+said=$(talk '' takumi vpn tailscale)
+check "asked to name settings made earlier: named as Tailscale says" 'grep -qx "tailscale up --exit-node=100.64.0.7 --operator=ada" "$FAKE/calls" && [[ "$said" == *"done Tailscale is on"*"rc=0" ]]'
+ts_running
+r=$(rows tailscale)
+check "Tailscale connected, as this computer" '[[ "$(jq -r "select(.id == \"vpn:tailscale\") | .subtitle" <<< "$r")" == "Connected as takumi-laptop · Enter to disconnect" ]]'
+check "exit nodes: online ones, one row per Mullvad city, Enter sends the internet through it" '[[ "$(jq -r "select(.id | startswith(\"vpn:exit:\")) | .title + \" > \" + .run[4]" <<< "$r" | tr "\n" "|")" == "New York, NY, USA > 100.80.0.2|home-server > 100.64.0.7|" ]]'
+check "exit node rows only for tailscale or exit" '[[ "$(rows vpn | jq -r "select(.id | startswith(\"vpn:exit:\")) | .id")" == "" && -n "$(rows exit | jq -r "select(.id | startswith(\"vpn:exit:\")) | .id")" ]]'
+sed 's/"ExitNodeOption":true,"ExitNode":false/"ExitNodeOption":true,"ExitNode":true/; s/^{"BackendState"/{"ExitNodeStatus":{"Online":true},"BackendState"/' "$FAKE/ts.json" > "$FAKE/t" && mv "$FAKE/t" "$FAKE/ts.json"
+r=$(rows tailscale)
+check "with an exit node in use: said on the Tailscale row, and its own row stops it" '[[ "$(jq -r "select(.id == \"vpn:tailscale\") | .subtitle" <<< "$r")" == "Connected · internet through home-server · Enter to disconnect" ]] && [[ "$(jq -sc "map(select(.id | startswith(\"vpn:exit:\"))) | sort_by(-.score) | .[0] | [.title, .subtitle, .run]" <<< "$r")" == "[\"home-server\",\"Exit node in use · Enter to stop\",[\"takumi\",\"vpn\",\"tailscale\",\"exit\",\"off\"]]" ]]'
+check "the resting Core: Tailscale while an exit node carries the traffic" '[[ "$(takumi vpn state)" == "up Tailscale" ]]'
+check "an exit node, by its address, said by its name" '[[ "$(said_last "" takumi vpn tailscale exit 100.64.0.7)" == "0|Your internet goes through home-server now" ]] && grep -qx "tailscale set --exit-node=100.64.0.7 --exit-node-allow-lan-access=true" "$FAKE/calls"'
+check "exit off" '[[ "$(said_last "" takumi vpn tailscale exit off)" == "0|Your internet goes straight out again" ]] && grep -qx "tailscale set --exit-node=" "$FAKE/calls"'
+check "off" '[[ "$(said_last "" takumi vpn tailscale off)" == "0|Tailscale is off" ]] && grep -qx "tailscale down" "$FAKE/calls"'
+rc=0; takumi vpn tailscale bogus >/dev/null 2>&1 || rc=$?
+check "anything else: usage" '[[ $rc == 2 ]]'
+out=$(takumi vpn list)
+check "takumi vpn list in words" '[[ "$(head -n 1 <<< "$out")" == "   Work                     WireGuard   off" ]] && [[ "$(tail -n 1 <<< "$out")" == " * Tailscale                Tailscale   connected · internet through home-server" ]]'
+check "and as JSON" '[[ "$(takumi vpn list --json | jq -sc "map(.name)")" == "[\"Work\",\"School: Lab\",\"Tailscale\"]" ]]'
+check "every root change names its files" '[[ -z "$(grep -hE "run admin " commands/vpn/* | grep -v "# ")" ]]'
+
+echo "   $n VPN checks against a fake nmcli and tailscale"
+exit $status

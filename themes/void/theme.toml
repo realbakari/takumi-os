@@ -1,0 +1,22 @@
+[meta]
+name = "void"
+title = "Void"
+about = "monochrome near-black, one quiet accent"
+mode = "dark"
+
+[palette]
+accent     = "#e6e6e6"
+background = "#000000"
+surface    = "#0e0e0e"
+foreground = "#d4d4d4"
+muted      = "#4a4a4a"
+red        = "#ff5f5f"
+yellow     = "#e0c060"
+green      = "#8fd18f"
+cyan       = "#7fd0d0"
+blue       = "#8fb0ff"
+magenta    = "#d090e0"
+
+[phase.night]
+accent     = "#9a9a9a"
+foreground = "#b8b8b8"

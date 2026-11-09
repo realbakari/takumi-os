@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Follow USB drives and memory cards: open each one as it is plugged in and say so in the Core
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/drive.sh" ]] && { . "$l/drive.sh"; break; }; done
+declare -F drive_volumes >/dev/null || exit 0
+
+# Run by takumi-drives.service. udisksctl monitor says when a disk appears or goes. A USB drive or memory
+# card with a filesystem is opened as you, the way udisks does it (/run/media/<you>/<label>), never asking
+# for a password, and the Core says "SanDisk 64 GB · 41 GB free · press to open". A locked one says how to
+# unlock it, and a blank one that it can be erased for use. Drives already plugged in at login are opened
+# without a word. The list of what is open
+# ($drive_open_list) follows udisks' mount changes, so a drive taken out while still open, not ejected,
+# gets a word about ejecting first; ejected or closed in Files, it gets none.
+command -v udisksctl >/dev/null || exit 0
+mkdir -p "$drive_run"
+say() { takumi notice "$@" >/dev/null 2>&1 || true; }
+remember() { drive_forget "$1"; printf '%s%s%s\n' "$1" "$drive_sep" "$2" >> "$drive_open_list"; }
+known() { [[ -f "$drive_open_list" ]] && awk -F "$drive_sep" -v d="$1" '$1 == d { print $2; f = 1; exit } END { exit !f }' "$drive_open_list"; }
+
+arrive() {  # <device> <quiet: yes or no>
+  local line mp out free
+  line=$(drive_volumes | awk -F "$drive_sep" -v d="$1" '$1 == d { print; exit }')
+  [[ -n "$line" ]] || return 0
+  drive_read "$line"
+  [[ $d_removable == yes ]] || return 0
+  [[ $d_usage == filesystem && -n "$d_other" ]] && return 0   # inside an encrypted drive: whoever unlocked it opens it
+  case "$d_state" in
+    locked) [[ $2 == yes ]] || say lock "$d_name is locked" "type its name in the Core to unlock it" -1 8; return 0 ;;
+    open) mp=$d_mount ;;
+    closed)
+      if ! out=$(drive_mount "$d_dev" --quiet); then
+        [[ $2 == yes ]] || say warn "$d_name did not open" "$(drive_why "$out" "$d_type")" -1 10
+        return 0
+      fi
+      mp=$out ;;
+    blank)
+      # Nothing to open, unless its parts are still being read: look once more before saying so.
+      [[ $2 == yes ]] && return 0
+      sleep "${TAKUMI_DRIVE_SETTLE:-1}"
+      [[ "$(drive_volumes | awk -F "$drive_sep" -v d="$1" '$1 == d { print $6; exit }')" == blank ]] || return 0
+      say usb "$d_name has nothing Takumi can read" "type format in the Core to erase it for use" -1 10
+      return 0 ;;
+    *) return 0 ;;
+  esac
+  [[ -n "$mp" ]] || return 0
+  remember "$d_dev" "$d_name"
+  [[ $2 == yes ]] && return 0
+  free=$(drive_free "$mp")
+  say --open "$mp" usb "$d_name" "${free:+$(drive_human "$free") free · }press to open" -1 8
+}
+
+# At login: open what is plugged in already, quietly, and forget what a past session left on the list.
+: > "$drive_open_list"
+while IFS= read -r v; do
+  [[ -n "$v" ]] || continue
+  drive_read "$v"
+  [[ $d_removable == yes ]] && arrive "$d_dev" yes
+done <<< "$(drive_volumes)"
+
+monitor=(udisksctl monitor); command -v stdbuf >/dev/null && monitor=(stdbuf -oL udisksctl monitor)
+pending=""
+LC_ALL=C "${monitor[@]}" 2>/dev/null | while IFS= read -r line; do
+  case "$line" in
+    *": Added /org/freedesktop/UDisks2/block_devices/"*)
+      pending=""; sleep "${TAKUMI_DRIVE_SETTLE:-1}"   # udev finishes looking at it
+      arrive "$(drive_devname "${line##*/block_devices/}")" no ;;
+    *"/block_devices/"*": Added interface org.freedesktop.UDisks2.Filesystem"*|*"/block_devices/"*": Added interface org.freedesktop.UDisks2.Encrypted"*)
+      pending=""; obj=${line#*/block_devices/}; arrive "$(drive_devname "${obj%%:*}")" no ;;
+    *": Removed /org/freedesktop/UDisks2/block_devices/"*)
+      pending=""; dev=$(drive_devname "${line##*/block_devices/}")
+      if name=$(known "$dev"); then
+        drive_forget "$dev"
+        say warn "$name was taken out while open" "eject it first next time, so nothing is lost" -1 10
+      fi ;;
+    *"/block_devices/"*": org.freedesktop.UDisks2.Filesystem: Properties Changed"*)
+      obj=${line#*/block_devices/}; pending=$(drive_devname "${obj%%:*}") ;;
+    *MountPoints:*)
+      if [[ -n "$pending" ]]; then
+        where=$(printf '%s' "${line#*MountPoints:}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        if [[ -z "$where" ]]; then drive_forget "$pending"
+        elif ! known "$pending" >/dev/null; then
+          vname=$(drive_volumes | awk -F "$drive_sep" -v d="$pending" '$1 == d && $12 == "yes" { print $7; exit }')
+          [[ -z "$vname" ]] || remember "$pending" "$vname"
+        fi
+        pending=""
+      fi ;;
+    [0-9]*) pending="" ;;
+  esac
+done
+exit 1   # the monitor ended (udisks restarted): systemd starts the watch again

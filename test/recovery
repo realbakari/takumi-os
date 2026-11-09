@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# Contract checks for freeing up space, restore points, update failures said in words, and putting one app's
+# settings back (commands/update/{clean,main}, commands/room/{snapshot,list}, lib/update.sh, lib/rooms.sh,
+# commands/settings/reset, commands/palette/settings), against fake pacman, sudo, df, gio and rooms. The
+# root parts (deleting rooms, paccache, the btrfs snapshot) need a real system: test/vm and the B5 notes.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; recovery checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-recovery.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run TAKUMI_TOP=$t/top TAKUMI_STATE=$t/rooms LC_ALL=C
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR" "$TAKUMI_STATE" "$t/commands/notice" "$t/commands/migrate" \
+         "$t/commands/phase" "$t/upd/room" "$t/upd/update"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"   # fake takumi commands go in front of the real ones
+state=$HOME/.local/state/takumi
+fake() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$t/bin/$1"; chmod +x "$t/bin/$1"; }
+cmd() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$1"; chmod +x "$1"; }
+
+# sudo runs what it is given, as this user, except what only root may do here: those are written down.
+fake sudo '[ "$1" = -A ] && shift
+printf "sudo %s\n" "$*" >> "$FAKE/calls"
+case "$*" in
+  "rm -f /var/lib/pacman/db.lck") exit 0 ;;
+  "takumi update clean --system"*) cat "$FAKE/root-says" 2>/dev/null; echo $(( $(cat "$FAKE/free") + 3145728 )) > "$FAKE/free"; exit 0 ;;
+  "takumi room snapshot "*" --point"*) [ -f "$FAKE/snapshot-fails" ] && exit 1; exit 0 ;;
+esac
+exec "$@"'
+fake pacman 'case "$1" in
+  -Qdtq) [ -s "$FAKE/orphans" ] || exit 1; cat "$FAKE/orphans" ;;
+  -Qq) echo archlinux-keyring ;;
+  -Syu) printf "pacman -Syu\n" >> "$FAKE/calls"; n=$(( $(cat "$FAKE/syu" 2>/dev/null || echo 0) + 1 )); echo $n > "$FAKE/syu"
+        [ -f "$FAKE/pacman-says-$n" ] || exit 0; cat "$FAKE/pacman-says-$n"; exit 1 ;;
+  -Sy) printf "pacman %s\n" "$*" >> "$FAKE/calls" ;;
+esac'
+fake pgrep 'exit 1'
+fake df 'printf "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/mapper/takumi 999999999 1 %s 1%% /\n" "$(cat "$FAKE/free")"'
+fake gio 'printf "gio %s\n" "$*" >> "$FAKE/calls"; echo $(( $(cat "$FAKE/free") + 1258291 )) > "$FAKE/free"'
+fake flock '[ ! -f "$FAKE/locked" ]'
+fake findmnt 'if [ -f "$FAKE/current" ]; then echo "rw,relatime,subvol=/@rooms/$(cat "$FAKE/current")"; else echo "rw,relatime,subvol=/@"; fi'
+# find -printf is GNU's; here, the names alone.
+fake find 'args=(); skip=0; for a; do if [ $skip = 1 ]; then skip=0; continue; fi; [ "$a" = -printf ] && { skip=1; continue; }; args+=("$a"); done
+/usr/bin/find "${args[@]}" | sed "s|.*/||"'
+cmd "$t/commands/notice/main" 'printf "%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"'
+cmd "$t/commands/migrate/main" 'echo "migrate $*" >> "$FAKE/calls"'
+cmd "$t/commands/phase/tick" 'echo "phase tick $*" >> "$FAKE/calls"'
+
+reset() {
+  rm -rf "${FAKE:?}"/* "${HOME:?}"/.config "${HOME:?}"/.local "${TAKUMI_STATE:?}"/* "${XDG_RUNTIME_DIR:?}"/* "${t:?}/top"
+  : > "$FAKE/calls"; : > "$FAKE/notices"; echo 10485760 > "$FAKE/free"
+}
+n=0
+check() { n=$((n + 1)); if eval "$2"; then :; else echo "recovery: $1"; status=1; fi; }
+last() { "$@" | tail -n 1; }
+calls() { grep -c "^$1" "$FAKE/calls" || true; }
+row() { takumi palette index commands | jq -r --arg t "$1" 'select(.title == $t) | [(.converse | tostring), (.run | join(" ")), (.risk | tostring)] | join("|")'; }
+. lib/update.sh
+
+# ---- Why an update failed, from pacman's own words
+why() { printf '%s\n' "$@" > "$t/log"; update_why "$t/log" || echo none; }
+check "no space: the partition too full" '[[ "$(why "error: Partition / too full: 63128 blocks needed, 21009 blocks free" "error: failed to commit transaction (not enough free disk space)")" == "space	There is not enough space on the disk for the update.	Free up space, then update again" ]]'
+check "no space: a write that failed, and takumi update check-space" '[[ "$(why "error: could not extract /usr/lib/libLLVM.so.18 (No space left on device)" | cut -f1)" == space && "$(why "takumi update: only 3 GiB free on /, need 8 GiB" | cut -f1)" == space ]]'
+check "the keyring: unknown trust and a package signature" '[[ "$(why "error: linux: signature from \"Jan Alexander Steffens (heftig) <heftig@archlinux.org>\" is unknown trust" ":: File /var/cache/pacman/pkg/linux-6.11.6.arch1-1-x86_64.pkg.tar.zst is corrupted (invalid or corrupted package (PGP signature))." "error: failed to commit transaction (invalid or corrupted package (PGP signature))" "Errors occurred, no packages were upgraded.")" == "keyring	The keys that check the downloads are out of date.	Try again: the keys are renewed first" ]]'
+check "the keyring: a key missing" '[[ "$(why "error: required key missing from keyring" | cut -f1)" == keyring && "$(why "error: key \"6D42BDD116E0068F\" could not be looked up remotely" | cut -f1)" == keyring ]]'
+check "a damaged download, and damaged package lists (a mirror, not the keys)" '[[ "$(why "error: failed to commit transaction (invalid or corrupted package)" | cut -f1)" == damaged && "$(why "error: core: signature from \"x\" is invalid" "error: failed to update core (invalid or corrupted database (PGP signature))" | cut -f1)" == damaged ]]'
+check "conflicting files: the file named" '[[ "$(why "error: failed to commit transaction (conflicting files)" "python-pip: /usr/lib/python3.12/site-packages/pip/__init__.py exists in filesystem (owned by python-pip-git)" "Errors occurred, no packages were upgraded.")" == "files	The update would overwrite /usr/lib/python3.12/site-packages/pip/__init__.py, which is already on the disk.	Try again in a day or two: Arch usually fixes this quickly" ]]'
+check "a dependency that breaks: which one" '[[ "$(why "error: failed to prepare transaction (could not satisfy dependencies)" ":: installing python (3.13.0-1) breaks dependency '"'"'python<3.13'"'"' required by python-foo" | cut -f2)" == "Some packages in the update do not fit together yet (installing python (3.13.0-1) breaks dependency '"'"'python<3.13'"'"' required by python-foo)." ]]'
+check "packages in conflict" '[[ "$(why "error: failed to prepare transaction (conflicting dependencies)" ":: pipewire-jack-1:1.2.6-1 and jack2-1.9.22-1 are in conflict" | cut -f1)" == deps ]]'
+check "the mirrors: a name that does not resolve" '[[ "$(why "error: failed retrieving file '"'"'core.db'"'"' from geo.mirror.pkgbuild.com : Could not resolve host: geo.mirror.pkgbuild.com" "error: failed to synchronize all databases (download library error)")" == "network	The download servers did not answer.	Check the internet connection, then try again" ]]'
+check "the lock: another pacman" '[[ "$(why "error: failed to init transaction (unable to lock database)" "error: could not lock database: File exists" "  if you'"'"'re sure a package manager is not already" "  running, you can remove /var/lib/pacman/db.lck" | cut -f1)" == lock ]]'
+check "a mirror that failed before the real cause: the real cause" '[[ "$(why "error: failed retrieving file '"'"'linux.pkg.tar.zst'"'"' from mirror.one : Operation too slow" "error: failed to commit transaction (conflicting files)" "foo: /usr/bin/foo exists in filesystem" | cut -f1)" == files ]]'
+check "a cause Takumi does not know: nothing said" '[[ "$(why "error: something new went wrong")" == none ]]'
+check "trying again helps the keys, damaged downloads and the mirrors only" 'update_retryable keyring && update_retryable network && update_retryable damaged && ! update_retryable space && ! update_retryable files && ! update_retryable deps'
+check "packages Takumi lists are never taken as unneeded" '[[ "$(printf "jq\nlibfoo\npacman-contrib\n" | update_unlisted)" == libfoo ]]'
+check "sizes in words" '[[ "$(update_human 4404019)" == "4.2 GB" && "$(update_human 317440)" == "310 MB" && "$(update_human 300)" == "under 1 MB" ]]'
+
+# ---- takumi update says why, and offers the fix
+reset
+cmd "$t/upd/update/check-space" '[ ! -f "$FAKE/space-low" ] || { echo "takumi update: only 3 GiB free on /, need 8 GiB" >&2; exit 1; }'
+cmd "$t/upd/update/check" 'exit 0'
+cmd "$t/upd/update/clean" 'echo "clean held=$TAKUMI_UPDATE_LOCK_HELD" >> "$FAKE/calls"; echo "done 4.2 GB freed"'
+cmd "$t/upd/room/enabled" '[ ! -f "$FAKE/no-rooms" ]'
+cmd "$t/upd/room/snapshot" 'echo "room $1 copied from 20261101-000000"'
+cmd "$t/upd/room/upgrade" 'n=$(( $(cat "$FAKE/up" 2>/dev/null || echo 0) + 1 )); echo $n > "$FAKE/up"; echo "upgrade $n" >> "$FAKE/calls"
+[ -f "$FAKE/upgrade-says-$n" ] || exit 0; cat "$FAKE/upgrade-says-$n"; exit 1'
+cmd "$t/upd/room/discard" 'echo "discard $1" >> "$FAKE/calls"'
+cmd "$t/upd/room/stage" 'echo "stage $1" >> "$FAKE/calls"'
+update() { TAKUMI_CORE=1 TAKUMI_COMMANDS="$t/upd:$TAKUMI_COMMANDS" takumi update; }
+echo 20261101-000000 > "$FAKE/current"
+printf '%s\n' "error: Partition / too full: 63128 blocks needed, 21009 blocks free" "error: failed to commit transaction (not enough free disk space)" > "$FAKE/upgrade-says-1"
+rc=0; out=$(printf 'yes\nno\n' | update) || rc=$?
+check "no space while building: the room thrown away, Free up space offered, then said in one sentence ($out)" '[[ $rc -eq 1 ]] && grep -qx "confirm There is not enough space on the disk for the update. Free up space now?" <<< "$out" && [[ "$(tail -n 1 <<< "$out")" == "The update could not be prepared. There is not enough space on the disk for the update. Free up space, then update again. Nothing changed; your system is as it was." ]] && [[ $(calls discard) -eq 1 ]]'
+reset; echo 20261101-000000 > "$FAKE/current"; touch "$FAKE/space-low"
+out=$(printf 'yes\n' | update)
+check "too little space to begin: yes runs Free up space in the same conversation, the lock passed on" '[[ "$(head -n 1 <<< "$out")" == "confirm Only 3 GB is free, and an update needs 8 GB. Free up space now?" && "$(tail -n 1 <<< "$out")" == "done 4.2 GB freed" ]] && grep -qx "clean held=1" "$FAKE/calls"'
+rc=0; out=$(printf 'no\n' | update) || rc=$?
+check "too little space, declined: said in words ($out)" '[[ $rc -eq 1 && "$(tail -n 1 <<< "$out")" == "Only 3 GB is free, and an update needs 8 GB. Free up space, then update again." ]]'
+reset; echo 20261101-000000 > "$FAKE/current"
+printf '%s\n' "error: failed retrieving file 'core.db' from geo.mirror.pkgbuild.com : Could not resolve host: geo.mirror.pkgbuild.com" "error: failed to synchronize all databases (download library error)" > "$FAKE/upgrade-says-1"
+out=$(printf 'yes\nyes\nno\n' | update)
+check "the mirrors did not answer: Try again, in the same room, and it is ready" 'grep -qx "confirm The download servers did not answer. Try again?" <<< "$out" && [[ "$(tail -n 1 <<< "$out")" == "done Ready. The new system starts the next time you restart." && $(calls upgrade) -eq 2 && $(calls discard) -eq 0 ]]'
+reset; echo 20261101-000000 > "$FAKE/current"
+printf '%s\n' "error: failed to commit transaction (conflicting files)" "python-pip: /usr/lib/python3.12/site-packages/pip/__init__.py exists in filesystem" > "$FAKE/upgrade-says-1"
+rc=0; out=$(printf 'yes\n' | update) || rc=$?
+check "conflicting files: not tried again, the file and the next step said" '[[ $rc -eq 1 && "$(tail -n 1 <<< "$out")" == "The update could not be prepared. The update would overwrite /usr/lib/python3.12/site-packages/pip/__init__.py, which is already on the disk. Try again in a day or two: Arch usually fixes this quickly. Nothing changed; your system is as it was." && $(calls upgrade) -eq 1 ]]'
+reset; echo 20261101-000000 > "$FAKE/current"; echo "error: something new" > "$FAKE/upgrade-says-1"
+rc=0; out=$(printf 'yes\n' | update) || rc=$?
+check "a cause Takumi does not know: the old sentence" '[[ $rc -eq 1 && "$(tail -n 1 <<< "$out")" == "The update could not be prepared. Nothing changed; your system is as it was." ]]'
+reset; touch "$FAKE/no-rooms"
+printf '%s\n' "error: failed to init transaction (unable to lock database)" "error: could not lock database: File exists" > "$FAKE/pacman-says-1"
+out=$(printf 'yes\nyes\n' | update)
+check "in place, a lock nobody holds: unlocked after asking, and updated" 'grep -qx "confirm An earlier install stopped halfway and left pacman locked. Unlock it and try again?" <<< "$out" && grep -qx "sudo rm -f /var/lib/pacman/db.lck" "$FAKE/calls" && [[ "$(tail -n 1 <<< "$out")" == "done Updated in place." && $(calls "pacman -Syu") -eq 2 ]]'
+reset; touch "$FAKE/no-rooms"
+printf '%s\n' "error: linux: signature from \"someone\" is unknown trust" > "$FAKE/pacman-says-1"
+out=$(printf 'yes\nyes\n' | update)
+check "in place, the keys: renewed, then tried again" 'grep -qx "confirm The keys that check the downloads are out of date. Try again?" <<< "$out" && grep -q "^pacman -Sy --noconfirm archlinux-keyring" "$FAKE/calls" && [[ "$(tail -n 1 <<< "$out")" == "done Updated in place." ]]'
+
+# ---- Free up space
+reset; echo 20261101-000000 > "$FAKE/current"; printf 'libfoo\njq\n' > "$FAKE/orphans"
+printf 'Deleted 2 older systems\nRemoved old downloaded packages\nTrimmed the system'"'"'s logs\n' > "$FAKE/root-says"
+mkdir -p "$HOME/.local/share/Trash/files"; head -c 300000 /dev/zero > "$HOME/.local/share/Trash/files/old.iso"
+check "a row by itself: Free up space, a conversation, asked first" '[[ "$(row "Free up space")" == "true|takumi update clean|2" ]]'
+out=$(printf 'yes\nyes\n' | TAKUMI_CORE=1 takumi update clean)
+check "with rooms: one password for the system part, unneeded packages left to the next update ($out)" 'grep -qx "sudo takumi update clean --system" "$FAKE/calls" && grep -qx "note Also 1 package nothing uses: they leave with the next update, where going back undoes it." <<< "$out" && grep -qx "note Deleted 2 older systems" <<< "$out"'
+check "the Trash asked for, then emptied" 'grep -q "^confirm Empty the Trash too? .* cannot be brought back afterwards.$" <<< "$out" && grep -qx "gio trash --empty" "$FAKE/calls"'
+check "how much came back, in one sentence" '[[ "$(tail -n 1 <<< "$out")" == "done 4.2 GB freed" ]]'
+reset; printf 'libfoo\nlibbar\njq\n' > "$FAKE/orphans"
+out=$(printf 'yes\n' | TAKUMI_CORE=1 takumi update clean)
+check "without rooms: the unneeded packages go here, the empty Trash is not asked about" 'grep -qx "note Old downloaded packages, 2 packages nothing uses, and old logs can go." <<< "$out" && grep -qx "sudo takumi update clean --system --orphans" "$FAKE/calls" && ! grep -q "Trash" <<< "$out" && [[ "$(tail -n 1 <<< "$out")" == "done 3.0 GB freed" ]]'
+reset; rc=0; out=$(printf 'no\n' | TAKUMI_CORE=1 takumi update clean) || rc=$?
+check "declined: nothing changed, no password asked" '[[ $rc -eq 1 && "$(tail -n 1 <<< "$out")" == "Nothing changed." && $(calls sudo) -eq 0 ]]'
+reset; touch "$FAKE/locked"; rc=0; out=$(last takumi update clean </dev/null) || rc=$?
+check "not while an update is being prepared" '[[ $rc -eq 1 && "$out" == "An update is being prepared; free up space once it is done." ]]'
+reset; rc=0; takumi update clean --system >/dev/null 2>&1 || rc=$?
+check "the system part is root's" '[[ $rc -eq 1 && $(calls pacman) -eq 0 ]]'
+
+# ---- Restore points
+reset; echo 20261105-000000 > "$FAKE/current"
+check "a row by itself: Save a restore point, a conversation" '[[ "$(row "Save a restore point")" == "true|takumi room snapshot|1" ]]'
+out=$(printf 'Before trying Docker\n' | TAKUMI_CORE=1 takumi room snapshot)
+check "named when asked, saved with one password ($out)" '[[ "$(head -n 1 <<< "$out")" == "ask Name it, or Enter to name it by the date" && "$(tail -n 1 <<< "$out")" == "done Restore point saved: Before trying Docker · \"Go back to the previous system\" starts it" ]] && grep -qE "^sudo takumi room snapshot [0-9]{8}-[0-9]{6} --point Before trying Docker$" "$FAKE/calls"'
+: > "$FAKE/calls"; out=$(TAKUMI_CORE=1 takumi room snapshot "a|b&c/d" </dev/null)
+check "a name given: not asked, and nothing in it that state or a boot entry would misread" '! grep -q "^ask" <<< "$out" && grep -qE "^sudo takumi room snapshot [0-9-]+ --point abcd$" "$FAKE/calls"'
+: > "$FAKE/calls"; out=$(printf '\n' | TAKUMI_CORE=1 takumi room snapshot)
+check "Enter: named by the date" 'grep -qE "^sudo takumi room snapshot [0-9-]+ --point $" "$FAKE/calls" && grep -qE "^done Restore point saved: [0-9]{8}-[0-9]{6} · " <<< "$out"'
+touch "$FAKE/snapshot-fails"; rc=0; out=$(last takumi room snapshot x </dev/null) || rc=$?
+check "a failure said in words" '[[ $rc -eq 1 && "$out" == "The restore point could not be saved; nothing changed." ]]'
+rm -f "$FAKE/current"; rc=0; out=$(last takumi room snapshot x </dev/null) || rc=$?
+check "no rooms: said in words" '[[ $rc -eq 1 && "$out" == "This computer is not using rooms, so a restore point cannot be saved here." ]]'
+rc=0; takumi room snapshot 20261109-100000 >/dev/null 2>&1 || rc=$?
+check "copying a room by its name stays root's (takumi update)" '[[ $rc -eq 1 ]]'
+
+reset; echo 20261105-000000 > "$FAKE/current"; mkdir -p "$t/top/@rooms"
+room() { mkdir -p "$t/top/@rooms/$1"; shift 1; printf '%s\n' "$@" > "$TAKUMI_STATE/${dir:?}"; }
+dir=20261101-000000 room 20261101-000000 status=good
+dir=20261103-000000 room 20261103-000000 status=good parent=20261101-000000 point=yes
+dir=20261105-000000 room 20261105-000000 status=good parent=20261101-000000
+dir=20261105-120000 room 20261105-120000 status=good parent=20261105-000000 point=yes "name=Before trying Docker"
+prev() { (. lib/rooms.sh; rooms_previous); }
+lbl() { (. lib/rooms.sh; rooms_label "$1"); }
+check "a restore point says its name, or that it is one" '[[ "$(lbl 20261105-120000)" == *"(Before trying Docker)" && "$(lbl 20261103-000000)" == *"(restore point)" && "$(lbl 20261101-000000)" != *"("* ]]'
+check "going back starts the restore point saved in this system" '[[ "$(prev)" == 20261105-120000 ]]'
+rm -rf "$t/top/@rooms/20261105-120000"
+check "without one: the newest good system before this one, not a point saved in another" '[[ "$(prev)" == 20261101-000000 ]]'
+dir=20261105-120000 room 20261105-120000 status=good parent=20261105-000000 point=yes "name=Before trying Docker"
+out=$(takumi room list)
+check "the list names restore points" 'grep -qE "^20261105-120000 .* good .*Before trying Docker$" <<< "$out" && grep -qE "^20261103-000000 .*restore point$" <<< "$out" && grep -qE "^20261105-000000 .*in use" <<< "$out"'
+
+# ---- One app's settings back
+reset; mkdir -p "$HOME/.config/foot" "$HOME/.config/niri/takumi"
+echo "font=Comic Sans:size=20" > "$HOME/.config/foot/foot.ini"; echo "// mine" > "$HOME/.config/niri/takumi/overrides.kdl"
+out=$(printf 'yes\n' | TAKUMI_CORE=1 takumi settings reset foot)
+check "one app: Takumi's file back, yours kept aside, said in the Core" 'cmp -s config/foot/foot.ini "$HOME/.config/foot/foot.ini" && grep -qx "font=Comic Sans:size=20" "$HOME"/.config/foot.bak-*/foot.ini && [[ "$(tail -n 1 <<< "$out")" == "done Takumi'"'"'s settings for foot are back; yours are in ~/.config/foot.bak-"* ]] && [[ ! -e "$HOME/.config/niri/takumi/defaults.kdl" ]]'
+out=$(printf 'yes\n' | TAKUMI_CORE=1 takumi settings reset gtk)
+check "gtk: both of its folders" '[[ -d "$HOME/.config/gtk-3.0" && -d "$HOME/.config/gtk-4.0" ]]'
+rc=0; out=$(last takumi settings reset firefox </dev/null) || rc=$?
+check "an app Takumi has no settings for: 2, and what can be reset ($out)" '[[ $rc -eq 2 && "$out" == "Takumi has no settings for firefox. These can be reset: "*foot*niri* ]]'
+echo "font=Mine" > "$HOME/.config/foot/foot.ini"; rc=0; printf 'no\n' | TAKUMI_CORE=1 takumi settings reset foot >/dev/null || rc=$?
+check "declined: nothing changed" '[[ $rc -eq 1 ]] && grep -qx "font=Mine" "$HOME/.config/foot/foot.ini"'
+rm -rf "$HOME/.config"; mkdir -p "$HOME/.config/niri/takumi"; echo "// mine" > "$HOME/.config/niri/takumi/overrides.kdl"
+out=$(printf 'y\n' | takumi settings reset 2>&1)
+check "all of them, as before: niri, Takumi, the terminal, the shell; overrides kept" '[[ "$(tail -n 1 <<< "$out")" == "settings reset; your earlier ones end in .bak-"* ]] && [[ -f "$HOME/.config/niri/takumi/defaults.kdl" && -f "$HOME/.config/foot/foot.ini" && -f "$HOME/.config/takumi/theme" ]] && grep -qx "// mine" "$HOME/.config/niri/takumi/overrides.kdl" && [[ ! -e "$HOME/.config/btop" ]] && grep -qx "phase tick --force" "$FAKE/calls"'
+rows=$(takumi palette settings "reset terminal")
+check "the Palette: a row for each app, a conversation" '[[ "$(jq -r "select(.title == \"Reset Terminal settings\") | [(.converse | tostring), (.run | join(\" \"))] | join(\"|\")" <<< "$rows")" == "true|takumi settings reset foot" && $(grep -c . <<< "$rows") -ge 5 ]]'
+check "the Palette: nothing for other words" '[[ -z "$(takumi palette settings wifi)" && -z "$(takumi palette settings re)" ]]'
+check "reset all keeps its own row" '[[ "$(row "Reset settings to Takumi defaults" | cut -d"|" -f2)" == "takumi settings reset" ]]'
+
+echo "   $n recovery checks against fake pacman, sudo, df and rooms"
+exit $status

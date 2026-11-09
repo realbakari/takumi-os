@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# Contract checks for developer setup (commands/dev/*, commands/agent/*, takumi install docker and agents)
+# against fake mise, git, gh, pacman, podman and terminals: languages through mise and PHP from Arch, each
+# asked for in the Core; rootless containers that never touch the docker group; Git's name and email and
+# GitHub's one-time code as a card; coding agents installed on first use and opened in ~/Work.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; developer checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-dev.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+t=$(cd "$t" && pwd)   # without the doubled slash TMPDIR may end with, as the working folder reads
+unset XDG_DATA_HOME XDG_CONFIG_HOME XDG_DATA_DIRS TAKUMI_CORE
+export FAKE=$t/state BIN=$t/bin HOME=$t/home XDG_RUNTIME_DIR=$t/run SHELL=/bin/bash
+mkdir -p "$BIN" "$FAKE/avail" "$HOME" "$XDG_RUNTIME_DIR" "$t/tools"
+# Only the fakes and these basic tools: a real mise, gh, podman or curl on this machine is never reached.
+for x in bash sh cat awk sed grep tr cut sort paste head tail mktemp readlink dirname basename id cp mv rm mkdir chmod touch ls seq jq tee wc date env sleep; do
+  p=$(command -v "$x" 2>/dev/null || true); [[ -z "$p" ]] || ln -s "$p" "$t/tools/$x"
+done
+export PATH="$BIN:$repo/bin:$t/tools"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice"   # fake takumi commands go in front of the real ones
+
+fake() { cat > "$1"; chmod +x "$1"; }
+for b in usermod systemctl gio xdg-open; do printf '#!/bin/sh\nprintf "%s %%s\\n" "$*" >> "$FAKE/calls"\n' "$b" | fake "$BIN/$b"; done
+for b in foot xdg-terminal-exec; do printf '#!/bin/sh\nprintf "%s %%s in %%s\\n" "$*" "$PWD" >> "$FAKE/calls"\n' "$b" | fake "$BIN/$b"; done
+printf '#!/bin/sh\n[ -f "$FAKE/subids" ] && echo "0: $1 100000 65536"\n' | fake "$BIN/getsubids"
+printf '#!/bin/sh\n[ "$1" = passwd ] && echo "$2:x:1000:1000:Ada Lovelace,,,:/home/$2:/bin/bash"\n' | fake "$BIN/getent"
+printf '#!/bin/sh\ncat > /dev/null; printf "##  ##\\n  ##  \\n"\n' | fake "$BIN/qrencode"
+fake "$BIN/sudo" <<'FAKE'
+#!/bin/sh
+printf 'sudo %s\n' "$*" >> "$FAKE/calls"
+[ "$1" = -A ] && shift
+case "$1" in pacman | usermod) exec "$@" ;; esac
+FAKE
+fake "$BIN/pacman" <<'FAKE'
+#!/bin/sh
+# Installed packages in $FAKE/installed; -S puts a package's programs from $FAKE/avail/<package>/ into PATH.
+printf 'pacman %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  -Q) shift; for p in "$@"; do grep -qx "$p" "$FAKE/installed" 2>/dev/null || exit 1; done ;;
+  -S) shift; for p in "$@"; do case "$p" in -*) ;; *) echo "$p" >> "$FAKE/installed"; [ -d "$FAKE/avail/$p" ] && cp "$FAKE/avail/$p"/* "$BIN/" ;; esac; done ;;
+esac
+exit 0
+FAKE
+fake "$BIN/curl" <<'FAKE'
+#!/bin/sh
+# The installers: each prints a script that puts the program where its real installer does.
+for a; do url=$a; done
+printf 'curl %s\n' "$url" >> "$FAKE/calls"
+case "$url" in
+  https://mise.run) echo 'mkdir -p "$HOME/.local/bin" && cp "$FAKE/mise" "$HOME/.local/bin/mise"' ;;
+  https://claude.ai/install.sh) echo 'mkdir -p "$HOME/.local/bin" && cp "$FAKE/claude" "$HOME/.local/bin/claude"' ;;
+  *) exit 22 ;;
+esac
+FAKE
+fake "$FAKE/mise" <<'FAKE'
+#!/bin/sh
+printf 'mise %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  use) [ ! -f "$FAKE/mise-fails" ] ;;
+  current) case "$2" in node) echo 24.11.1 ;; python) echo 3.14.0 ;; *) echo 1.2.3 ;; esac ;;
+esac
+FAKE
+printf '#!/bin/sh\necho claude\n' | fake "$FAKE/claude"
+fake "$BIN/git" <<'FAKE'
+#!/bin/sh
+# git config --global, kept in $FAKE/gitconfig as key <tab> value.
+printf 'git %s\n' "$*" >> "$FAKE/calls"
+f="$FAKE/gitconfig"; touch "$f"
+[ "$1 $2" = "config --global" ] || exit 0
+shift 2
+if [ "$1" = --get ]; then awk -F '\t' -v k="$2" '$1 == k { v = $2; f = 1 } END { if (!f) exit 1; print v }' "$f"; exit; fi
+awk -F '\t' -v k="$1" '$1 != k' "$f" > "$f.new"; printf '%s\t%s\n' "$1" "$2" >> "$f.new"; mv "$f.new" "$f"
+FAKE
+mkdir -p "$FAKE/avail/podman" "$FAKE/avail/github-cli" "$FAKE/avail/php" "$FAKE/avail/composer" "$FAKE/avail/podman-docker" "$FAKE/avail/docker-compose" \
+  "$FAKE/avail/openai-codex" "$FAKE/avail/opencode"
+fake "$FAKE/avail/github-cli/gh" <<'FAKE'
+#!/bin/sh
+printf 'gh %s\n' "$*" >> "$FAKE/calls"
+case "$1 $2" in
+  "auth status") [ -f "$FAKE/gh-in" ] ;;
+  "auth login") echo "! First copy your one-time code: WXYZ-1234" >&2
+    echo "Open this URL to continue in your web browser: https://github.com/login/device" >&2
+    sleep 1; touch "$FAKE/gh-in"; echo "Authentication complete." >&2 ;;
+  "api user") echo octocat ;;
+esac
+FAKE
+printf '#!/bin/sh\necho 8.4.1\n' | fake "$FAKE/avail/php/php"
+printf '#!/bin/sh\n:\n' | fake "$FAKE/avail/composer/composer"
+printf '#!/bin/sh\nprintf "podman %%s\\n" "$*" >> "$FAKE/calls"\n' | fake "$FAKE/avail/podman/podman"
+printf '#!/bin/sh\n:\n' | fake "$FAKE/avail/podman-docker/docker"
+printf '#!/bin/sh\n:\n' | fake "$FAKE/avail/docker-compose/docker-compose"
+printf '#!/bin/sh\n:\n' | fake "$FAKE/avail/openai-codex/codex"
+printf '#!/bin/sh\n:\n' | fake "$FAKE/avail/opencode/opencode"
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' | fake "$t/commands/notice/main"
+
+reset() {
+  rm -rf "${HOME:?}"/.local "$HOME"/.config "$HOME"/.bashrc "$HOME"/.zshrc "$HOME/Work" "$FAKE"/gitconfig "$FAKE"/gh-in "$FAKE"/mise-fails
+  rm -f "$BIN"/podman "$BIN"/gh "$BIN"/php "$BIN"/composer "$BIN"/docker "$BIN"/docker-compose "$BIN"/codex "$BIN"/opencode
+  : > "$FAKE/installed"; : > "$FAKE/calls"; : > "$FAKE/notices"; touch "$FAKE/subids"
+}
+check() { if eval "$2"; then :; else echo "dev: $1"; status=1; fi; }
+last() { local out rc=0; out=$("$@" 2>&1) || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+talk() { local answers=$1; shift; printf '%b' "$answers" | TAKUMI_CORE=1 "$@" 2>&1; echo "rc=$?"; }
+waitfor() { local i; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do grep -q "$1" "$2" 2>/dev/null && return 0; sleep 0.25; done; return 1; }
+
+# Languages.
+reset
+res=$(last commands/dev/main cobol)
+check "not a language: 2 ($res)" '[[ "${res%%|*}" == 2 ]]'
+said=$(talk 'cobol\nnode\nyes\n' commands/dev/main)
+check "the Core asks which, and again after a word it does not know" '[[ "$said" == "ask Which language: Node.js, Python, Ruby, Go, Rust, Java or PHP?"$'"'"'\n'"'"'"wrong Takumi sets up Node.js, Python, Ruby, Go, Rust, Java and PHP"$'"'"'\n'"'"'"ask Which language:"* ]]'
+check "mise first, asked for, from its makers, into your home ($said)" '[[ "$said" == *"confirm Languages come through mise, which keeps each version in your home folder. Install mise from its makers? No password needed."* ]] && grep -qx "curl https://mise.run" "$FAKE/calls" && [[ -x "$HOME/.local/bin/mise" ]]'
+check "Node.js, the long-term version, for you" 'grep -qx "mise use --global --yes node@lts" "$FAKE/calls" && [[ "$said" == *"done Node.js 24.11.1 is ready. Open a new terminal to use it."*"rc=0" ]]'
+check "terminals find it: the hook in ~/.bashrc" '[[ "$(grep -c "activate bash" "$HOME/.bashrc")" -eq 1 ]] && grep -q "^eval \"\$(\"\$HOME/.local/bin/mise\" activate bash)\"$" "$HOME/.bashrc"'
+check "apps started from the Core find it: the shims in PATH" '[[ "$(grep "^PATH=" "$HOME/.config/environment.d/60-takumi-mise.conf")" == "PATH=$HOME/.local/share/mise/shims:$HOME/.local/bin:\${PATH}" ]]'
+: > "$FAKE/calls"; res=$(last commands/dev/main python)
+check "a second language: no new question, no second hook ($res)" '[[ "$res" == "0|Python 3.14.0 is ready. Open a new terminal to use it." ]] && grep -qx "mise use --global --yes python@latest" "$FAKE/calls" && ! grep -q curl "$FAKE/calls" && [[ "$(grep -c "activate bash" "$HOME/.bashrc")" -eq 1 ]]'
+commands/dev/main go >/dev/null; commands/dev/main rust >/dev/null; commands/dev/main java >/dev/null
+check "Go, Rust and Java" 'grep -qx "mise use --global --yes go@latest" "$FAKE/calls" && grep -qx "mise use --global --yes rust@stable" "$FAKE/calls" && grep -qx "mise use --global --yes java@temurin-25" "$FAKE/calls"'
+said=$(talk '' commands/dev/main ruby)
+check "Ruby is built here: its YAML library first, with your password ($said)" 'grep -qx "sudo -A pacman -S --needed --noconfirm libyaml" "$FAKE/calls" && [[ "$said" == *"note Building Ruby, which takes a few minutes…"* ]]'
+touch "$FAKE/mise-fails"; res=$(last commands/dev/main node); rm -f "$FAKE/mise-fails"
+check "a language that does not install: 1, and where to look ($res)" '[[ "$res" == "1|Node.js did not install. What happened is in $HOME/.local/state/takumi/dev.log" ]]'
+reset; SHELL=/bin/zsh commands/dev/main go < /dev/null >/dev/null 2>&1 || true
+check "no mise and no answer: nothing installed" '! grep -q "curl" "$FAKE/calls"'
+printf 'yes\n' | SHELL=/bin/zsh commands/dev/main go >/dev/null
+check "zsh: the hook in ~/.zshrc" 'grep -q "activate zsh" "$HOME/.zshrc" && [[ ! -e "$HOME/.bashrc" ]]'
+said=$(talk 'yes\n' commands/dev/main php)
+check "PHP from Arch's packages, with Composer, asked first ($said)" '[[ "$said" == "confirm PHP comes from Arch'"'"'s packages, with Composer, and needs your password. Install it?"*"done PHP 8.4.1 is ready, with Composer"*"rc=0" ]] && grep -qx "sudo -A pacman -S --needed --noconfirm php composer" "$FAKE/calls"'
+
+# Containers.
+reset; rm -f "$FAKE/subids"
+said=$(talk '' commands/dev/containers)
+check "Podman, the docker command and Compose, with one password" 'grep -qx "sudo -A pacman -S --needed --noconfirm podman podman-docker docker-compose" "$FAKE/calls"'
+check "user IDs of your own, the socket on, DOCKER_HOST at it" 'grep -q "^sudo -A usermod --add-subuids [0-9]*-[0-9]* --add-subgids" "$FAKE/calls" && grep -qx "systemctl --user enable --now podman.socket" "$FAKE/calls" && grep -qx "DOCKER_HOST=unix://\${XDG_RUNTIME_DIR}/podman/podman.sock" "$HOME/.config/environment.d/60-takumi-containers.conf"'
+check "never the docker group, and the Core says why ($said)" '! grep -q "G docker" "$FAKE/calls" && [[ "$said" == *"done Containers are ready: docker and docker compose run through Podman, as you, from your next login. Takumi leaves the docker group alone, because anyone in it can become root without a password."*"rc=0" ]]'
+reset; printf '#!/bin/sh\n:\n' > "$BIN/docker"; chmod +x "$BIN/docker"
+talk '' commands/install/main docker >/dev/null
+check "takumi install docker is the same, and leaves Docker's own command alone" 'grep -qx "sudo -A pacman -S --needed --noconfirm podman docker-compose" "$FAKE/calls" && grep -qx "systemctl --user enable --now podman.socket" "$FAKE/calls"'
+
+# Git and GitHub.
+reset
+said=$(talk '\nnot-an-email\nada@example.com\nno\n' commands/dev/git)
+check "your name, with a guess from your account ($said)" '[[ "$said" == "ask Your name, as your commits show it (Enter for Ada Lovelace)"* ]]'
+check "an email that cannot be one is asked again" '[[ "$said" == *"wrong That does not look like an email address"$'"'"'\n'"'"'"ask Your email for commits"* ]]'
+check "both in ~/.gitconfig, main as the first branch" '[[ "$(sort "$FAKE/gitconfig" | tr "\t\n" "=|")" == "init.defaultBranch=main|user.email=ada@example.com|user.name=Ada Lovelace|" ]]'
+check "no GitHub: done with what Git knows" '[[ "$said" == *"done Git knows you as Ada Lovelace <ada@example.com>"*"rc=0" ]] && ! grep -q "^gh auth login" "$FAKE/calls"'
+: > "$FAKE/calls"
+said=$(talk 'Ada\nada@example.com\nyes\n' commands/dev/git)
+check "GitHub's tool installed first, with your password" 'grep -qx "sudo -A pacman -S --needed --noconfirm github-cli" "$FAKE/calls"'
+card=$(sed -n 's/^card //p' <<< "$said")
+check "the one-time code is a card, with a code for a phone ($said)" '[[ "$(jq -c "[.kicker, .title, .qr]" <<< "$card")" == "[\"Sign in to GitHub\",\"WXYZ-1234\",[\"101\",\"010\"]]" && "$said" == *"rc=0" ]]'
+check "the browser opens on GitHub's page for it" 'grep -qx "gio open https://github.com/login/device" "$FAKE/calls"'
+waitfor "Signed in to GitHub" "$FAKE/notices" || true
+check "a notice says when you are in, and git pushes with it" 'grep -q "^person|Signed in to GitHub|as octocat: git uses it to push|" "$FAKE/notices" && grep -qx "gh auth setup-git" "$FAKE/calls"'
+check "the sign-in leaves nothing behind" '[[ -z "$(ls "$XDG_RUNTIME_DIR" | grep gh-login || true)" ]]'
+res=$(printf 'Ada\nada@example.com\n' | last commands/dev/git)
+check "signed in already: no code ($res)" '[[ "$res" == "0|Git knows you as Ada <ada@example.com>, and you are signed in to GitHub" ]]'
+
+# Coding agents.
+reset
+res=$(last commands/agent/open emacs)
+check "not an agent: 2" '[[ "${res%%|*}" == 2 ]]'
+said=$(talk 'yes\n' commands/agent/open claude)
+check "Claude Code is asked for, then installed from Anthropic into your home ($said)" '[[ "$said" == "confirm Claude Code is not on this computer. Install it from Anthropic? It goes in your home folder; no password needed."*"done Claude Code is open in ~/Work"*"rc=0" ]] && grep -qx "curl https://claude.ai/install.sh" "$FAKE/calls"'
+waitfor "^foot" "$FAKE/calls" || true
+check "it opens in a terminal, in ~/Work" 'grep -qx "foot $HOME/.local/bin/claude in $HOME/Work" "$FAKE/calls"'
+: > "$FAKE/calls"; said=$(talk 'no\n' commands/agent/codex)
+check "no: 3, nothing installed ($said)" '[[ "$said" == "confirm Codex is not on this computer. Install it from Arch'"'"'s packages? It needs your password."*"Nothing changed"*"rc=3" ]] && ! grep -q "^sudo" "$FAKE/calls"'
+said=$(talk 'yes\n' commands/agent/codex)
+check "Codex from Arch's packages" 'grep -qx "sudo -A pacman -S --needed --noconfirm openai-codex" "$FAKE/calls" && [[ "$said" == *"done Codex is open in ~/Work"* ]]'
+mkdir -p "$HOME/.config"; echo kitty.desktop > "$HOME/.config/xdg-terminals.list"; : > "$FAKE/calls"
+said=$(talk '' commands/agent/claude)
+waitfor "^xdg-terminal-exec" "$FAKE/calls" || true
+check "installed: no question; your own terminal" '[[ "$said" == "done Claude Code is open in ~/Work"$'"'"'\n'"'"'"rc=0" ]] && grep -qx "xdg-terminal-exec $HOME/.local/bin/claude in $HOME/Work" "$FAKE/calls"'
+reset
+said=$(talk '' commands/install/main agents)
+check "takumi install agents: the three, each its own way ($said)" 'grep -qx "curl https://claude.ai/install.sh" "$FAKE/calls" && grep -qx "sudo -A pacman -S --needed --noconfirm openai-codex" "$FAKE/calls" && grep -qx "sudo -A pacman -S --needed --noconfirm opencode" "$FAKE/calls" && [[ "$said" == *"done Claude Code, Codex and OpenCode are installed."*"rc=0" ]]'
+
+echo "   $(grep -c '^check ' "$0") developer checks against fake mise, git, gh, pacman and terminals"
+exit $status

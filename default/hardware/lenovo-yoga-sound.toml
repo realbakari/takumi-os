@@ -1,0 +1,16 @@
+# Lenovo Yoga laptops (Yoga 7, 9, Slim and Pro) drive their speakers, and the bass speakers above the keyboard,
+# through Texas Instruments TAS2781 or Cirrus Logic CS35L41 amplifiers that run their own firmware (in
+# linux-firmware-ti and linux-firmware-cirrus). Lenovo names Yogas in the DMI version field.
+# Kernel: https://docs.kernel.org/sound/hd-audio/index.html (sound/hda/codecs/side-codecs, tas2781 and cs35l41)
+title = "Lenovo Yoga speakers"
+part = "sound"
+
+[match]
+dmi_vendor = "^LENOVO$"
+dmi_version = "^(Lenovo )?Yoga"
+laptop = true
+arch = ["x86_64"]
+
+[apply]
+packages = ["linux-firmware-ti", "linux-firmware-cirrus"]
+note = "This Yoga's speakers run through small amplifiers with their own firmware, which this keeps on the computer. On a model newer than this kernel the bass speakers can stay quiet; a later update usually brings them."

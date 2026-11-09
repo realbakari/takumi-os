@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Take a screenshot: an area you draw, a window, or the whole screen; with --markup it opens to mark up
+usage: [area|window|screen] [--markup]
+example: takumi screen shot window --markup
+risk: 0
+title: Take a screenshot
+words: screenshot screen shot capture snip snipping print picture
+glyph: shot
+ABOUT
+set -euo pipefail
+# niri draws the selection, saves the picture in ~/Pictures/Screenshots and copies it; the shell hears it
+# (ScreenshotCaptured) and shows it in the Core, a press away from opening. Super+Shift+3, 4 and 5 do the same
+# from the keyboard (docs/capture.md). With --markup the picture opens to mark up as soon as niri has saved it.
+# Exit status: 0 taken, or nothing chosen · 1 niri did not take it · 2 usage.
+mode=area markup=no
+for a in "$@"; do
+  case "$a" in
+    area | window | screen) mode=$a ;;
+    --markup) markup=yes ;;
+    *) echo "usage: takumi screen shot [area|window|screen] [--markup]" >&2; exit 2 ;;
+  esac
+done
+case "$mode" in area) action=screenshot ;; window) action=screenshot-window ;; *) action=screenshot-screen ;; esac
+[[ $markup == yes ]] || exec niri msg action "$action"
+
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/capture.sh" ]] && { . "$l/capture.sh"; break; }; done
+declare -F capture_wait_shot >/dev/null || { echo "takumi: the capture library is missing" >&2; exit 1; }
+dir=$(capture_shots); mkdir -p "$dir"
+before=$(capture_newest_shot)
+# Saved where niri saves every screenshot, named the same way; a niri too old for --path names it itself.
+want="$dir/$(date '+%Y-%m-%d %H-%M-%S').png"
+if ! niri msg action "$action" --path "$want" >/dev/null 2>&1; then
+  want=""
+  niri msg action "$action" >/dev/null 2>&1 || { echo "niri did not take the screenshot" >&2; exit 1; }
+fi
+# As long as drawing an area may take; Esc there takes nothing, and nothing opens.
+limit=10; [[ $mode == area ]] && limit=120
+shot=$(capture_wait_shot "$want" "$before" "$limit") || exit 0
+exec takumi screen markup "$shot"

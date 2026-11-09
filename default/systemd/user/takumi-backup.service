@@ -1,0 +1,11 @@
+[Unit]
+Description=Takumi: back up the home folder (where and what in ~/.config/takumi/backup.toml)
+
+[Service]
+# Started by takumi-backup.timer, by plugging in the backup disk, and by takumi backup now. The command decides:
+# on the charger, at most once an hour, unless a person asked. A long first backup may take hours.
+Type=oneshot
+ExecStart=/usr/bin/takumi backup now --auto
+TimeoutStartSec=infinity
+Nice=10
+IOSchedulingClass=idle

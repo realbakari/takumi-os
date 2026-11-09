@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Collect versions, room, theme, phase and recent logs into one file
+risk: 0
+interactive: yes
+title: Collect a debug report
+words: debug logs problem report help
+ABOUT
+set -euo pipefail
+out="$HOME/.local/state/takumi/debug-$(date +%Y%m%d-%H%M%S).txt"
+{ echo "takumi $(takumi --version)"; uname -a; echo; echo "## room"; takumi room list 2>&1 || true
+  echo; echo "## theme/phase"; cat "$HOME/.config/takumi/theme" 2>/dev/null; takumi phase current
+  echo; echo "## versions"; for b in niri qs keyd foot; do printf '%s: ' "$b"; "$b" --version 2>&1 | head -1 || echo missing; done
+  echo; echo "## journal (user, 200)"; journalctl --user -n 200 --no-pager 2>/dev/null
+} > "$out" 2>&1
+echo "$out"

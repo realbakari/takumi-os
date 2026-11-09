@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Contract checks for the boot (docs/boot.md): the splash's files, and the login screen's copy of the
+# splash (shell/Parts/Arrival.qml, Style's boot colours) against the theme and the images it was drawn from.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+status=0
+check() { if eval "$2"; then :; else echo "boot: $1"; status=1; fi; }
+theme=default/plymouth/takumi
+conf=$theme/takumi.plymouth
+render=install/plymouth/render.qml
+arrival=shell/Parts/Arrival.qml
+style=shell/Look/Style.qml
+# png_size <file>: "width height" from the PNG header.
+png_size() { od -An -tu1 -j16 -N8 "$1" | awk 'NR == 1 { printf "%d %d", $1*16777216 + $2*65536 + $3*256 + $4, $5*16777216 + $6*65536 + $7*256 + $8 }'; }
+setting() { sed -n "s/^$1=//p" "$conf" | head -n 1; }
+style_colour() { sed -n "s/.*property color $1: *\"\(#[0-9a-f]*\)\".*/\1/p" "$style"; }
+
+for f in watermark.png entry.png bullet.png lock.png; do check "$f is in the theme" '[[ -s "$theme/$f" ]]'; done
+frames=$(find "$theme" -name 'throbber-*.png' | wc -l | tr -d ' ')
+check "48 frames of the running light ($frames)" '[[ "$frames" == 48 ]]'
+check "the module is two-step" '[[ "$(setting ModuleName)" == two-step ]]'
+check "the theme looks for its images where the install step puts them" '[[ "$(setting ImageDir)" == /usr/share/plymouth/themes/takumi ]] && grep -q "theme=/usr/share/plymouth/themes/takumi" install/steps/30-boot.sh'
+check "the watermark is 112 square ($(png_size "$theme/watermark.png"))" '[[ "$(png_size "$theme/watermark.png")" == "112 112" ]]'
+check "a frame of the light is 176 by 4 ($(png_size "$theme/throbber-0001.png"))" '[[ "$(png_size "$theme/throbber-0001.png")" == "176 4" ]]'
+
+# The login screen's first picture is the splash: same colours, same places.
+night=$(style_colour bootNight); line=$(style_colour bootLine); accent=$(style_colour bootAccent)
+check "the night is the theme's background ($night)" '[[ "$(setting BackgroundStartColor)" == "0x${night#\#}" && "$(setting BackgroundEndColor)" == "0x${night#\#}" ]]'
+check "the images were drawn on the same night, line and accent" 'grep -q "color: \"$night\"" "$render" && grep -q "color: \"$line\"" "$render" && grep -q "accent: \"$accent\"" "$render"'
+check "the tile sits 45% down in both" '[[ "$(setting WatermarkVerticalAlignment)" == .45 ]] && grep -q "112 \* arrival.u) \* 0.45" "$arrival"'
+check "the line sits 56% down in both" '[[ "$(setting VerticalAlignment)" == .56 ]] && grep -q "height) \* 0.56" "$arrival"'
+check "the tile is 96 in a 112 image, 8 from its edge, in both" 'grep -q "width: 112; height: 112" "$render" && grep -q "anchors.margins: 8" "$render" && grep -q "96 \* arrival.u" "$arrival" && grep -q "8 \* arrival.u" "$arrival"'
+check "the line is 176 by 4 in both" 'grep -q "width: 176; height: 4" "$render" && grep -q "width: 176 \* arrival.u; height: 4 \* arrival.u" "$arrival"'
+r=$(sed -n 's/.*readonly property real emblemRadius: *\([0-9.]*\).*/\1/p' "$style"); g=$(sed -n 's/.*readonly property real emblemGlyph: *\([0-9.]*\).*/\1/p' "$style")
+check "the drawn tile's corner and glyph are the emblem's at 96 ($r, $g)" 'grep -q "radius: $(awk -v r="$r" "BEGIN { printf \"%d\", r * 96 + 0.5 }")" "$render" && grep -q "font.pixelSize: $(awk -v g="$g" "BEGIN { printf \"%d\", g * 96 }")" "$render"'
+
+# The console between the splash and the login screen is the same night.
+red=$((16#${night:1:2})); green=$((16#${night:3:2})); blue=$((16#${night:5:2}))
+check "the console's black is the night ($red $green $blue)" 'grep -q "vt.default_red=$red vt.default_grn=$green vt.default_blu=$blue" install/steps/30-boot.sh'
+check "the console stays a plain terminal to systemd" 'grep -q "systemd.tty.term.console=dumb" install/steps/30-boot.sh'
+check "plymouth sits after systemd or udev in the initramfs" 'grep -q "systemd || \"\$_takumi_hook\" == udev" etc/mkinitcpio.conf.d/takumi-plymouth.conf'
+check "the login screen keeps its caches and its messages off the console" 'grep -q "XDG_CACHE_HOME=/var/cache/takumi/greeter" commands/greeter/main && grep -q "systemd-cat -t takumi-greeter" commands/greeter/main && grep -q "/var/cache/takumi/greeter" install/steps/40-session.sh'
+
+# A graphics driver that cannot draw: commands/session/start against a fake niri-session whose niri has no
+# screens, then one that has them, then a remembered failure, then one remembered for an older kernel.
+if command -v python3 >/dev/null; then
+  t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-boot.XXXXXX")
+  export FAKE=$t/state XDG_RUNTIME_DIR=$t/run TAKUMI_DRAWING_CHECK=1
+  mkdir -p "$t/bin" "$FAKE" "$XDG_RUNTIME_DIR" "$t/home/.config/niri" "$t/commands/notice" "$t/commands/migrate"
+  printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+  printf '#!/bin/sh\nexit 0\n' > "$t/commands/migrate/main"
+  chmod +x "$t/commands/notice/main" "$t/commands/migrate/main"
+  cat > "$t/bin/niri-session" <<'FAKE'
+#!/bin/sh
+echo niri-session >> "$FAKE/calls"
+python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$XDG_RUNTIME_DIR/niri.wayland-1.1.sock"
+i=0; while [ $i -lt 30 ] && [ ! -e "$FAKE/quit" ]; do sleep 0.1; i=$((i+1)); done
+rm -f "$XDG_RUNTIME_DIR/niri.wayland-1.1.sock" "$FAKE/quit"
+FAKE
+  cat > "$t/bin/niri" <<'FAKE'
+#!/bin/sh
+case "$*" in
+  "msg --json outputs") cat "$FAKE/outputs" ;;
+  "msg action quit --skip-confirmation") echo quit >> "$FAKE/calls"; touch "$FAKE/quit" ;;
+  *) echo "niri $* driver=${MESA_LOADER_DRIVER_OVERRIDE:-}" >> "$FAKE/calls" ;;
+esac
+FAKE
+  printf '#!/bin/sh\necho "mesa 1:26.2.6-1"\n' > "$t/bin/pacman"
+  chmod +x "$t/bin/niri-session" "$t/bin/niri" "$t/bin/pacman"
+  start() { HOME=$t/home PATH="$t/bin:$PWD/bin:$PATH" TAKUMI_COMMANDS="$t/commands:$PWD/commands" commands/session/start >/dev/null 2>&1 || true; sleep 1.2; }
+  failed=$t/home/.local/state/takumi/drawing-failed
+  : > "$FAKE/calls"; echo '{}' > "$FAKE/outputs"; start
+  check "no screens: that start ends and niri starts again drawing on the CPU" 'grep -qx niri-session "$FAKE/calls" && grep -qx quit "$FAKE/calls" && grep -q "niri --config .*niri-software.kdl driver=kms_swrast" "$FAKE/calls"'
+  check "it is remembered with this kernel and Mesa, and said once" '[[ "$(cat "$failed")" == "$(uname -r) mesa 1:26.2.6-1" ]] && sleep 8 && grep -q "^warn|Graphics are running without their driver|" "$FAKE/notices"'
+  : > "$FAKE/calls"; : > "$FAKE/notices"; start
+  check "remembered: the next start draws on the CPU at once, and does not say it again" '! grep -qx niri-session "$FAKE/calls" && grep -q "driver=kms_swrast" "$FAKE/calls" && [[ ! -s "$FAKE/notices" ]]'
+  echo "5.0.0 mesa 1:25.0.0-1" > "$failed"; : > "$FAKE/calls"; echo '{"Virtual-1":{}}' > "$FAKE/outputs"; start
+  check "after an update the driver is tried again, and a driver that draws keeps the session" 'grep -qx niri-session "$FAKE/calls" && ! grep -q kms_swrast "$FAKE/calls" && [[ ! -e "$failed" ]]'
+  rm -rf "$t"; unset FAKE TAKUMI_DRAWING_CHECK
+fi
+echo "   $(grep -cE '^ *check |; do check ' "$0") boot checks"
+exit $status

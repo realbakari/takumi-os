@@ -1,0 +1,35 @@
+# Solarized Light: Solarized on warm cream
+# Colours after Solarized by Ethan Schoonover (https://ethanschoonover.com/solarized/); phases by Takumi.
+
+[meta]
+name = "solarized-light"
+mode = "light"
+title = "Solarized Light"
+about = "Solarized on warm cream"
+credit = "Solarized by Ethan Schoonover (https://ethanschoonover.com/solarized/)"
+
+[palette]
+accent     = "#268bd2"
+background = "#fdf6e3"
+surface    = "#eee8d5"
+foreground = "#45565b"
+muted      = "#849191"
+red        = "#dc322f"
+yellow     = "#b18600"
+green      = "#829600"
+cyan       = "#299e95"
+blue       = "#268bd2"
+magenta    = "#d33682"
+
+[phase.dawn]
+accent     = "#cb4b16"
+background = "#fef4e2"
+
+[phase.dusk]
+accent     = "#d1421f"
+
+[phase.night]
+accent     = "#2178b5"
+background = "#f4eedc"
+surface    = "#e4dfce"
+foreground = "#445052"

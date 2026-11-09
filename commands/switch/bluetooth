@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Turn Bluetooth on or off
+risk: 0
+title: Bluetooth
+words: bluetooth headphones airpods
+glyph: bt
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/bluetooth.sh" ]] && { . "$l/bluetooth.sh"; break; }; done
+declare -F bt_present >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+if ! bt_present; then takumi notice bt "No Bluetooth here" "This computer has no Bluetooth adapter, or its service is off"; exit 1; fi
+if bt_on; then bt_ctl power off >/dev/null; takumi notice bt "Bluetooth off"; else bt_ctl power on >/dev/null; takumi notice bt "Bluetooth on"; fi

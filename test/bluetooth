@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Contract checks for Bluetooth (lib/bluetooth.sh, commands/bluetooth/*, the Palette's Bluetooth rows)
+# against a fake bluetoothctl: what is connected comes first with its battery, nearby devices without a name
+# stay out of the way, a name finds its device, and pairing asks whether the code matches.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; Bluetooth checks skipped)"; exit 0; }
+repo=$PWD; status=0; n=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-bt.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state XDG_RUNTIME_DIR=$t/run TMPDIR=$t; mkdir -p "$t/bin" "$FAKE" "$t/run"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice"   # fake takumi commands go in front of the real ones
+printf '#!/bin/sh\nexit 0\n' > "$t/commands/notice/main"; chmod +x "$t/commands/notice/main"
+
+# Headphones connected at 80%, a keyboard paired, a speaker nearby, and a nameless thing nearby.
+printf '%s\n' "Device AA:BB:CC:00:00:01 WH-1000XM4" "Device AA:BB:CC:00:00:02 Keyboard K380" \
+  "Device AA:BB:CC:00:00:03 Living Room Speaker" "Device AA:BB:CC:00:00:04 AA-BB-CC-00-00-04" > "$FAKE/all"
+printf '%s\n' "Device AA:BB:CC:00:00:01 WH-1000XM4" "Device AA:BB:CC:00:00:02 Keyboard K380" > "$FAKE/paired"
+printf '%s\n' "Device AA:BB:CC:00:00:01 WH-1000XM4" > "$FAKE/connected"
+echo yes > "$FAKE/power"
+cat > "$t/bin/bluetoothctl" <<'FAKE'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list) echo "Controller 00:1A:7D:DA:71:13 takumi [default]"; exit 0 ;;
+  show) echo "Controller 00:1A:7D:DA:71:13 (public)"; printf '\tPowered: %s\n' "$(cat "$FAKE/power")"; exit 0 ;;
+  devices) case "${2:-}" in Paired) cat "$FAKE/paired" ;; Connected) cat "$FAKE/connected" ;; *) cat "$FAKE/all" ;; esac; exit 0 ;;
+  info)
+    name=$(grep "$2" "$FAKE/all" | cut -d' ' -f3-)
+    printf 'Device %s (public)\n\tName: %s\n' "$2" "$name"
+    case "$2" in
+      *:01) printf '\tIcon: audio-headset\n\tBattery Percentage: 0x50 (80)\n' ;;
+      *:02) printf '\tIcon: input-keyboard\n' ;;
+      *:03) printf '\tIcon: audio-card\n' ;;
+    esac; exit 0 ;;
+  --timeout) shift 2; [[ "${1:-}" == connect ]] && echo "Connection successful"; exit 0 ;;
+esac
+# Interactive: the agent asks for the code; a "yes" pairs.
+while IFS= read -r cmd; do
+  case "$cmd" in
+    "pair "*) printf 'Attempting to pair with %s\n' "${cmd#pair }"; printf '\033[0;94m[agent]\033[0m Confirm passkey 482913 (yes/no): ' ;;
+    yes) printf '\nPairing successful\n' ;;
+    no) printf '\nFailed to pair: org.bluez.Error.AuthenticationRejected\n' ;;
+    "trust "*) printf 'Changing %s trust succeeded\n' "${cmd#trust }" ;;
+    "connect "*) printf 'Attempting to connect to %s\nConnection successful\n' "${cmd#connect }" ;;
+    quit) exit 0 ;;
+  esac
+done
+FAKE
+chmod +x "$t/bin/bluetoothctl"
+check() { n=$((n + 1)); if ! eval "$2"; then echo "   FAIL: $1"; status=1; fi; }
+
+rows=$(takumi palette bluetooth bluetooth)
+check "connected headphones come with their battery" '[[ "$(jq -r "select(.id==\"bt:AA:BB:CC:00:00:01\") | .subtitle" <<< "$rows")" == "Connected · battery 80% · Enter disconnects" ]]'
+check "headphones get the headphones glyph" '[[ "$(jq -r "select(.id==\"bt:AA:BB:CC:00:00:01\") | .glyph" <<< "$rows")" == headphones ]]'
+check "a paired keyboard connects in the Core" '[[ "$(jq -c "select(.id==\"bt:AA:BB:CC:00:00:02\") | [.converse, (.run[0:3] | join(\" \"))]" <<< "$rows")" == "[true,\"takumi bluetooth connect\"]" ]]'
+check "a nearby speaker pairs" '[[ "$(jq -r "select(.id==\"bt:AA:BB:CC:00:00:03\") | .run[0:3] | join(\" \")" <<< "$rows")" == "takumi bluetooth pair" ]]'
+check "a nameless nearby device stays out" '! grep -q "AA:BB:CC:00:00:04" <<< "$rows"'
+check "Bluetooth can be turned off from the rows" 'grep -q "\"bt:off\"" <<< "$rows"'
+check "a name finds its device" '[[ "$(takumi palette bluetooth k380 | jq -r .id)" == "bt:AA:BB:CC:00:00:02" ]]'
+check "two letters find nothing" '[[ -z "$(takumi palette bluetooth wh)" ]]'
+check "forget lists only the paired" '[[ "$(takumi palette bluetooth "forget" | jq -r .id | sort | tr "\n" " ")" == "bt:forget:AA:BB:CC:00:00:01 bt:forget:AA:BB:CC:00:00:02 " ]]'
+check "forgetting asks first" '[[ "$(takumi palette bluetooth "forget" | jq -r .risk | sort -u)" == 1 ]]'
+echo no > "$FAKE/power"
+check "with the radio off, one row turns it on" '[[ "$(takumi palette bluetooth bluetooth | jq -r .id)" == "bt:on" ]]'
+echo yes > "$FAKE/power"
+
+out=$(printf 'yes\n' | TAKUMI_CORE=1 takumi bluetooth pair AA:BB:CC:00:00:03 2>&1 || true)
+check "pairing asks whether the code matches" 'grep -q "^confirm Does Living Room Speaker show 482913?$" <<< "$out"'
+check "a yes pairs, trusts and connects" 'grep -q "^done Paired and connected to Living Room Speaker$" <<< "$out"'
+out=$(printf 'no\n' | TAKUMI_CORE=1 takumi bluetooth pair AA:BB:CC:00:00:03 2>&1) && rc=0 || rc=$?
+check "a no does not pair" '[[ $rc -ne 0 ]] && grep -q "Not paired" <<< "$out"'
+check "a bad address is refused" '! takumi bluetooth pair "not-an-address" >/dev/null 2>&1'
+out=$(TAKUMI_CORE=1 takumi bluetooth connect AA:BB:CC:00:00:02 2>&1 || true)
+check "connecting says so in the Core" 'grep -q "^done Connected to Keyboard K380$" <<< "$out"'
+
+echo "   $n Bluetooth checks against a fake bluetoothctl"
+exit $status

@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Serve Takumi's commands as tools over MCP on stdin and stdout, for Claude Code and other MCP clients
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/intent.sh" ]] && { . "$l/intent.sh"; break; }; done
+declare -F intent_call >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+command -v jq >/dev/null || { echo "takumi mcp serve needs jq" >&2; exit 1; }
+
+# The Model Context Protocol over stdio (https://modelcontextprotocol.io/specification): one JSON-RPC 2.0
+# message per line each way, nothing else on stdout. initialize (the client's protocol version when we know it,
+# else our newest), notifications/initialized, ping, tools/list and tools/call. The tools are the ones Intent
+# gives a model (docs/intent.md), with the same rule: risk 0 runs and its output is the result; risk 1 and 2
+# answer "needs the person's approval: <the exact takumi line>" and run only when TAKUMI_MCP_ALLOW_RISK=1.
+# Under `takumi intent ask`, TAKUMI_MCP_LOG names a file that gets one JSON line per event: a risk 0 call handed
+# over to ask, which runs it in the Core (run, with a reply file to wait for), or a risky one (asked). Without it,
+# risk 0 runs here with nothing to answer, and what ran is written to the transcript. Exits 0 when stdin ends.
+versions='["2025-11-25","2025-06-18","2025-03-26","2024-11-05"]'
+manifest=$(intent_manifest)
+tools=$(intent_tools mcp "$manifest")
+count=$(jq length <<< "$tools")
+version=$(takumi --version 2>/dev/null || echo dev)
+intent_id="mcp-$$"
+served=0      # calls handed to takumi intent ask so far
+
+answer() {  # <id JSON> <result or error JSON>: one reply line
+  jq -c --argjson id "$1" '{jsonrpc: "2.0", id: $id} + .' <<< "$2"
+}
+oops() { answer "$1" "$(jq -cn --argjson c "$2" --arg m "$3" '{error: {code: $c, message: $m}}')"; }
+text() {  # <true if it failed>: a tools/call result, its text on stdin
+  jq -cRs --argjson e "$1" '{result: {content: [{type: "text", text: .}], isError: $e}}'
+}
+event() {  # <json>: for `takumi intent ask`, or the transcript when nobody is watching
+  if [[ -n "${TAKUMI_MCP_LOG:-}" ]]; then printf '%s\n' "$1" >> "$TAKUMI_MCP_LOG"
+  elif [[ "$(jq -r 'has("run")' <<< "$1")" != true ]]; then intent_log "$(jq -c 'if .asked then {asked: .asked.line} else . end + {via: "mcp"}' <<< "$1")"; fi
+}
+
+call_tool() {  # <request>
+  local id=$1 req=$2 name call line rc=0 out
+  name=$(jq -r '.params.name // ""' <<< "$req")
+  call=$(intent_call "$manifest" "$name" "$(jq -c '.params.arguments // {}' <<< "$req")")
+  if [[ "$(jq -r '.unknown // false' <<< "$call")" == true ]]; then oops "$id" -32602 "Unknown tool: $name"; return; fi
+  if [[ -n "$(jq -r '.why // ""' <<< "$call")" ]]; then answer "$id" "$(jq -j .why <<< "$call" | text true)"; return; fi
+  line=$(jq -r .line <<< "$call")
+  if [[ "$(jq -r .risk <<< "$call")" != 0 && "${TAKUMI_MCP_ALLOW_RISK:-}" != 1 ]]; then
+    event "$(jq -c '{asked: .}' <<< "$call")"
+    answer "$id" "$(printf "needs the person's approval: %s" "$line" | text false)"
+    return
+  fi
+  if [[ -n "${TAKUMI_MCP_LOG:-}" ]]; then
+    # Under takumi intent ask, ask runs it, in the Core where it can ask the person what it needs (a "Keep
+    # this?", a password), and answers in a reply file. We wait while our client lives, fifteen minutes at most.
+    served=$((served + 1)); reply="${TAKUMI_MCP_LOG%/*}/reply-$$-$served"; waited=0
+    event "$(jq -c --arg r "$reply" '{run: .line, call: ., reply: $r}' <<< "$call")"
+    while [[ ! -f "$reply" ]] && kill -0 "$PPID" 2>/dev/null && (( waited < 4500 )); do sleep 0.2; waited=$((waited + 1)); done
+    if [[ -f "$reply" ]]; then rc=$(jq -r .status "$reply"); out=$(jq -r .out "$reply"); rm -f "$reply"
+    else rc=1; out="Takumi stopped before it could run."; fi
+  else
+    out=$(intent_run_quiet "$call") || rc=$?
+    event "$(jq -cn --arg l "$line" --argjson s "$rc" '{ran: $l, status: $s}')"
+  fi
+  answer "$id" "$(intent_result_text "$rc" "$out" | text "$([[ $rc == 0 ]] && echo false || echo true)")"
+}
+
+while IFS= read -r msg || [[ -n "$msg" ]]; do
+  [[ "$msg" =~ [^[:space:]] ]] || continue
+  kind=$(jq -r 'type' <<< "$msg" 2>/dev/null) || { oops null -32700 "Parse error"; continue; }
+  [[ "$kind" == object ]] || { oops null -32600 "Invalid Request: one message per line, no batches"; continue; }
+  method=$(jq -r '.method // ""' <<< "$msg")
+  # A notification gets no answer, ever; nor does a reply, since this server asks nothing.
+  [[ "$(jq -r 'has("id")' <<< "$msg")" == true && -n "$method" ]] || continue
+  id=$(jq -c .id <<< "$msg")
+  case "$method" in
+    initialize)
+      answer "$id" "$(jq -c --argjson v "$versions" --arg version "$version" --argjson n "$count" '
+        (.params.protocolVersion // "") as $asked
+        | {result: {protocolVersion: (if ($v | index($asked)) then $asked else $v[0] end),
+                    capabilities: {tools: {listChanged: false}},
+                    serverInfo: {name: "takumi", title: "Takumi", version: $version},
+                    instructions: ("Takumi\u0027s own commands, one tool each (\($n) of them). Risk 0 tools run at once. "
+                      + "Risk 1 and 2 tools need the person\u0027s approval: they answer with the exact takumi line instead of running.")}}' <<< "$msg")" ;;
+    ping) answer "$id" '{"result":{}}' ;;
+    tools/list) answer "$id" "$(jq -c '{result: {tools: .}}' <<< "$tools")" ;;
+    tools/call) call_tool "$id" "$msg" ;;
+    *) oops "$id" -32601 "Method not found: $method" ;;
+  esac
+done

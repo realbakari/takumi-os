@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for forcing a stuck app to quit, or opening it again, as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "force quit", "quit", "stuck", "frozen" or "not responding" list every app with a window: "Force quit Spotify"
+# and "Restart Spotify". Super+Alt+Escape opens the Core on "force quit". "restart spotify" or "quit spotify"
+# names one. Enter asks in place first, since unsaved work in the app is lost (takumi app quit, docs/harmony-keys.md).
+command -v jq >/dev/null || exit 0
+q=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+topic=no restart=no rest=""
+for w in $q; do
+  case "$w" in
+    force | quit | kill | stuck | frozen | freeze | freezing | hung | hang | hanging | unresponsive | responding | crash | crashed) topic=yes ;;
+    restart | reopen | relaunch) restart=yes ;;
+    not | an | app | the | is | it | a) ;;
+    *) rest="$rest $w" ;;
+  esac
+done
+rest=${rest# }
+# "restart" alone is the computer's (the power rows); with an app's name after it, it is the app's.
+[[ $topic == yes || ( $restart == yes && -n "$rest" ) ]] || exit 0
+apps=$(takumi app quit 2>/dev/null) || exit 0
+[[ -n "$apps" ]] || exit 0
+while IFS=$'\t' read -r app name n _; do
+  [[ -n "$name" ]] || continue
+  if [[ -n "$rest" ]]; then
+    hay=$(printf '%s %s' "$name" "$app" | tr '[:upper:]' '[:lower:]'); ok=yes
+    for w in $rest; do [[ "$hay" == *"$w"* ]] || ok=no; done
+    [[ $ok == yes ]] || continue
+  fi
+  target=${app:-$name}
+  A=$app N=$name C=$n T=$target R=$restart TOPIC=$topic jq -cn '
+    (if (env.C | tonumber) > 1 then " · " + env.C + " windows" else "" end) as $windows
+    | ("force quit kill stuck frozen not responding restart " + env.N + " " + env.A) as $kw
+    | (if env.TOPIC == "yes" then
+        {id: ("quit:" + env.T), title: ("Force quit " + env.N), subtitle: ("Unsaved work in it is lost" + $windows),
+         icon: env.A, glyph: "cross", kind: "Quit", keywords: $kw, risk: 1, run: ["takumi", "app", "quit", env.T], score: 0.92}
+       else empty end),
+      {id: ("restart:" + env.T), title: ("Restart " + env.N), subtitle: ("Quits it, then opens it again · unsaved work in it is lost" + $windows),
+       icon: env.A, glyph: "restart", kind: "Quit", keywords: $kw, risk: 1, run: ["takumi", "app", "quit", env.T, "--restart"],
+       score: (if env.R == "yes" then 0.92 else 0.8 end)}'
+done <<< "$apps"

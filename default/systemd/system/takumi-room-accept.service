@@ -1,0 +1,16 @@
+# Runs once boot-complete.target is reached. DefaultDependencies=no, or boot-complete.target would order itself
+# after this unit (a target waits for what it wants), which is a cycle systemd breaks by dropping the job.
+[Unit]
+Description=Takumi: make a room that started well the default
+DefaultDependencies=no
+Requires=boot-complete.target
+After=boot-complete.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/takumi room accept
+
+[Install]
+WantedBy=boot-complete.target

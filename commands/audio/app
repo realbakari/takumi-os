@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set one app's own volume, or mute it
+usage: <stream id> <0-100|mute|unmute>
+example: takumi audio app 57 50
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/audio.sh" ]] && { . "$l/audio.sh"; break; }; done
+declare -F audio_set_app >/dev/null || { echo "takumi: the sound library is missing" >&2; exit 1; }
+[[ -n "${1:-}" && -n "${2:-}" ]] || { echo "usage: takumi audio app <stream id> <0-100|mute|unmute>" >&2; exit 2; }
+audio_set_app "$1" "$2"

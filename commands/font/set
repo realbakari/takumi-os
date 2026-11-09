@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Choose the font for the interface, or for code and the terminal
+usage: <ui|mono> <family>
+example: takumi font set ui "IBM Plex Sans"
+example: takumi font set mono "Fira Code"
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/font.sh" ]] && { . "$l/font.sh"; break; }; done
+declare -F font_apply >/dev/null || { echo "takumi: the font library is missing" >&2; exit 1; }
+# The family is kept in ~/.config/takumi/shell.toml and reaches the Core, GTK (GNOME's settings), foot and
+# every app that asks fontconfig (lib/font.sh). Exit status: 0 chosen · 2 usage · 3 not on this computer.
+role=${1:-}; want=${2:-}
+case "$role" in ui|mono) ;; *) echo "usage: takumi font set <ui|mono> <family>" >&2; exit 2 ;; esac
+[[ -n "$want" ]] || { echo "usage: takumi font set <ui|mono> <family>" >&2; exit 2; }
+family=$(font_find "$want")
+if [[ -z "$family" ]]; then
+  if line=$(font_catalog_find "$want"); then
+    echo "$want is not on this computer. Get it: takumi font get \"${line%%|*}\""; exit 3
+  fi
+  echo "No font called $want on this computer. takumi font list shows the ones here"; exit 3
+fi
+font_safe "$family" || { echo "$family has characters Takumi cannot hand on to apps"; exit 3; }
+if [[ $role == ui ]]; then font_save font_ui "$family"; what="Interface font"; else font_save font_mono "$family"; what="Code font"; fi
+font_apply
+takumi notice edit "$what: $family" "GTK apps now, the rest as they next start" >/dev/null 2>&1 || true
+echo "$what: $family"

@@ -1,0 +1,8 @@
+[Unit]
+Description=Takumi: look for updates once a day, on a network that is not metered (takumi update check)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/takumi update check --auto
+Nice=10
+IOSchedulingClass=idle

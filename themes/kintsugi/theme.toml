@@ -1,0 +1,33 @@
+# Kintsugi: charcoal mended with gold
+# A Takumi theme.
+
+[meta]
+name = "kintsugi"
+mode = "dark"
+title = "Kintsugi"
+about = "charcoal mended with gold"
+
+[palette]
+accent     = "#d4a74a"
+background = "#0f0f10"
+surface    = "#18181a"
+foreground = "#e6e2d8"
+muted      = "#64615a"
+red        = "#d9654f"
+yellow     = "#e3c26b"
+green      = "#93b37f"
+cyan       = "#82b8b5"
+blue       = "#8aa4cf"
+magenta    = "#c095c4"
+
+[phase.dawn]
+accent     = "#e3c26b"
+
+[phase.dusk]
+accent     = "#e0954a"
+
+[phase.night]
+accent     = "#937436"
+background = "#0a0a0a"
+surface    = "#111112"
+foreground = "#ccc9c0"

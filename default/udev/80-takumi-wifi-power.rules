@@ -1,0 +1,3 @@
+# Takumi: when the charger comes or goes, the Wi-Fi card's power saving follows: off while plugged in, on on
+# battery (default/networkmanager/dispatcher.d/80-takumi-wifi-power, docs/wifi.md).
+SUBSYSTEM=="power_supply", ACTION=="add|change", ATTR{type}=="Mains|USB", RUN+="/usr/lib/NetworkManager/dispatcher.d/80-takumi-wifi-power"

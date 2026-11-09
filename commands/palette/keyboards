@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for keyboards and input methods as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# The keyboards you type with (docs/harmony-keys.md). "keyboard" (or "layout", or "language") shows them in one
+# row whose Enter asks which to add, the next one to switch to, and removing one. A language's or a country's
+# name finds its keyboards to add: "keyboard french", "swiss keyboard", or "french" alone. "japanese", "korean",
+# "chinese", "pinyin" or "input" offer typing through an input method, and switching it on and off.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/keys.sh" ]] && { . "$l/setup.sh"; . "$l/keys.sh"; . "$l/palette.sh"; break; }; done
+declare -F keys_load >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+q=${1:-}
+palette_short "$q" && exit 0
+ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
+
+# The pointer, the touchpad, key repeat, the top row and the Alt and Super keys (takumi keys pointer, takumi keys
+# fn, takumi keys harmony swap; docs/laptop-keys.md, docs/harmony-keys.md): rows of their own, under the words a
+# person would use for them.
+input_rows() {
+  local p=no k=no f=no s=no w now swapped=no
+  for w in $ql; do
+    case "$w" in
+      scroll*|natural|tap|tapping|click*|pointer|mouse|touchpad|trackpad|cursor|speed|sensitivity) p=yes ;;
+      repeat*|delay) k=yes ;;
+      fn|function|media|top|f1|f12|fkeys|hotkeys) f=yes ;;
+      alt|option|super|swap|win|windows|command|cmd|meta) s=yes ;;
+    esac
+  done
+  if [[ $p == yes ]]; then
+    keys_pointer_load
+    N=$KEYS_NATURAL T=$KEYS_TAP SP=$(keys_place "$keys_speeds" "$KEYS_SPEED") jq -cn '
+      ("pointer mouse touchpad trackpad cursor turn on off") as $kw
+      | {id: "pointer:natural", glyph: "touchpad", kind: "Pointer", steady: true, score: 0.9,
+         keywords: ($kw + " natural scrolling scroll direction reverse invert"),
+         title: (if env.N == "yes" then "Turn natural scrolling off" else "Turn natural scrolling on" end),
+         subtitle: (if env.N == "yes" then "On · the page follows your fingers" else "Off · two fingers down scroll the page down" end),
+         run: ["takumi", "keys", "pointer", "natural", (if env.N == "yes" then "off" else "on" end)]},
+        {id: "pointer:tap", glyph: "touchpad", kind: "Pointer", steady: true, score: 0.88,
+         keywords: ($kw + " tap to click tapping click"),
+         title: (if env.T == "yes" then "Turn tap to click off" else "Turn tap to click on" end),
+         subtitle: (if env.T == "yes" then "On · a tap clicks" else "Off · press the touchpad to click" end),
+         run: ["takumi", "keys", "pointer", "tap", (if env.T == "yes" then "off" else "on" end)]},
+        ({glyph: "pointer", kind: "Pointer", steady: true, subtitle: ("Now " + env.SP), keywords: ($kw + " speed sensitivity fast slow")}
+         | (. + {id: "pointer:faster", title: "Pointer speed: faster", run: ["takumi", "keys", "pointer", "speed", "faster"], score: 0.87}),
+           (. + {id: "pointer:slower", title: "Pointer speed: slower", run: ["takumi", "keys", "pointer", "speed", "slower"], score: 0.86}))'
+  fi
+  if [[ $k == yes ]]; then
+    keys_pointer_load
+    R=$(keys_place "$keys_repeats" "$KEYS_DELAY/$KEYS_RATE") jq -cn '
+      {glyph: "keyboard", kind: "Keyboard", steady: true, subtitle: ("Now " + env.R), keywords: "keyboard key repeat held hold delay rate fast slow"}
+      | (. + {id: "keys:repeat:faster", title: "Key repeat: faster", run: ["takumi", "keys", "pointer", "repeat", "faster"], score: 0.87}),
+        (. + {id: "keys:repeat:slower", title: "Key repeat: slower", run: ["takumi", "keys", "pointer", "repeat", "slower"], score: 0.86})'
+  fi
+  if [[ $f == yes ]]; then
+    now=$(keys_fn_now)
+    NOW=$now jq -cn '
+      ("keyboard top row fn function keys f1 f12 media keys brightness volume lock") as $kw
+      | if env.NOW == "media" then
+          {id: "keys:fn", title: "Top row: F1 to F12 first", subtitle: "Now brightness, sound and media first · Fn for F1 to F12",
+           glyph: "keyboard", kind: "Keyboard", keywords: $kw, steady: true, converse: true, risk: 1, run: ["takumi", "keys", "fn", "fkeys"], score: 0.9}
+        elif env.NOW == "fkeys" then
+          {id: "keys:fn", title: "Top row: media keys first", subtitle: "Now F1 to F12 first · Fn for brightness, sound and media",
+           glyph: "keyboard", kind: "Keyboard", keywords: $kw, steady: true, converse: true, risk: 1, run: ["takumi", "keys", "fn", "media"], score: 0.9}
+        else
+          {id: "keys:fn", title: "Top row: the keyboard decides", subtitle: "Press its Fn lock, Fn+Esc on many, to switch",
+           glyph: "keyboard", kind: "Keyboard", keywords: $kw, steady: true, run: ["true"], score: 0.7}
+        end'
+  fi
+  if [[ $s == yes ]]; then
+    keys_swapped "${TAKUMI_KEYD_CONF:-/etc/keyd/default.conf}" && swapped=yes
+    S=$swapped jq -cn '
+      {id: "keys:swap", glyph: "keyboard", kind: "Keyboard", steady: true, converse: true, risk: 1, score: 0.88,
+       keywords: "keyboard alt option super windows key command cmd swap pc harmony"}
+      + (if env.S == "yes" then {title: "Put Alt and Super back", subtitle: "Alt and the Windows key are swapped now",
+                                  run: ["takumi", "keys", "harmony", "swap", "off"]}
+         else {title: "Swap Alt and Super", subtitle: "For a PC keyboard: the key beside the space bar becomes the Command key",
+               run: ["takumi", "keys", "harmony", "swap", "on"]} end)'
+  fi
+  return 0
+}
+input_rows | palette_filter "$q"
+
+# The query's words: topic words, filler, input method words, and the rest, which name a keyboard.
+topic=no; summary=no; im_topic=no; names=""; first=""; ims=""; imwords=""
+for w in $ql; do
+  case "$w" in
+    keyb*|layout|layouts|typing) topic=yes; summary=yes ;;
+    language|languages) summary=yes ;;
+    input|inputs|ime|imes) im_topic=yes ;;
+    add|remove|delete|switch|next|change|use|the|a|an|to|type|with|method|methods|on|off|stop) ;;
+    japanese|japan|日本語|mozc|kana|hiragana) ims="$ims japanese"; imwords="$imwords $w" ;;
+    korean|korea|한국어|hangul) ims="$ims korean"; imwords="$imwords $w" ;;
+    chinese|china|中文|mandarin) ims="$ims pinyin zhuyin cangjie"; imwords="$imwords $w" ;;
+    pinyin|拼音) ims="$ims pinyin"; imwords="$imwords $w" ;;
+    zhuyin|bopomofo|chewing|注音) ims="$ims zhuyin"; imwords="$imwords $w" ;;
+    cangjie|倉頡|仓颉) ims="$ims cangjie"; imwords="$imwords $w" ;;
+    *) if [[ ${#w} -ge 3 ]]; then names="$names $w"; [[ -n "$first" ]] || first=$w; fi ;;
+  esac
+done
+# With "keyboard" in the query, "japanese" names a keyboard too: the one printed on a Japanese keyboard.
+if [[ $topic == yes && -n "$imwords" ]]; then names="$names $imwords"; [[ -n "$first" ]] || first=japanese; fi
+# A name alone shows only what xkeyboard-config has, so any other search costs one look in its list.
+if [[ $topic == no && $summary == no && $im_topic == no && -z "$ims" ]]; then
+  [[ ${#first} -ge 4 ]] && grep -qiF -- "$first" "$TAKUMI_XKB_RULES" 2>/dev/null || exit 0
+fi
+
+keys_load || exit 0
+keys_all >/dev/null   # read xkeyboard-config's names once, for every row below
+pairs=$(keys_pairs "$KEYS_LAYOUTS" "$KEYS_VARIANTS")
+# Yours, by name: [{layout, variant, name}], the first the one the computer starts with.
+mine=$(keys_all | P=$pairs jq -sc '. as $all
+  | env.P | split("\n") | map(select(length > 0) | split("\t") | {layout: .[0], variant: (.[1] // "")})
+  | map(. as $x | . + {name: (first($all[] | select(.layout == $x.layout and .variant == $x.variant) | .name)
+                                // ($x.layout + (if $x.variant != "" then " (" + $x.variant + ")" else "" end)))})')
+hits="[]"
+if [[ -n "$names" ]] && { [[ $topic == yes ]] || [[ ${#first} -ge 4 ]]; }; then hits=$(keys_find "$names" 40 | jq -sc .); fi
+cur=""
+[[ $topic == yes ]] && cur=$(niri msg --json keyboard-layouts 2>/dev/null | jq -r '.current_idx // empty' 2>/dev/null || true)
+[[ "$cur" =~ ^[0-9]+$ ]] || cur=-1
+
+{
+  # The summary (Enter asks which to add), the next one, removing one, and the ones a name finds to add.
+  M=$mine H=$hits C=$cur TOPIC=$topic SUMMARY=$summary KW="keyboard keyboards layout layouts" jq -cn '
+    (env.M | fromjson) as $m | ($m | length) as $n | (env.H | fromjson) as $hits | (env.C | tonumber) as $cur
+    | def run($verb; $k): ["takumi", "keys", "layout", $verb, $k.layout] + (if $k.variant != "" then [$k.variant] else [] end);
+    def id($k): $k.layout + (if $k.variant != "" then ":" + $k.variant else "" end);
+    def mine($k): any($m[]; .layout == $k.layout and .variant == $k.variant);
+    ($m | map(.name) | join(", ")) as $now
+    | (if env.SUMMARY == "yes" then
+        {id: "keys:layouts", title: ("Keyboards: " + $now), glyph: "keyboard", kind: "Keyboard", steady: true,
+         subtitle: ("Enter to add one" + (if $n > 1 then " · the keyboard mark in the Core switches between them" else "" end)),
+         keywords: (env.KW + " language languages type typing add switch"), converse: true, run: ["takumi", "keys", "layout", "add"], score: 0.95}
+       else empty end),
+      (if env.TOPIC == "yes" and $n > 1 and $cur >= 0 then
+        {id: "keys:next", title: ("Switch to " + $m[($cur + 1) % $n].name), glyph: "keyboard", kind: "Keyboard",
+         subtitle: ("Now " + $m[$cur % $n].name + " · or press the keyboard mark in the Core"), keywords: (env.KW + " switch next change"),
+         run: ["takumi", "keys", "layout", "next"], score: 0.9}
+       else empty end),
+      (if $n > 1 then
+        range(0; $n) as $i | $m[$i] as $k
+        | select(env.TOPIC == "yes" or any($hits[]; .layout == $k.layout and .variant == $k.variant))
+        | ($m | del(.[$i])) as $rest
+        | {id: ("keys:remove:" + id($k)), title: ("Remove the " + $k.name + " keyboard"), glyph: "keyboard", kind: "Keyboard",
+           subtitle: (if $i == 0 then $rest[0].name + " becomes the one the computer starts with" else "Keeps " + ($rest | map(.name) | join(", ")) end),
+           keywords: (env.KW + " remove delete " + $k.layout + " " + $k.variant), risk: 1, converse: true, run: run("remove"; $k), score: 0.6}
+       else empty end),
+      ($hits | map(select(mine(.) | not)) | .[0:10] | to_entries[] | .key as $j | .value as $k
+       | {id: ("keys:add:" + id($k)), title: ("Add the " + $k.name + " keyboard"), subtitle: ("After " + $now + " · Enter to add it"),
+          glyph: "keyboard", kind: "Keyboard", keywords: (env.KW + " add type typing " + $k.layout + " " + $k.variant), steady: true,
+          converse: true, run: run("add"; $k), score: (0.85 - $j / 1000)})'
+
+  # Input methods: Japanese, Korean and Chinese through fcitx5. The ones the query names, all of them for
+  # "input", the ones set up for "keyboard".
+  set_up=$(keys_input_engines)
+  list=$ims
+  [[ $im_topic == yes ]] && list=$KEYS_INPUT_NAMES
+  if [[ $topic == yes && -z "$list" && -n "$set_up" ]]; then
+    list=$(keys_input_table | SET=$set_up awk -F '|' 'BEGIN { n = split(ENVIRON["SET"], s, "\n"); for (i = 1; i <= n; i++) on[s[i]] = 1 } on[$2] { printf "%s ", $1 }')
+  fi
+  if [[ -n "$list" ]]; then
+    TABLE=$(keys_input_table) L=$list SET=$set_up jq -cn '
+      (env.SET | split("\n") | map(select(length > 0))) as $set
+      | [env.TABLE | split("\n")[] | select(length > 0) | split("|") | {name: .[0], engine: .[1], what: .[5]}] as $table
+      | {japanese: ["Type Japanese", "日本語 kana hiragana"], korean: ["Type Korean", "한국어"],
+         pinyin: ["Type Chinese with Pinyin", "中文 拼音 mandarin simplified"],
+         zhuyin: ["Type Chinese with Zhuyin (Bopomofo)", "中文 注音 mandarin traditional taiwan"],
+         cangjie: ["Type Chinese with Cangjie", "中文 倉頡 仓颉 traditional hong kong"]} as $say
+      | [env.L | split(" ")[] | select(length > 0)] | reduce .[] as $x ([]; if index([$x]) then . else . + [$x] end)
+      | to_entries[] | .key as $j | .value as $n | first($table[] | select(.name == $n)) as $im | $say[$n] as $t
+      | ("input method ime type typing keyboard " + $n + " " + $t[1]) as $w
+      | if any($set[]; . == $im.engine) then
+          {id: ("keys:input:remove:" + $n), title: ("Stop typing " + ($t[0] | ltrimstr("Type "))), subtitle: "Ctrl+Space no longer switches to it",
+           glyph: "keyboard", kind: "Keyboard", keywords: ($w + " stop remove"), risk: 1, converse: true,
+           run: ["takumi", "keys", "input", "remove", $n], score: 0.6}
+        else
+          {id: ("keys:input:add:" + $n), title: $t[0], subtitle: ("Installs " + $im.what + " · Ctrl+Space switches it on and off"),
+           glyph: "keyboard", kind: "Keyboard", keywords: ($w + " add"), steady: true, converse: true,
+           run: ["takumi", "keys", "input", "add", $n], score: (0.84 - $j / 1000)}
+        end'
+    # Switching it on or off while it runs: the engine Ctrl+Space turns on, or back to the keyboard.
+    if [[ -n "$set_up" ]] && keys_input_running; then
+      state=$(takumi keys input state 2>/dev/null || echo '{}')
+      S=$state K=$(keys_names <<< "$(keys_password "$pairs")") W="input method ime type typing keyboard switch" jq -cn '
+        (env.S | fromjson) as $s
+        | {id: "keys:input:toggle", glyph: "keyboard", kind: "Keyboard", run: ["takumi", "keys", "input", "toggle"], score: 0.93,
+           keywords: (env.W + " " + ($s.setUp // [] | join(" ")) + " " + (($s.name // "") | ascii_downcase)),
+           title: (if $s.on then "Switch back to " + env.K else "Switch to " + ($s.name // "the input method") end),
+           subtitle: (if $s.on then "Now " + ($s.name // "") + " · or press Ctrl+Space" else "Now your keyboard · or press Ctrl+Space" end)}'
+    fi
+  fi
+} | palette_filter "$q"

@@ -1,0 +1,15 @@
+# Xbox controllers (Xbox One, One S, Elite, Elite Series 2, Series X|S) by cable: the kernel's xpad driver. The
+# same controllers pair over Bluetooth with "Pair a device": newer ones use Bluetooth Low Energy, the One S
+# classic Bluetooth, and the kernel's hid-microsoft driver handles both, rumble included. Nothing to set: ERTM
+# need not be turned off for them (that was for old controller firmware); xpadneo, a driver of its own, is only in
+# the AUR. USB ids from the kernel's xpad driver.
+# Kernel: drivers/input/joystick/xpad.c, drivers/hid/hid-microsoft.c
+title = "Xbox controller"
+part = "computer"
+says = "works by cable and over Bluetooth"
+
+[match]
+usb = ["045e:02d1", "045e:02dd", "045e:02e3", "045e:02ea", "045e:0b00", "045e:0b12"]
+
+[apply]
+note = "This Xbox controller works by cable. To use it without one, hold its pairing button until the X blinks fast and type \"pair\" in the Core. Update its firmware from Windows or an Xbox once if it keeps disconnecting."

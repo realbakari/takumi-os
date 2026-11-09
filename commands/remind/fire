@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Ring a reminder or a timer whose moment came (run by its timer in systemd)
+usage: <number>
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; break; }; done
+declare -F remind_get >/dev/null || exit 1
+# Run by takumi-<kind>-<id>.timer, or by takumi remind restore for one missed while the computer was off.
+# The message goes to the shell's notification server, so the Core says it (through do not disturb: it was
+# asked for) and Today keeps it under Earlier. A reminder's message carries one action: pressing it within a
+# minute sets the same reminder again ten minutes on. A timer also rings, when the freedesktop sounds are
+# installed. Without the notification server, a plain notice says it.
+id=${1:-}
+[[ "$id" =~ ^[0-9]+$ ]] || { echo "usage: takumi remind fire <number>" >&2; exit 2; }
+line=$(remind_get "$id")
+[[ -n "$line" ]] || exit 0   # cancelled, or rung already
+IFS=$'\t' read -r _ kind at made text <<< "$line"
+remind_drop "$id"
+now=$(clock_now); late=no
+(( now - at > 120 )) && late=yes
+ring() {  # <sound name>
+  local f="/usr/share/sounds/freedesktop/stereo/$1.oga"
+  if [[ -f "$f" ]] && command -v pw-play >/dev/null; then (pw-play "$f" >/dev/null 2>&1 &); fi
+}
+if [[ $kind == timer ]]; then
+  title=${text:-"Time is up"}; detail="$(clock_length $(( at - made ))) timer"
+  [[ $late == yes ]] && detail="$detail, done at $(clock_hm "$at")"
+  ring alarm-clock-elapsed
+  notify-send -a Timer -u critical -i alarm-clock "$title" "$detail" >/dev/null 2>&1 \
+    || takumi notice clock "$title" "$detail" -1 10 >/dev/null 2>&1 || true
+  exit 0
+fi
+detail="Reminder · press for again in 10 min"
+[[ $late == yes ]] && detail="Reminder for $(clock_hm "$at") · press for again in 10 min"
+ring message-new-instant
+if command -v notify-send >/dev/null; then
+  rc=0; act=$(timeout 60 notify-send -a Reminder -u critical -i appointment-soon -A "default=Again in 10 min" "$text" "$detail" 2>/dev/null) || rc=$?
+  if [[ "$act" == default ]]; then
+    again=$(( $(clock_now) + 600 ))
+    if remind_add remind "$again" "$text" >/dev/null; then takumi notice bell "Again at $(clock_hm "$again")" "$text" >/dev/null 2>&1 || true; fi
+    exit 0
+  fi
+  (( rc == 0 || rc == 124 )) && exit 0
+fi
+takumi notice bell "$text" "reminder" -1 10 >/dev/null 2>&1 || true

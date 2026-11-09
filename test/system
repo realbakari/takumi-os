@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Contract checks for the system's own defaults (docs/tuning.md, docs/wifi.md, docs/hardware.md): systemd-oomd and
+# the apps' slice, the open-files limit, the Wi-Fi's power saving following the charger (against a fake iw and a
+# fake /sys), Thunderbolt docks allowed in the Core (takumi hardware dock against a fake boltd over busctl, a fake
+# boltctl and udevadm), the polkit rule that asks for the password, and that the install steps and package lists
+# carry them. Runs on bash 3.2 with jq.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; system checks skipped)"; exit 0; }
+repo=$PWD; status=0; n=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-system.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR" "$t/commands/notice"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"   # fake takumi commands go in front of the real ones
+check() { n=$((n + 1)); if ! eval "$2"; then echo "   FAIL: $1"; status=1; fi; }
+fake() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$t/bin/$1"; chmod +x "$t/bin/$1"; }
+rec='printf "%s %s\n" "$(basename "$0")" "$*" >> "$FAKE/calls"'
+fake iw "$rec"
+fake qs "$rec"
+fake sleep ':'
+printf '#!/bin/sh\nprintf "notice %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/commands/notice/main"; chmod +x "$t/commands/notice/main"
+
+# --- Memory: systemd-oomd watches the apps' slice; the open-files limit.
+check "oomd: pressure and swap limits, in oomd's own section" '[[ "$(grep -v "^#" etc/systemd/oomd.conf.d/10-takumi.conf)" == "$(printf "%s\n" "[OOM]" "SwapUsedLimit=90%" "DefaultMemoryPressureLimit=60%" "DefaultMemoryPressureDurationSec=20s")" ]]'
+check "the apps' slice asks oomd to stop the app pressing hardest, by pressure and by swap" '[[ "$(grep -v "^#" etc/systemd/user/app.slice.d/10-takumi.conf)" == "$(printf "%s\n" "[Slice]" "ManagedOOMMemoryPressure=kill" "ManagedOOMMemoryPressureLimit=60%" "ManagedOOMSwap=kill")" ]]'
+check "open files: half a million for the system's services and for yours, beside the stop timeout" 'for f in etc/systemd/system.conf.d/10-takumi.conf etc/systemd/user.conf.d/10-takumi.conf; do grep -qx "DefaultLimitNOFILE=524288" "$f" && grep -qx "DefaultTimeoutStopSec=10s" "$f" || exit 1; done'
+check "20-system.sh installs oomd's settings and the slice's, and turns oomd on" 'grep -q "/etc/systemd/oomd.conf.d/10-takumi.conf$" install/steps/20-system.sh && grep -q "/etc/systemd/user/app.slice.d/10-takumi.conf$" install/steps/20-system.sh && grep -q "takumi-room-carry.service systemd-oomd.service; do" install/steps/20-system.sh'
+
+# --- Wi-Fi power saving follows the charger.
+wp=default/networkmanager/dispatcher.d/80-takumi-wifi-power
+export TAKUMI_POWER_SUPPLY=$t/supply TAKUMI_NET=$t/net
+mkdir -p "$t/supply/BAT0" "$t/supply/AC" "$t/net/wlan0/wireless" "$t/net/wlp2s0/phy80211" "$t/net/enp3s0"
+echo Battery > "$t/supply/BAT0/type"; echo Mains > "$t/supply/AC/type"
+plug() { echo "$1" > "$t/supply/AC/online"; : > "$FAKE/calls"; }
+plug 1; bash "$wp"
+check "the charger in: power saving off on every Wi-Fi card, never on the wired one" '[[ "$(sort "$FAKE/calls")" == "$(printf "%s\n" "iw dev wlan0 set power_save off" "iw dev wlp2s0 set power_save off")" ]]'
+plug 0; bash "$wp"
+check "on battery: on again" '[[ "$(sort "$FAKE/calls")" == "$(printf "%s\n" "iw dev wlan0 set power_save on" "iw dev wlp2s0 set power_save on")" ]]'
+plug 0; mkdir -p "$t/supply/ucsi-source-psy-USBC000:001"; echo USB > "$t/supply/ucsi-source-psy-USBC000:001/type"; echo 1 > "$t/supply/ucsi-source-psy-USBC000:001/online"
+bash "$wp"
+check "a USB-C charger counts as the charger" 'grep -qx "iw dev wlan0 set power_save off" "$FAKE/calls"'
+rm -rf "$t/supply/ucsi-source-psy-USBC000:001"
+plug 1; bash "$wp" wlan0 up
+check "NetworkManager: a card that just connected, alone" '[[ "$(cat "$FAKE/calls")" == "iw dev wlan0 set power_save off" ]]'
+plug 1; bash "$wp" enp3s0 up; bash "$wp" wlan0 down; bash "$wp" wlan0 dhcp4-change
+check "a wired card, and other events, are left alone" '[[ ! -s "$FAKE/calls" ]]'
+rm -rf "$t/supply/BAT0"; plug 0; bash "$wp"
+check "no battery at all (a desktop): power saving off" 'grep -qx "iw dev wlan0 set power_save off" "$FAKE/calls"'
+rm "$t/bin/iw"; plug 1
+check "without iw: nothing fails" 'bash "$wp" && bash "$wp" wlan0 up'
+fake iw "$rec"
+check "udev runs it when a charger comes or goes" 'grep -q "^SUBSYSTEM==\"power_supply\", ACTION==\"add|change\", ATTR{type}==\"Mains|USB\", RUN+=\"/usr/lib/NetworkManager/dispatcher.d/80-takumi-wifi-power\"$" default/udev/80-takumi-wifi-power.rules'
+check "20-system.sh installs it where NetworkManager runs it, and iw is in the base" 'grep -q "install -Dm755 \"\$TAKUMI_PATH/$wp\" /usr/lib/NetworkManager/dispatcher.d/80-takumi-wifi-power" install/steps/20-system.sh && grep -q "^iw " install/packages/base.txt && grep -q "trigger --subsystem-match=power_supply" install/steps/20-system.sh'
+unset TAKUMI_POWER_SUPPLY TAKUMI_NET
+
+# --- Thunderbolt docks: boltd over busctl, a fake one.
+# $FAKE/bolt holds one device per line: path uid type status stored vendor name...
+cat > "$t/bin/busctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'busctl %s\n' "$*" >> "$FAKE/calls"
+[[ -f "$FAKE/no-boltd" ]] && exit 1
+args=(); for a in "$@"; do case "$a" in --system|--json=short) ;; *) args+=("$a") ;; esac; done
+case "${args[0]}" in
+  call) jq -cn --rawfile b "$FAKE/bolt" '{type: "ao", data: [[$b | split("\n")[] | select(length > 0) | split(" ")[0]]]}' ;;
+  get-property)
+    line=$(awk -v p="${args[2]}" '$1 == p' "$FAKE/bolt")
+    set -- $line
+    case "${args[4]}" in
+      Uid) v=$2 ;; Type) v=$3 ;; Status) v=$4 ;; Vendor) v=$6 ;; Name) shift 6; v="$*" ;;
+      Stored) printf '{"type":"b","data":%s}\n' "$5"; exit 0 ;;
+    esac
+    jq -cn --arg v "$v" '{type: "s", data: $v}' ;;
+esac
+FAKE
+fake boltctl "$rec"'; [[ -f "$FAKE/bolt-refuses" ]] && exit 1; exit 0'
+fake udevadm "$rec"'; printf "%s\n" "monitor will print the received events for:" "UDEV - the event which udev sends out after rule processing" "" "UDEV  [123.456] add      /devices/pci0000:00/0000:00:0d.2/domain0/0-0/0-1 (thunderbolt)" "UDEV  [123.457] change   /devices/pci0000:00/0000:00:0d.2/domain0/0-0/0-1 (thunderbolt)"'
+chmod +x "$t/bin/busctl"
+printf '%s\n' "/org/freedesktop/bolt/devices/h1 h-1 host authorized true Lenovo ThinkPad" \
+  "/org/freedesktop/bolt/devices/d1 d-1 peripheral connected false CalDigit TS4" \
+  "/org/freedesktop/bolt/devices/d2 d-2 peripheral authorized true Apple Studio Display" > "$FAKE/bolt"
+: > "$FAKE/calls"
+check "waiting: the peripheral plugged in and not allowed, by its maker and name" '[[ "$(takumi hardware dock --waiting)" == "d-1	CalDigit TS4" ]]'
+talk() { printf '%b' "$1" | TAKUMI_CORE=1 takumi hardware dock 2>&1; echo "rc=$?"; }
+said=$(talk 'yes\n')
+check "the conversation: Allow this dock?, then boltd enrolls it to be allowed every time ($(tr '\n' '|' <<< "$said"))" \
+  '[[ "$(tr "\n" "|" <<< "$said")" == "confirm Allow CalDigit TS4? A dock reaches deep into the computer: allow only one you know|note CalDigit TS4 is allowed|done Allowed, now and whenever it is plugged in again|rc=0|" ]] && grep -qx "boltctl enroll --policy auto d-1" "$FAKE/calls"'
+: > "$FAKE/calls"; said=$(talk 'no\n')
+check "a no: nothing allowed, exit 3" '[[ "$said" == *"Nothing was allowed."*"rc=3" ]] && ! grep -q "^boltctl" "$FAKE/calls"'
+touch "$FAKE/bolt-refuses"; said=$(talk 'yes\n'); rm -f "$FAKE/bolt-refuses"
+check "the approval refused: said, exit 3" '[[ "$said" == *"wrong CalDigit TS4 was not allowed"*"rc=3" ]]'
+sed -i.bak 's/^\(.*d1 d-1 peripheral connected\) false/\1 true/' "$FAKE/bolt"; : > "$FAKE/calls"; talk 'yes\n' >/dev/null
+check "a device boltd already knows but does not allow: authorized, not enrolled again" 'grep -qx "boltctl authorize d-1" "$FAKE/calls"'
+mv "$FAKE/bolt.bak" "$FAKE/bolt"
+grep -v d-1 "$FAKE/bolt" > "$FAKE/b" && mv "$FAKE/b" "$FAKE/bolt"
+said=$(talk '')
+check "nothing waits: said, exit 0" '[[ "$said" == *"done No dock or Thunderbolt device is waiting for permission"*"rc=0" ]]'
+check "--waiting with nothing waiting: exit 1" '! takumi hardware dock --waiting >/dev/null'
+touch "$FAKE/no-boltd"
+check "no boltd: nothing waits, nothing breaks" '! takumi hardware dock --waiting >/dev/null'
+rm -f "$FAKE/no-boltd"
+printf '%s\n' "/org/freedesktop/bolt/devices/d1 d-1 peripheral connected false CalDigit TS4" > "$FAKE/bolt"
+mkdir -p "$t/tb"; : > "$FAKE/calls"
+TAKUMI_THUNDERBOLT=$t/tb takumi hardware dock --watch
+check "watching: a waiting dock is said in the Core once, which opens on its row" '[[ $(grep -c "^notice usb CalDigit TS4 waits for your permission" "$FAKE/calls") -eq 1 && $(grep -c "^qs -c takumi ipc --any-display call core search allow this dock$" "$FAKE/calls") -eq 1 ]] && grep -q "^udevadm monitor --udev --subsystem-match=thunderbolt$" "$FAKE/calls"'
+: > "$FAKE/calls"; TAKUMI_THUNDERBOLT=$t/none takumi hardware dock --watch
+check "watching on a computer without Thunderbolt: ends quietly" '[[ ! -s "$FAKE/calls" ]]'
+check "usage: exit 2" '! takumi hardware dock --nope 2>/dev/null; [[ $(takumi hardware dock --nope >/dev/null 2>&1; echo $?) -eq 2 ]]'
+check "the row by itself: a conversation titled Allow this dock" 'grep -qx "title: Allow this dock" commands/hardware/dock && grep -qx "converse: yes" commands/hardware/dock && grep -qx "glyph: usb" commands/hardware/dock'
+check "the watcher's service starts only with Thunderbolt" 'grep -qx "ConditionPathExists=/sys/bus/thunderbolt/devices" default/systemd/user/takumi-docks.service && grep -qx "ExecStart=/usr/bin/takumi hardware dock --watch" default/systemd/user/takumi-docks.service'
+check "polkit: allowing a device asks an administrator at the computer for the password, kept a while" 'grep -q "org.freedesktop.bolt.enroll" etc/polkit-1/rules.d/50-takumi-bolt.rules && grep -q "subject.local && subject.active && subject.isInGroup(\"wheel\")" etc/polkit-1/rules.d/50-takumi-bolt.rules && grep -q "polkit.Result.AUTH_ADMIN_KEEP" etc/polkit-1/rules.d/50-takumi-bolt.rules && ! grep -q "Result.YES" etc/polkit-1/rules.d/50-takumi-bolt.rules'
+check "the rule is read before bolt's own (by name)" '[[ "50-takumi-bolt.rules" < "org.freedesktop.bolt.rules" ]] && grep -q "/etc/polkit-1/rules.d/50-takumi-bolt.rules$" install/steps/20-system.sh'
+check "bolt and python-gobject are in the desktop's packages" 'grep -q "^bolt " install/packages/desktop.txt && grep -q "^python-gobject " install/packages/desktop.txt'
+
+echo "   $n system checks against a fake iw, boltd and sysfs"
+exit $status

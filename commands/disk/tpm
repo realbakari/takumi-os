@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Let this computer's security chip (TPM) open the encrypted disk when it starts; your password and recovery code still work
+usage: <on|off>
+example: takumi disk tpm on
+risk: 2
+sudo: yes
+converse: yes
+words: tpm security chip open unlock disk encryption start automatically without password
+ABOUT
+#
+# A conversation (lib/core.sh). on needs Secure Boot on, because the chip only checks that the computer starts
+# the way it did (PCR 7: Secure Boot's state and keys). It asks for your password, which lets it add a key slot,
+# then, as root: the login screen asks for the password from now on (the one-password start goes, since nobody
+# typed one), the boot menu's editor goes, systemd-cryptenroll seals a new key slot to the chip,
+# rd.luks.options=<uuid>=tpm2-device=auto goes into /etc/kernel/cmdline, and the initramfs and this room's boot
+# entry are made again. The password's slot and the recovery code's stay. off: the chip's slot and the option
+# go, and the one-password start comes back. Without a word: the state, in words. Exit codes: 0 done, 1 not
+# possible here or cancelled, 3 the password did not work. See docs/encryption.md.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do
+  [[ -f "$l/disk.sh" ]] && { . "$l/core.sh"; . "$l/rooms.sh"; . "$l/disk.sh"; . "$l/security.sh"; break; }
+done
+declare -F disk_tpm_enroll >/dev/null && declare -F security_boot_state >/dev/null && declare -F core_secret >/dev/null \
+  || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# As root, through sudo (below). stdin's last line is the disk's password, whether or not sudo read its own from
+# the first. Exit 3: the password does not open the disk. 6: the chip's software is missing. 7: the chip opens
+# the disk, but the start could not be made again.
+if [[ "${1:-}" == --root ]]; then
+  [[ "$(id -u)" == 0 ]] || exit 1
+  lines=()
+  while IFS= read -r l; do lines+=("$l"); done
+  (( ${#lines[@]} > 0 )) || exit 1
+  pass=${lines[$((${#lines[@]} - 1))]}
+  dev=$(disk_luks_device)
+  [[ -n "$dev" ]] || exit 1
+  disk_opens_with "$dev" "$pass" || exit 3
+  uuid=$(cryptsetup luksUUID "$dev")
+  case "${2:-}" in
+    on)
+      has=$(systemd-analyze has-tpm2 2>/dev/null || true)
+      [[ "$has" != *"-libraries"* ]] || exit 6
+      was=off; if disk_opens_by_itself; then was=on; fi
+      # The login screen asks before the chip can open anything; it goes back only if the chip says no.
+      disk_autologin off                                               # /usr/share/takumi/greetd/config.toml
+      if esp=$(security_esp); then disk_boot_editor_off "$esp/loader/loader.conf"; fi   # <esp>/loader/loader.conf
+      if ! disk_tpm_enroll "$dev" "$pass"; then                         # the disk's LUKS2 header
+        owner=$(disk_owner)
+        if [[ "$was" == off && -n "$owner" ]]; then disk_autologin on "$owner"; fi
+        exit 1
+      fi
+      disk_cmdline_tpm on "$uuid"                                       # /etc/kernel/cmdline
+      mkinitcpio -P >/dev/null 2>&1 || exit 7                           # /boot/initramfs-*.img
+      takumi room kernel-sync >/dev/null 2>&1 || exit 7 ;;              # this room's kernel, initramfs and entry
+    off)
+      disk_tpm_remove "$dev" "$pass"                                    # the disk's LUKS2 header
+      disk_cmdline_tpm off "$uuid"                                      # /etc/kernel/cmdline
+      owner=$(disk_owner)
+      if [[ -n "$owner" ]]; then disk_autologin on "$owner"; fi         # /usr/share/takumi/greetd/config.toml
+      takumi room kernel-sync >/dev/null 2>&1 || exit 7 ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+
+mode=${1:-}
+case "$mode" in
+  on|off) ;;
+  "")
+    if ! rooms_encrypted; then echo "The disk is not encrypted"
+    elif disk_opens_by_itself; then echo "The disk opens by itself when this computer starts"
+    else echo "The disk asks for your password when this computer starts"; fi
+    exit 0 ;;
+  *) echo "usage: takumi disk tpm <on|off>" >&2; exit 2 ;;
+esac
+[[ "$(id -u)" != 0 ]] || core_fail 1 "Run this as yourself, not as root."
+rooms_encrypted || core_fail 1 "This computer's disk is not encrypted, so there is nothing for the chip to open."
+[[ -n "$(rooms_current)" ]] || core_fail 1 "This computer does not start from Takumi's rooms, so Takumi cannot change how it opens the disk."
+if [[ "$mode" == on ]]; then
+  case "$(disk_tpm_chip)" in
+    none) core_fail 1 "This computer has no security chip (TPM), so the disk asks for your password at every start." ;;
+    old) core_fail 1 "This computer's security chip is an older kind (TPM 1.2), which cannot open the disk." ;;
+  esac
+  [[ "$(security_boot_state)" == on ]] \
+    || core_fail 1 "Turn on Secure Boot first: without it, anyone could start this computer from a USB stick and the chip would open the disk for them."
+  core_note "The disk opens by itself on this computer unless someone changes how it starts; your password and recovery code still work"
+else
+  core_note "The disk will ask for your password at every start again"
+fi
+command -v unix_chkpwd >/dev/null || core_fail 1 "This computer cannot check passwords (unix_chkpwd is missing)."
+user=$(id -un)
+self=$(readlink -f "$0")
+pw=""
+core_secret pw "Your password" || core_fail 1 "Nothing changed."
+for try in 1 2 3; do
+  security_password_is "$user" "$pw" && break
+  pw=""
+  (( try < 3 )) || core_fail 3 "That password did not work."
+  core_wrong "That password did not work"
+  core_secret pw "Your password" || core_fail 1 "Nothing changed."
+done
+if [[ "$mode" == on ]]; then core_note "Sealing a key to the chip and getting the start ready…"; else core_note "Taking the chip's key away…"; fi
+rc=0
+printf '%s\n' "$pw" | security_sudo_stdin "$pw" "$self" --root "$mode" || rc=$?   # the disk's LUKS2 header, /etc/kernel/cmdline, /usr/share/takumi/greetd/config.toml, <esp>/loader/loader.conf, the initramfs and this room's boot entry
+pw=""
+case "$rc" in
+  0) ;;
+  3) core_fail 3 "The disk opens with a different password. Change your password first, then try again." ;;
+  6) core_fail 1 "The software for the security chip is missing (tpm2-tss). Nothing changed." ;;
+  7) if [[ "$mode" == on ]]; then core_fail 1 "The chip can open the disk, but this computer's start could not be made again; until it is, the disk asks for your password."
+     else core_fail 1 "The chip's key is gone, but this computer's start could not be made again."; fi ;;
+  *) if [[ "$mode" == on ]]; then core_fail 1 "The chip could not take a key. The disk still asks for your password."
+     else core_fail 1 "Nothing changed."; fi ;;
+esac
+if [[ "$mode" == on ]]; then core_done "The disk opens by itself on this computer now. The login screen asks for your password"
+else core_done "The disk asks for your password at every start again"; fi

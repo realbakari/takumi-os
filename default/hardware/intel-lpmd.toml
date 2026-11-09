@@ -1,0 +1,18 @@
+# Intel Meteor Lake, Lunar Lake and Panther Lake laptops (family 6, models 170, 189 and 204: the models
+# intel-lpmd ships a configuration for): light work stays on the efficient cores.
+# Intel: https://github.com/intel/intel-lpmd
+title = "Intel low power mode"
+part = "processor"
+says = "light work stays on the efficient cores"
+
+[match]
+cpu_vendor = ["GenuineIntel"]
+cpu_family = [6]
+cpu_model = [170, 189, 204]
+laptop = true
+arch = ["x86_64"]
+
+[apply]
+packages = ["intel-lpmd"]
+services = ["intel_lpmd.service"]
+note = "Intel's low power daemon keeps light work, like reading or a video call, on the processor's efficient cores, which saves battery."

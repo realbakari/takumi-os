@@ -1,0 +1,33 @@
+# Backups, as set from the Core (takumi backup setup). See docs/backup.md.
+
+[place]
+kind = ""            # disk or cloud; empty while backups are off
+name = ""
+disk = ""
+remote = ""
+folder = ""
+
+[skip]
+# Your home folder is backed up, except these folders: apps rebuild them, or they download again. One per line,
+# from your home folder; * stands for any name. A folder with an empty file called .nobackup in it is skipped too.
+folders = [
+  ".cache",                                                           # what apps keep to start faster
+  ".local/share/Trash",                                               # the Trash
+  ".var/app/*/cache",                                                 # the same, for apps from Flathub
+  ".local/share/flatpak",                                             # apps from Flathub themselves; your settings in them are kept
+  ".local/share/Steam/steamapps/common",                              # Steam games (saves are kept)
+  ".local/share/Steam/steamapps/shadercache",
+  ".local/share/Steam/steamapps/downloading",
+  ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common",
+  ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/shadercache",
+  ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/downloading",
+  ".local/share/containers",                                          # container images
+  ".local/share/takumi",                                              # Takumi's own copy of its installer
+  "**/node_modules",                                                  # what code projects download again
+  ".npm/_cacache",
+  ".cargo/registry",
+  ".rustup",
+  "go/pkg/mod",
+  ".gradle/caches",
+  ".m2/repository",
+]

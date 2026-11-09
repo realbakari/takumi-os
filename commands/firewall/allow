@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Let other devices reach an app through the firewall, such as LocalSend; asks first
+usage: <app>
+example: takumi firewall allow LocalSend
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/firewall.sh" ]] && { . "$l/firewall.sh"; . "$l/core.sh"; break; }; done
+declare -F firewall_find >/dev/null && declare -F core_confirm >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh): the question says what the app does ("LocalSend receives files from nearby
+# devices. Allow it?"), and the password is asked in the Core. Exit status: 0 allowed · 1 nothing changed (you
+# said no, or the firewall would not take it) · 2 usage · 5 no app by that name.
+word=${1:-}; [[ -n "$word" ]] || { echo "usage: takumi firewall allow <app>" >&2; exit 2; }
+firewall_installed || core_fail 1 "The firewall is not set up: takumi firewall on sets it up"
+app=$(firewall_find "$word") || core_fail 5 "The firewall knows no app called $word"
+grep -qxF -- "$app" <<< "$(firewall_profiles)" || core_fail 1 "The firewall does not know $app on this computer yet"
+core_confirm "$app $(firewall_what "$app"). Allow it?" || core_fail 1 "Nothing changed"
+core_note "Letting $app in…"
+out=$(core_sudo "Changing the firewall needs your password" takumi firewall apply allow "$app" 2>&1) ||   # /etc/ufw/user.rules, /etc/ufw/user6.rules, /etc/takumi/firewall
+  core_fail 1 "$app is still blocked: $(sed -e 's/^ERROR: //' -e 's/^sudo: //' <<< "$out" | sed '/^[[:space:]]*$/d' | tail -n 1)"
+core_done "$app may be reached through the firewall now"

@@ -1,0 +1,35 @@
+# One Light: the editor classic in daylight
+# Colours after One Dark and One Light from Atom (https://github.com/atom/atom/tree/master/packages/one-dark-syntax); phases by Takumi.
+
+[meta]
+name = "one-light"
+mode = "light"
+title = "One Light"
+about = "the editor classic in daylight"
+credit = "One Dark and One Light from Atom (https://github.com/atom/atom/tree/master/packages/one-dark-syntax)"
+
+[palette]
+accent     = "#4078f2"
+background = "#fafafa"
+surface    = "#f0f0f1"
+foreground = "#383a42"
+muted      = "#909196"
+red        = "#e45649"
+yellow     = "#c18401"
+green      = "#50a14f"
+cyan       = "#0184bc"
+blue       = "#4078f2"
+magenta    = "#a626a4"
+
+[phase.dawn]
+accent     = "#986801"
+background = "#fcf7f1"
+
+[phase.dusk]
+accent     = "#b3621a"
+
+[phase.night]
+accent     = "#3767d0"
+background = "#f0f0f1"
+surface    = "#e5e5e6"
+foreground = "#4b4d54"

@@ -1,0 +1,23 @@
+# NVIDIA graphics from Turing on, in a laptop: the chip powers down whenever no app uses it, with NVIDIA's own
+# udev rules for runtime power management, and prime-run starts a game on it.
+# NVIDIA: the driver README's chapter "PCI-Express Runtime D3 (RTD3) Power Management" (the rules below are
+# its own).
+title = "NVIDIA graphics in a laptop"
+part = "graphics"
+says = "rests when no app uses it"
+
+[match]
+pci = ["10de:1e??", "10de:1f??", "10de:2???", "10de:3???"]
+pci_class = ["03??"]
+laptop = true
+arch = ["x86_64"]
+
+[apply]
+packages = ["nvidia-prime"]
+udev = [
+  'ACTION=="bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030000", TEST=="power/control", ATTR{power/control}="auto"',
+  'ACTION=="bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030200", TEST=="power/control", ATTR{power/control}="auto"',
+  'ACTION=="unbind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030000", TEST=="power/control", ATTR{power/control}="on"',
+  'ACTION=="unbind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030200", TEST=="power/control", ATTR{power/control}="on"',
+]
+note = "The NVIDIA chip turns itself off whenever no app uses it, so the battery lasts; the screen runs on the processor's own graphics. prime-run in front of a game's command starts it on the NVIDIA chip."

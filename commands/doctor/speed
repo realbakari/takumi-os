@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Test the internet's speed: download, upload and the time an answer takes
+risk: 0
+title: Test the internet speed
+words: speed speedtest internet slow fast bandwidth download upload mbps ping connection
+glyph: down
+converse: yes
+ABOUT
+set -euo pipefail
+# A conversation in the Core (plain lines at a terminal): a note per step, then one sentence,
+# "Download 94 Mbit/s · Upload 21 Mbit/s · 18 ms". It measures against Cloudflare's speed test
+# (speed.cloudflare.com: __down sends the bytes asked for, __up takes what is sent) with curl alone, so
+# nothing is installed. Each direction runs for about 10 seconds. The last result is kept in
+# ~/.local/state/takumi/speed.txt for the Palette's "Last speed test" row (docs/doctor.md).
+# Exit status: 0 measured · 1 the internet did not answer.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; break; }; done
+declare -F core_note >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+command -v curl >/dev/null || core_fail 1 "curl is missing, so the speed cannot be tested"
+url=${TAKUMI_SPEED_URL:-https://speed.cloudflare.com}
+secs=${TAKUMI_SPEED_SECONDS:-10}
+state="$HOME/.local/state/takumi/speed.txt"; mkdir -p "${state%/*}"
+
+# Mbit/s from bytes a second: whole numbers from 10 up, one decimal below.
+mbit() { awk -v b="$1" 'BEGIN { m = b * 8 / 1000000; if (m >= 10) printf "%d", m + 0.5; else printf "%.1f", m }'; }
+
+# The time an answer takes: the quickest of five connections (TCP handshake, after the name is looked up).
+core_note "Measuring how quickly the internet answers"
+ping=""
+for _ in 1 2 3 4 5; do
+  w=$(curl -s -o /dev/null --max-time 5 -w '%{time_namelookup} %{time_connect}' "$url/__down?bytes=0" 2>/dev/null) || break
+  ms=$(awk -v w="$w" 'BEGIN { split(w, a, " "); printf "%d", (a[2] - a[1]) * 1000 + 0.5 }')
+  [[ -z "$ping" || "$ms" -lt "$ping" ]] && ping=$ms
+done
+[[ -n "$ping" ]] || core_fail 1 "The speed test did not answer: check that you are online (\"something is wrong\")"
+(( ping > 0 )) || ping=1
+
+# measure <down|up>: bytes a second, over requests of 25 MB one after another until $secs seconds have
+# passed (one large file would end before the connection is up to speed on a fast line). Each request
+# stops at the time left; curl reports what moved even then.
+measure() {
+  local bytes=0 time=0 left w b t code
+  while :; do
+    left=$(awk -v s="$secs" -v t="$time" 'BEGIN { l = s - t; printf "%d", (l < 1 ? 0 : l + 0.5) }')
+    (( left > 0 )) || break
+    if [[ $1 == down ]]; then
+      w=$(curl -s -o /dev/null --max-time "$left" -w '%{size_download} %{time_total} %{http_code}' "$url/__down?bytes=25000000" 2>/dev/null || true)
+    else
+      w=$(head -c 25000000 /dev/zero | curl -s -o /dev/null --max-time "$left" -H 'Content-Type: application/octet-stream' -H 'Expect:' \
+            --data-binary @- -w '%{size_upload} %{time_total} %{http_code}' "$url/__up" 2>/dev/null || true)
+    fi
+    read -r b t code <<< "$w"
+    [[ "${b:-}" =~ ^[0-9]+$ && "${t:-}" =~ ^[0-9.]+$ && "${code:-}" =~ ^(200|100|000)$ && "$b" -gt 0 ]] || break
+    bytes=$(( bytes + b )); time=$(awk -v a="$time" -v b="$t" 'BEGIN { print a + b }')
+  done
+  awk -v b="$bytes" -v t="$time" 'BEGIN { if (t > 0) printf "%d", b / t; else print 0 }'
+}
+
+core_note "Measuring the download"
+w=$(measure down)
+(( w > 0 )) || core_fail 1 "The download did not start: check that you are online (\"something is wrong\")"
+down=$(mbit "$w")
+core_note "Download $down Mbit/s"
+
+core_note "Measuring the upload"
+w=$(measure up)
+(( w > 0 )) || core_fail 1 "Download $down Mbit/s, but the upload did not start"
+up=$(mbit "$w")
+
+said="Download $down Mbit/s · Upload $up Mbit/s · $ping ms"
+printf '%s\t%s\n' "$(date '+%Y-%m-%d %H:%M')" "$said" > "$state"
+core_done "$said"
+exit 0

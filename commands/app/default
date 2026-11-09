@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Show or choose the default apps: browser, mail, terminal, editor, PDFs, images, video, music and files
+usage: [<browser|mail|terminal|editor|pdf|images|video|music|files> [app]] [--json]
+example: takumi app default browser chromium
+example: takumi app default
+risk: 0
+words: default apps browser mail terminal editor pdf images video music files open with
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; break; }; done
+declare -F apps_set_default >/dev/null || { echo "takumi: the apps library is missing" >&2; exit 1; }
+
+# Without a word: every kind and its app. With a kind: the apps that can be it, the one in use marked "*".
+# With a kind and an app (its desktop ID, its name, or part of either): that app from now on, through
+# xdg-mime (and xdg-settings for the browser), or xdg-terminals.list for the terminal. Exit status: 0 ·
+# 2 not a kind · 4 no such app, or more than one matches · 5 xdg-utils is missing · 1 anything else.
+json=no; args=()
+for a in "$@"; do if [[ "$a" == --json ]]; then json=yes; else args+=("$a"); fi; done
+set -- ${args[@]+"${args[@]}"}
+usage() { echo "usage: takumi app default [<$(echo "$apps_kinds" | tr ' ' '|')> [app]] [--json]" >&2; exit 2; }
+(( $# <= 2 )) || usage
+kind=${1:-}; want=${2:-}
+
+if [[ -z "$kind" ]]; then
+  all=$(apps_defaults_all)
+  while IFS=$'\t' read -r k id; do
+    name=""; [[ -z "$id" ]] || name=$(apps_name "$id")
+    if [[ $json == yes ]]; then K=$k L=$(apps_kind_label "$k") I=$id N=$name jq -cn '{kind: env.K, label: env.L, id: env.I, name: env.N}'
+    elif [[ -n "$id" ]]; then printf '%-9s %s (%s)\n' "$(apps_kind_label "$k")" "$name" "$id"
+    else printf '%-9s %s\n' "$(apps_kind_label "$k")" "none chosen"; fi
+  done <<< "$all"
+  exit 0
+fi
+apps_kind_ok "$kind" || usage
+cur=$(apps_defaults_all | awk -F '\t' -v k="$kind" '$1 == k { print $2 }')
+
+if [[ -z "$want" ]]; then
+  cands=$(apps_candidates "$kind")
+  if [[ -n "$cur" ]] && ! cut -f1 <<< "$cands" | awk -v c="$cur" '$0 == c { f = 1 } END { exit !f }'; then
+    cands=$(printf '%s\t%s\n%s' "$cur" "$(apps_name "$cur")" "$cands")
+  fi
+  [[ -n "$cands" ]] || { echo "No app for $(apps_kind_what "$kind") is installed"; exit 0; }
+  while IFS=$'\t' read -r id name; do
+    [[ -n "$id" ]] || continue
+    if [[ $json == yes ]]; then I=$id N=$name C=$cur jq -cn '{id: env.I, name: env.N, current: (env.I == env.C)}'
+    else printf ' %s %-28s %s\n' "$([[ "$id" == "$cur" ]] && echo '*' || echo ' ')" "$name" "$id"; fi
+  done <<< "$cands"
+  exit 0
+fi
+
+# The app: an installed desktop ID, else the one candidate whose name or ID is the word, else the one that
+# holds it.
+id=""
+if apps_path "$want" >/dev/null; then id=${want%.desktop}.desktop
+else
+  wl=$(printf '%s' "$want" | tr '[:upper:]' '[:lower:]')
+  hits=$(apps_candidates "$kind" | WL="$wl" awk -F '\t' 'tolower($2) == ENVIRON["WL"] || tolower($1) == ENVIRON["WL"] ".desktop"')
+  [[ -n "$hits" ]] || hits=$(apps_candidates "$kind" | WL="$wl" awk -F '\t' 'index(tolower($2), ENVIRON["WL"]) || index(tolower($1), ENVIRON["WL"])')
+  n=$(printf '%s\n' "$hits" | awk 'NF { n++ } END { print n + 0 }')
+  if (( n == 0 )); then echo "No app called $want can open $(apps_kind_what "$kind")" >&2; exit 4; fi
+  if (( n > 1 )); then echo "More than one app matches $want: $(cut -f2 <<< "$hits" | paste -sd ',' - | sed 's/,/, /g'). Say which." >&2; exit 4; fi
+  id=$(cut -f1 <<< "$hits")
+fi
+
+rc=0; apps_set_default "$kind" "$id" || rc=$?
+case $rc in
+  0) ;;
+  4) echo "No app called $want is installed" >&2; exit 4 ;;
+  5) echo "Choosing default apps needs xdg-utils, which Takumi's desktop packages include" >&2; exit 5 ;;
+  *) echo "The default for $(apps_kind_what "$kind") did not change" >&2; exit 1 ;;
+esac
+label=$(apps_kind_label "$kind"); name=$(apps_name "$id")
+takumi notice "$(apps_kind_glyph "$kind")" "$label: $name" "$(apps_kind_what "$kind") open there now" >/dev/null 2>&1 || true
+echo "$label: $name"

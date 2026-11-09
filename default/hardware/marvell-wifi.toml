@@ -1,0 +1,13 @@
+# Marvell Wi-Fi (88W8766, 88W8897, 88W8997 on PCIe; the 88W8897 is in the Surface Pro 3 to 7, Surface Book
+# and Surface Laptop 1 and 2): the kernel's mwifiex driver needs firmware that Arch keeps in a package of its
+# own, outside the default firmware set.
+# Firmware: https://gitlab.com/kernel-firmware/linux-firmware (mrvl/)
+title = "Marvell Wi-Fi"
+part = "wifi"
+
+[match]
+pci = ["11ab:2b30", "11ab:2b38", "11ab:2b42"]
+
+[apply]
+packages = ["linux-firmware-marvell"]
+note = "Microsoft Surface and some other laptops use a Marvell Wi-Fi chip whose firmware Arch keeps in a package of its own; without it there is no Wi-Fi."

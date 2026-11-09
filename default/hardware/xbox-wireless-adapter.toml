@@ -1,0 +1,14 @@
+# Microsoft's Xbox Wireless Adapter (the USB stick that connects Xbox controllers without Bluetooth) has no driver
+# in Linux itself; xone, which drives it, is only in the AUR. The controllers pair over Bluetooth instead.
+# xone: https://github.com/dlundqvist/xone
+title = "Xbox Wireless Adapter"
+part = "computer"
+works = "no"
+says = "its driver is only in the AUR"
+
+[match]
+usb = ["045e:02e6", "045e:02fe"]
+
+[apply]
+aur = ["xone-dkms"]
+note = "Linux has no driver of its own for this adapter; xone, in the AUR, drives it, and Takumi never installs AUR packages by itself. Xbox controllers pair over Bluetooth without it: hold the pairing button and type \"pair\" in the Core."

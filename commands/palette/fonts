@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for fonts as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# The fonts in use, the families on this computer with a line that previews each, and the families Takumi
+# can get from Arch's repositories (docs/look.md). "font" or "fonts" lists them; three letters of a
+# family's name find it. Enter on a family uses it: a proportional one for the interface, a monospaced one
+# for code and the terminal. Every family row carries "font", its family, so the Core can draw its line in it.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/font.sh" ]] && { . "$l/font.sh"; . "$l/palette.sh"; break; }; done
+declare -F font_families >/dev/null || exit 0
+q=${1:-}
+palette_short "$q" && exit 0
+command -v jq >/dev/null || exit 0
+ui=$(font_ui); mono=$(font_mono)
+fams=$(font_families)
+pkgs=$(font_catalog | cut -d'|' -f2)
+have=$(xargs pacman -Qq <<< "$pkgs" 2>/dev/null || true)
+{
+  UI=$ui MONO=$mono jq -cn '
+    {id: "font:ui", title: ("Interface font: " + env.UI), subtitle: "The Core, menus and apps · choose a family below to change it",
+     glyph: "type", kind: "Font", font: env.UI, steady: true, keywords: "font fonts typeface type interface ui sans system",
+     run: ["true"], score: 0.86},
+    {id: "font:mono", title: ("Code font: " + env.MONO), subtitle: "The terminal, the editor and code · choose a family below to change it",
+     glyph: "type", kind: "Font", font: env.MONO, steady: true, keywords: "font fonts typeface type code mono monospace terminal",
+     run: ["true"], score: 0.855}'
+  # One row per family, by name: Enter makes it the interface font, or the code font when it is monospaced.
+  [[ -z "$fams" ]] || UI=$ui MONO=$mono jq -Rsc '
+    split("\n") | map(select(length > 0) | split("\t")) | to_entries[] | .key as $i | .value as [$f, $n, $m]
+    | ($m == "yes") as $mono
+    | (if $mono then $f == env.MONO else $f == env.UI end) as $inuse
+    | {id: ("font:family:" + $f), title: $f, kind: "Font", glyph: "type", font: $f, steady: true,
+       subtitle: ((if $inuse then "In use · " else "" end)
+                  + (if $mono then "0O 1lI {} [] => Sphinx of black quartz" else "Sphinx of black quartz, judge my vow" end)
+                  + " · " + $n + (if $n == "1" then " style" else " styles" end)),
+       keywords: ("font fonts typeface type " + (if $mono then "mono monospace code terminal" else "interface ui sans serif" end)),
+       run: (if $inuse then ["true"] else ["takumi", "font", "set", (if $mono then "mono" else "ui" end), $f] end),
+       score: (0.8 - $i * 0.0001)}' <<< "$fams"
+  # The families Takumi can get and does not have yet, each saying where it comes from.
+  font_catalog | HAVE="$have" jq -Rc '
+    (env.HAVE | split("\n")) as $have | split("|") | .[0] as $name | .[1] as $pkg | .[2] as $repo | .[3] as $role | .[5] as $about
+    | select($have | any(. == $pkg) | not)
+    | {id: ("font:get:" + $pkg), title: ("Get " + $name), kind: "Font", glyph: "down",
+       subtitle: (($about[0:1] | ascii_upcase) + $about[1:] + " · " + $pkg + ", from Arch'"'"'s " + $repo + " repository"),
+       keywords: ("font fonts typeface type get install download more " + $role + (if $role == "mono" then " monospace code terminal" else "" end)),
+       converse: true, risk: 1, run: ["takumi", "font", "get", $name], score: 0.6}'
+} | palette_filter "$q"

@@ -1,0 +1,433 @@
+#!/usr/bin/env bash
+# Contract checks for notices (shell/Sources/CoreState.qml, Notices.qml, Core/Notice.qml), crash notices
+# (commands/debug/crash, takumi-crash.service) and the niri keys and rules that go with them
+# (config/niri/takumi/defaults.kdl and its migration). Crash records, the journal, notify-send and the
+# clipboard are fakes that record their arguments. The queue's own logic runs under node when node is here.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; notice checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-notices.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home TAKUMI_APPLICATIONS=$t/apps
+mkdir -p "$t/bin" "$FAKE/records" "$HOME" "$t/apps"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice"   # fake takumi commands go in front of the real ones
+uid=$(id -u); today=$(date +%F)
+check() { if eval "$2"; then :; else echo "notices: $1"; status=1; fi; }
+
+# The fakes. coredumpctl answers from $FAKE/records/<pid>, the latest being $FAKE/latest.
+cat > "$t/bin/coredumpctl" <<'FAKE'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE/coredumpctl"
+pid=""
+for a in "$@"; do case "$a" in COREDUMP_PID=*) pid=${a#COREDUMP_PID=} ;; esac; done
+[ -n "$pid" ] || pid=$(cat "$FAKE/latest" 2>/dev/null)
+[ -n "$pid" ] && [ -f "$FAKE/records/$pid" ] || { echo "No coredumps found." >&2; exit 1; }
+cat "$FAKE/records/$pid"
+FAKE
+cat > "$t/bin/notify-send" <<'FAKE'
+#!/bin/sh
+line=$(printf '%s|' "$@"); printf '%s\n' "$line" >> "$FAKE/notify"   # one write: two notices may come at once
+for a in "$@"; do last=$a; done
+f="$FAKE/action.$(printf '%s' "$last" | tr -c 'A-Za-z0-9\n' '_')"
+[ -f "$f" ] && cat "$f"
+exit 0
+FAKE
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$FAKE/qs"\n' > "$t/bin/qs"
+printf '#!/bin/sh\ncat > "$FAKE/clipboard"\n' > "$t/bin/wl-copy"
+printf '#!/bin/sh\n[ "$1" = -Qo ] && [ "$2" = /usr/bin/nautilus ] && { echo "/usr/bin/nautilus is owned by nautilus 47.1-1"; exit 0; }\necho "error: No package owns $2" >&2; exit 1\n' > "$t/bin/pacman"
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+cat > "$t/bin/journalctl" <<'FAKE'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE/journalctl"
+cat "$FAKE/journal"
+FAKE
+chmod +x "$t/bin/"* "$t/commands/notice/main"
+
+printf '%s\n' "[Desktop Entry]" "Name=Files" "Icon=org.gnome.Nautilus" "Exec=nautilus --new-window %U" "" "[Desktop Action new-window]" "Name=New Window" "Exec=nautilus --new-window" > "$t/apps/org.gnome.Nautilus.desktop"
+printf '%s\n' "[Desktop Entry]" "Name=Text Editor" "Icon=org.gnome.TextEditor" "TryExec=gnome-text-editor" "Exec=gnome-text-editor %U" > "$t/apps/org.gnome.TextEditor.desktop"
+
+record() {  # <pid> <comm> <exe> <signal number> <signal name> <date> <user unit> <frames…>
+  local pid=$1 comm=$2 exe=$3 num=$4 name=$5 day=$6 unit=$7; shift 7
+  {
+    printf '           PID: %s (%s)\n           UID: %s (ana)\n        Signal: %s (%s)\n' "$pid" "$comm" "$uid" "$num" "$name"
+    printf '     Timestamp: Mon %s 14:02:11 CET (1min 3s ago)\n  Command Line: %s --gapplication-service\n    Executable: %s\n' "$day" "$exe" "$exe"
+    printf '          Unit: user@%s.service\n' "$uid"
+    [ -n "$unit" ] && printf '     User Unit: %s\n' "$unit"
+    printf '       Storage: /var/lib/systemd/coredump/core.%s.%s.zst (present)\n       Message: Process %s (%s) of user %s dumped core.\n' "$comm" "$pid" "$pid" "$comm" "$uid"
+    if [ $# -gt 0 ]; then
+      printf '                \n                Stack trace of thread %s:\n' "$pid"
+      local n=0 f; for f in "$@"; do printf '                #%d  0x00007f3a1b2c%04d %s\n' "$n" "$n" "$f"; n=$((n + 1)); done
+      printf '                \n                Stack trace of thread 9999:\n                #0  0x00007f3a1a000001 __poll (libc.so.6 + 0x1001)\n'
+    fi
+    printf '                ELF object binary architecture: AMD x86-64\n'
+  } > "$FAKE/records/$pid"
+}
+reset() { rm -rf "${FAKE:?}"; mkdir -p "$FAKE/records"; : > "$FAKE/notify"; : > "$FAKE/qs"; : > "$FAKE/notices"; : > "$FAKE/coredumpctl"; }
+crash() { local rc=0 out; out=$(commands/debug/crash "$@" 2>&1) || rc=$?; printf '%s\n%s' "$rc" "$out"; }
+incore() { TAKUMI_CORE=1 commands/debug/crash "$@" 2>&1; echo "rc=$?"; }
+card() { incore "$@" | sed -n 's/^card //p'; }
+
+# Crash records, read in plain words.
+reset
+record 4242 nautilus /usr/bin/nautilus 11 SEGV "$today" app-gnome-org.gnome.Nautilus-4242.scope \
+  "g_type_check_instance_cast (libgobject-2.0.so.0 + 0x3d4e)" "nautilus_files_view_update (/usr/bin/nautilus + 0x8a4f5)" "n/a (/usr/lib/libgtk-4.so.1 + 0x2c4f1a)"
+echo 4242 > "$FAKE/latest"
+said=$(incore)
+check "in the Core: a note, then a card ($said)" '[[ "$(head -n 1 <<< "$said")" == "note Reading the crash record…" && "$(sed -n 2p <<< "$said")" == card\ * && "$(tail -n 1 <<< "$said")" == rc=0 ]]'
+c=$(card)
+check "the card names the app from its unit and says when" '[[ "$(jq -r .title <<< "$c")" == "Files quit today at 14:02" && "$(jq -r .kicker <<< "$c")" == "Why it quit" ]]'
+check "the card says what happened and where, in words ($(jq -r .detail <<< "$c"))" '[[ "$(jq -r .detail <<< "$c")" == "It tried to use memory it does not have. It stopped in g_type_check_instance_cast in libgobject-2.0.so.0, called from nautilus_files_view_update in nautilus." ]]'
+check "the card offers the report to copy" '[[ "$(jq -r .copyLabel <<< "$c")" == "Copy details" && "$(jq -r .copy <<< "$c")" == *"Where it stopped:"*"#0 g_type_check_instance_cast (libgobject-2.0.so.0 + 0x3d4e)"*"#2 n/a (/usr/lib/libgtk-4.so.1 + 0x2c4f1a)"* ]]'
+check "the report: package, signal, the whole record's command, no second thread" '[[ "$(jq -r .copy <<< "$c")" == *"Package: nautilus 47.1-1"*"signal 11, SEGV"* || "$(jq -r .copy <<< "$c")" == *"signal 11, SEGV"*"Package: nautilus 47.1-1"* ]] && [[ "$(jq -r .copy <<< "$c")" == *"coredumpctl info 4242" && "$(jq -r .copy <<< "$c")" != *__poll* ]]'
+check "the card keeps the fields the Core reads" '[[ "$(jq -c "[.secretLabel, .secret, .qr]" <<< "$c")" == "[\"\",\"\",[]]" ]]'
+check "only your own crashes are read" 'grep -q -- "info -1 COREDUMP_UID=$uid\$" "$FAKE/coredumpctl"'
+res=$(crash)
+check "at a terminal: the whole report" '[[ "$(head -n 1 <<< "$res")" == 0 && "$res" == *"Files quit unexpectedly today at 14:02."*"Program: /usr/bin/nautilus --gapplication-service"* ]]'
+res=$(crash 4242 --copy)
+check "--copy: the report on the clipboard through its input" '[[ "$(head -n 1 <<< "$res")" == 0 ]] && grep -q "^Files quit unexpectedly today at 14:02.$" "$FAKE/clipboard" && grep -q -- "COREDUMP_PID=4242" "$FAKE/coredumpctl"'
+check "--copy: a notice says so" 'grep -q "^check|Crash details copied|Files · paste them where you ask for help|$" "$FAKE/notices"'
+
+reset
+yday=$(date -d yesterday +%F 2>/dev/null || date -v-1d +%F)
+record 5150 gnome-text-edit /usr/bin/gnome-text-editor 6 ABRT "$yday" "" \
+  "__pthread_kill_implementation (libc.so.6 + 0x8e9ac)" "raise (libc.so.6 + 0x3e9e0)" "abort (libc.so.6 + 0x26b4f)" \
+  "g_assertion_message_expr (libglib-2.0.so.0 + 0x7b2a1)" "gnome_text_editor_window_save (/usr/bin/gnome-text-editor + 0x4f21)"
+echo 5150 > "$FAKE/latest"
+c=$(card)
+check "an app found by its program; yesterday" '[[ "$(jq -r .title <<< "$c")" == "Text Editor quit yesterday at 14:02" ]]'
+check "the C library's own stopping is skipped ($(jq -r .detail <<< "$c"))" '[[ "$(jq -r .detail <<< "$c")" == "It found a problem it could not get past and stopped itself. It stopped in g_assertion_message_expr in libglib-2.0.so.0, called from gnome_text_editor_window_save in gnome-text-editor." ]]'
+reset
+record 6000 mytool /home/ana/bin/mytool 8 FPE 2025-03-04 ""
+echo 6000 > "$FAKE/latest"
+c=$(card)
+check "no app: the program's name; another year; no trace" '[[ "$(jq -r .title <<< "$c")" == "mytool quit on 4 March 2025 at 14:02" && "$(jq -r .detail <<< "$c")" == "A calculation went wrong, such as a division by zero. The system kept no trace of where it stopped." ]]'
+reset
+c=$(card)
+check "nothing has crashed: a card that says so" '[[ "$(jq -r .title <<< "$c")" == "Nothing has quit unexpectedly" ]]'
+res=$(crash)
+check "nothing has crashed, at a terminal: 0" '[[ "$res" == "0"$'"'"'\n'"'"'"Nothing has quit unexpectedly" ]]'
+res=$(crash 777)
+check "no record for that pid: 3" '[[ "$(head -n 1 <<< "$res")" == 3 && "$res" == *"No crash record for 777" ]]'
+res=$(crash soon)
+check "a word that is not a pid: 2" '[[ "$(head -n 1 <<< "$res")" == 2 ]]'
+
+# takumi-crash.service: the journal's records become notices, with their buttons answered.
+reset
+record 4242 nautilus /usr/bin/nautilus 11 SEGV "$today" app-gnome-org.gnome.Nautilus-4242.scope "g_type_check_instance_cast (libgobject-2.0.so.0 + 0x3d4e)"
+record 5150 gnome-text-edit /usr/bin/gnome-text-editor 6 ABRT "$today" "" "g_assertion_message_expr (libglib-2.0.so.0 + 0x7b2a1)"
+{
+  jq -cn --arg u "$uid" '{COREDUMP_UID: $u, COREDUMP_PID: "4242", COREDUMP_EXE: "/usr/bin/nautilus", COREDUMP_COMM: "nautilus", COREDUMP_USER_UNIT: "app-gnome-org.gnome.Nautilus-4242.scope"}'
+  jq -cn '{COREDUMP_UID: "4321", COREDUMP_PID: "77", COREDUMP_EXE: "/usr/bin/someone-else", COREDUMP_COMM: "someone-else"}'
+  jq -cn --arg u "$uid" '{COREDUMP_UID: $u, COREDUMP_PID: "4243", COREDUMP_EXE: "/usr/bin/nautilus", COREDUMP_COMM: "nautilus"}'
+  echo "not a record"
+  jq -cn --arg u "$uid" '{COREDUMP_UID: $u, COREDUMP_PID: "5150", COREDUMP_EXE: "/usr/bin/gnome-text-editor", COREDUMP_COMM: "gnome-text-edit", COREDUMP_USER_UNIT: ""}'
+} > "$FAKE/journal"
+echo default > "$FAKE/action.Files_quit_unexpectedly"
+echo copy > "$FAKE/action.Text_Editor_quit_unexpectedly"
+commands/debug/crash --follow >/dev/null 2>&1
+check "the journal is followed for coredump records only" 'grep -q -- "-f -n 0 -o json .* MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1$" "$FAKE/journalctl"'
+check "one notice per crash of yours, the same app at most once a minute ($(wc -l < "$FAKE/notify" | tr -d " "))" '[[ $(wc -l < "$FAKE/notify") -eq 2 ]] && ! grep -q someone-else "$FAKE/notify"'
+check "the notice: the app's name and icon, See why and Copy details" 'grep -qx -- "--app-name=Files|--action=default=See why|--action=why=See why|--action=copy=Copy details|--icon=org.gnome.Nautilus|Files quit unexpectedly|" "$FAKE/notify"'
+check "See why opens the Core on the crash" 'grep -qx -- "-c takumi ipc --any-display call core search crash" "$FAKE/qs"'
+check "Copy details copies that crash's report" 'grep -q "^Text Editor quit unexpectedly today at 14:02.$" "$FAKE/clipboard"'
+check "the service runs the follower" 'grep -qx "ExecStart=/usr/bin/takumi debug crash --follow" default/systemd/user/takumi-crash.service'
+check "the Palette finds the command by crash, as a conversation" '[[ "$(takumi --manifest | jq -r ".[] | select(.group == \"debug\" and .name == \"crash\") | [.title, (.words | contains(\"crash\")), .converse] | map(tostring) | join(\"|\")")" == "Why an app quit|true|true" ]]'
+
+# The niri keys: the shipped file, then a migrated home from before them.
+binds_of() {  # <file>: the top-level binds' keys, as niri compares them, one per line
+  awk '
+    function norm(k,   n, p, i, j, t, s) {
+      n = split(tolower(k), p, "+")
+      for (i = 1; i <= n; i++) { if (p[i] == "control") p[i] = "ctrl"; if (p[i] == "win") p[i] = "super" }
+      for (i = 2; i <= n; i++) { t = p[i]; j = i - 1; while (j > 0 && p[j] > t) { p[j + 1] = p[j]; j-- } p[j + 1] = t }
+      s = p[1]; for (i = 2; i <= n; i++) s = s "+" p[i]
+      return s
+    }
+    { s = $0; gsub(/"[^"]*"/, "", s); sub(/\/\/.*/, "", s); o = gsub(/[{]/, "{", s); c = gsub(/[}]/, "}", s) }
+    depth == 0 && s ~ /^binds[[:space:]]*[{]/ { inb = 1; depth += o - c; next }
+    inb && depth == 1 && match(s, /^[[:space:]]*[^[:space:]{}]+/) { k = substr(s, RSTART, RLENGTH); gsub(/[[:space:]]/, "", k); print norm(k) }
+    { depth += o - c; if (depth == 0) inb = 0 }' "$1"
+}
+braces() { awk '{ s = $0; gsub(/"[^"]*"/, "", s); sub(/\/\/.*/, "", s); d += gsub(/[{]/, "{", s) - gsub(/[}]/, "}", s) } END { print d + 0 }' "$1"; }
+shipped=config/niri/takumi/defaults.kdl
+mine='Mod+Shift+Space Mod+Escape Mod+Ctrl+Return Mod+F5 Mod+U Mod+Ctrl+Up Mod+Ctrl+Down Mod+Ctrl+Left Mod+Ctrl+Right Mod+Shift+Ctrl+Left Mod+Shift+Ctrl+Right'
+keys=$(binds_of "$shipped")
+check "no key is bound twice" '[[ -z "$(sort <<< "$keys" | uniq -d)" ]]'
+check "the file's braces balance" '[[ "$(braces "$shipped")" == 0 ]]'
+bad=""
+for k in $mine; do
+  line=$(grep -E "^    $(sed 's/+/\\+/g' <<< "$k")[ {]" "$shipped" || true)
+  [[ $(grep -c . <<< "$line") -eq 1 ]] || bad+=" $k(missing)"
+  [[ "$k" =~ \+(A|C|V|X|Z|S|F|W|T|N|R|Comma)$ ]] && bad+=" $k(Harmony)"
+  [[ "$k" == *Alt* ]] && bad+=" $k(Alt is the VM's modifier)"
+  act=$(sed -E 's/.*\{ *([a-z-]+).*/\1/' <<< "$line")
+  case " spawn toggle-window-floating switch-focus-between-floating-and-tiling focus-monitor-left focus-monitor-right move-column-to-monitor-left move-column-to-monitor-right " in *" $act "*) ;; *) bad+=" $k($act)" ;; esac
+done
+check "each new key is bound once, leaves Harmony's keys alone and runs a niri 26.04 action:$bad" '[[ -z "$bad" ]]'
+check "Super+Tab is the recent-windows switcher, not an ordinary bind" '! grep -q "focus-window-previous" "$shipped" && [[ "$(sed -n "/^recent-windows {/,/^}/p" "$shipped" | grep -cE "^        (Mod|Alt)\+(Shift\+)?(Tab|grave) +\{ (next|previous)-window( filter=\"app-id\")?; \}$")" -eq 8 ]]'
+check "notices act and clear from the keys" 'grep -q "Mod+Shift+Space .*\"notices\" \"act\"; }" "$shipped" && grep -q "Mod+Escape .*\"notices\" \"clear\"; }" "$shipped"'
+pip=$(sed -n '/^window-rule {/,/^}/p' "$shipped" | awk '/^window-rule \{/ { b = "" } { b = b $0 "\n" } /^\}/ && b ~ /picture/ { printf "%s", b }')
+check "picture in picture opens floating in a corner, without the keyboard" '[[ "$pip" == *"open-floating true"* && "$pip" == *"open-focused false"* && "$pip" == *"relative-to=\"bottom-right\""* ]]'
+rx=$(sed -n 's/^    match title=r#"^(?i)\(.*\)\$"#$/\1/p' <<< "$pip")
+check "the rule matches Firefox's and Chromium's titles, nothing else ($rx)" '[[ -n "$rx" ]] && printf "%s\n" "Picture-in-Picture" "Picture in picture" | grep -Eixq "$rx" && [[ $(printf "%s\n" "Picture-in-Picture" "Picture in picture" "Pictures" "Picture-in-Picture mode" | grep -Eixc "$rx") -eq 2 ]]'
+
+# A home from before: its defaults.kdl without the new keys and rules, and with Super+Tab as it was.
+old=$t/old.kdl
+awk '
+  { s = $0; gsub(/"[^"]*"/, "", s); sub(/\/\/.*/, "", s) }
+  /^\/\/ (Super\+Tab \(or Alt\+Tab\)|choose among the recent|Picture in picture:|keyboard\. Firefox|"Picture in picture"\.|Your accessibility choices|takumi switch pointer and takumi switch reader)/ { next }
+  /^include optional=true "accessibility\.kdl"/ { next }
+  /^(recent-windows|window-rule) \{/ { buf = $0 "\n"; collecting = 1; d = 1; next }
+  collecting { buf = buf $0 "\n"; d += gsub(/[{]/, "{", s) - gsub(/[}]/, "}", s); if (d == 0) { collecting = 0; if (buf !~ /recent-windows|[Pp]icture/) printf "%s", buf } ; next }
+  /^    (Mod\+Shift\+Space|Mod\+Escape|Mod\+Ctrl\+Return|Mod\+F5|Mod\+U|Mod\+Ctrl\+Up|Mod\+Ctrl\+Down|Mod\+Ctrl\+Left|Mod\+Ctrl\+Right|Mod\+Shift\+Ctrl\+Left|Mod\+Shift\+Ctrl\+Right)[ {]/ { next }
+  { print }
+  /^    Mod\+End / { print "    Mod+Tab   { focus-window-previous; }" }' "$shipped" > "$old"
+migration=migrations/20261109041500-niri-notices-windows-reader.sh
+home() { rm -rf "${HOME:?}"; mkdir -p "$HOME/.config/niri/takumi"; cp "$1" "$HOME/.config/niri/takumi/defaults.kdl"; }
+d=$HOME/.config/niri/takumi/defaults.kdl
+home "$old"
+check "the old file lacks the new keys" '[[ -z "$(binds_of "$d" | grep -x "escape+mod" || true)" ]] && grep -q "focus-window-previous" "$d"'
+bash "$migration" 2>"$t/migrate.err"
+check "migrated: the same keys as a new home" '[[ "$(binds_of "$d" | sort)" == "$(binds_of "$shipped" | sort)" ]]'
+check "migrated: switcher, picture in picture and the accessibility file, once each" '[[ $(grep -c "^recent-windows {" "$d") -eq 1 && $(grep -ci "picture\[- \]in" "$d") -eq 1 && $(grep -c "^include optional=true \"accessibility.kdl\"$" "$d") -eq 1 ]]'
+check "migrated: the old Super+Tab is gone, the braces balance" '! grep -q focus-window-previous "$d" && [[ "$(braces "$d")" == 0 ]]'
+check "migrated: the old file was copied aside, and nothing said" '[[ $(ls "$HOME/.config/niri/takumi" | grep -c "^defaults.kdl.bak-") -eq 1 && ! -s "$t/migrate.err" ]]'
+cp "$d" "$t/once.kdl"; bash "$migration" 2>/dev/null
+check "a second run changes nothing" 'cmp -s "$d" "$t/once.kdl" && [[ $(ls "$HOME/.config/niri/takumi" | grep -c "^defaults.kdl.bak-") -eq 1 ]]'
+sed -e 's/^    Mod+Q { close-window; }$/    Mod+Escape { close-window; }/' -e 's/^    Mod+End   { focus-column-last; }$/    Mod+Ctrl+Shift+Left { focus-column-last; }/' "$old" > "$t/taken.kdl"
+home "$t/taken.kdl"
+bash "$migration" 2>"$t/migrate.err"
+check "a key you took stays yours, however you spelled it" '[[ $(grep -c "Mod+Escape" "$d") -eq 1 && $(grep -c "Mod+Escape { close-window; }" "$d") -eq 1 && $(binds_of "$d" | grep -cx "ctrl+left+mod+shift") -eq 1 ]]'
+check "and the log says which" 'grep -q "kept your own bind for: Mod+Escape Mod+Shift+Ctrl+Left" "$t/migrate.err"'
+sed 's/^    Mod+Tab   { focus-window-previous; }$/    Mod+Tab { focus-column-right; }/' "$old" > "$t/tab.kdl"
+home "$t/tab.kdl"
+bash "$migration" 2>/dev/null
+check "a Super+Tab you changed is left alone" 'grep -q "^    Mod+Tab { focus-column-right; }$" "$d"'
+home "$shipped"
+bash "$migration" 2>/dev/null
+check "a new home's file is left exactly as shipped" 'cmp -s "$d" "$shipped" && [[ $(ls "$HOME/.config/niri/takumi" | wc -l | tr -d " ") -eq 1 ]]'
+rm -rf "${HOME:?}"; mkdir -p "$HOME"
+check "no niri config: nothing to do" 'bash "$migration" && [[ ! -e "$HOME/.config" ]]'
+
+# The shell: every notice call and name in use exists.
+cs=shell/Sources/CoreState.qml
+defs=$(grep -oE "(property [a-z]+ |function )[a-zA-Z_]+" "$cs" | awk '{ print $NF }' | sort -u)
+missing=""
+for f in notice announce offer shot message activateNotice actNotice invokeNoticeAction nextNotice dismissNotice clearNotices holdNotice copyCode \
+         noticeActive noticeIcon noticeTitle noticeDetail noticeValue noticeImage noticeThumb noticeOpen noticeCode noticeActions noticeGroup noticeMore \
+         noticeSerial noticesHeld quiet; do grep -qx "$f" <<< "$defs" || missing+=" $f"; done
+check "CoreState keeps the notice calls and adds the queue's:$missing" '[[ -z "$missing" ]]'
+used=$(grep -ohE "\bcore\.[a-zA-Z_]+" shell/Core/Notice.qml | sed 's/^core\.//' | sort -u)
+missing=""; for u in $used; do grep -qx "$u" <<< "$defs" || missing+=" $u"; done
+check "Notice.qml reads only what CoreState has:$missing" '[[ -z "$missing" ]]'
+check "the server hands messages over and keeps do not disturb in step" 'grep -q "notices.core.message(n)" shell/Sources/Notices.qml && grep -q "core.quiet = dnd" shell/Sources/Notices.qml'
+check "the keys reach the shell: an IPC handler for notices act and clear" 'grep -qE "function act\(\): void \{ coreState\.actNotice\(\); \}" shell/shell.qml && grep -qE "function clear\(\): void \{ coreState\.clearNotices\(\); \}" shell/shell.qml'
+check "the copy never puts a code on a command line" 'grep -q "TAKUMI_COPY" "$cs" && ! grep -q "execDetached(\[\"wl-copy\"" "$cs"'
+
+# The queue itself: CoreState's functions and bindings, run under node with fake notifications.
+# The script is written out first: bash 3.2 misreads a heredoc inside $( ) that holds a quote.
+cat > "$t/queue.js" <<'JS'
+const fs = require("fs");
+const src = fs.readFileSync(process.argv[2], "utf8").split("\n");
+const props = {}, bindings = [], funcs = [];
+let i = 0;
+function block(start, head) {
+  let depth = 0, out = [];
+  for (let j = start; j < src.length; j++) {
+    const line = j === start ? head : src[j];
+    out.push(line);
+    depth += (line.match(/\{/g) || []).length - (line.match(/\}/g) || []).length;
+    if (depth === 0) return [out.join("\n"), j];
+  }
+  throw new Error("unbalanced block at line " + (start + 1));
+}
+for (i = 0; i < src.length; i++) {
+  const l = src[i];
+  let m;
+  if ((m = l.match(/^    property (var|bool|int|double|string) (\w+): (.+?)(\s+\/\/.*)?$/))) props[m[2]] = eval("(" + m[3] + ")");
+  else if ((m = l.match(/^    readonly property \w+ (\w+): (.+?)(\s+\/\/ [^"]*)?$/))) bindings.push([m[1], m[2]]);
+  else if ((m = l.match(/^    function (\w+)\(/))) { const [text, end] = block(i, l.replace(/^    function (\w+)\(/, "$1: function(")); funcs.push(text); i = end; }
+  else if (/^    onQuietChanged: \{/.test(l)) { const [text, end] = block(i, l.replace(/^    onQuietChanged: \{/, "onQuietChanged: function() {")); funcs.push(text); i = end; }
+}
+let now = 1000000; Date.now = () => now;
+const log = [];
+const Quickshell = { execDetached: a => log.push("run " + a.join(" ")), iconPath: n => "icon:" + n, hasThemeIcon: n => n !== "appointment-soon", screens: [] };
+const DesktopEntries = { byId: () => null };
+const NotificationUrgency = { Low: 0, Normal: 1, Critical: 2 };
+const Style = { noticeHold: 1800 };
+const state = Object.assign({ niri: { focusedOutput: "DP-1" }, openOn: "", query: "", view: "" }, props);
+state.flashTimer = { interval: 0, running: false, restart() { this.running = true; }, stop() { this.running = false; } };
+state.copier = { running: false, environment: null };
+for (const [name, expr] of bindings) {
+  const f = new Function("state", "Quickshell", "with (state) { return (" + expr + "); }");
+  Object.defineProperty(state, name, { get: () => f(state, Quickshell) });
+}
+const make = new Function("state", "Quickshell", "DesktopEntries", "NotificationUrgency", "Style", "with (state) { return {\n" + funcs.join(",\n") + "\n}; }");
+Object.assign(state, make(state, Quickshell, DesktopEntries, NotificationUrgency, Style));
+const setQuiet = v => { state.quiet = v; state.onQuietChanged(); };
+function note(app, summary, body, o = {}) {
+  const n = { appName: app, appIcon: o.icon ?? app.toLowerCase(), summary, body, urgency: o.urgent ? 2 : 1, transient: !!o.transient, desktopEntry: "", image: "",
+              handlers: [], closedWith: "", closed: { connect: f => n.handlers.push(f) } };
+  n.close = why => { if (n.closedWith) return; n.closedWith = why; n.handlers.forEach(h => h(why)); };
+  n.expire = () => { log.push("expire " + summary); n.close("expired"); };
+  n.dismiss = () => { log.push("dismiss " + summary); n.close("dismissed"); };
+  n.actions = (o.actions || []).map(([id, text]) => ({ identifier: id, text, invoke: () => { log.push("invoke " + summary + " " + id); n.close("dismissed"); } }));
+  return n;
+}
+// The ticker runs only when its own running binding says so (the Core closed, no flash, no pointer resting).
+const running = new Function("state", "with (state) { return (" + src.find(l => /^        running: state\.queue/.test(l)).replace(/^        running: /, "") + "); }");
+function tick(ms) { state.ticked = Date.now(); now += ms; if (running(state)) state.tick(); }
+const fails = [];
+function ok(what, cond) { if (!cond) fails.push(what); }
+
+const a = note("Slack", "Ana Lima", "Are we still on for 3?\nSecond line");
+state.message(a);
+ok("a message shows: title, first line, its app's icon", state.noticeActive && state.noticeTitle === "Ana Lima" && state.noticeDetail === "Are we still on for 3?" && state.noticeImage === "icon:slack");
+ok("alone: no count, no group", state.noticeMore === 0 && state.noticeGroup === 1);
+// An icon the theme lacks, sent the way notify-send -i sends it (a name and the same name as a picture): the bell.
+const unknown = note("Reminder", "Stretch", "", { icon: "appointment-soon" });
+unknown.image = "image://icon/appointment-soon";
+ok("an icon the theme does not have is not drawn", state.iconOf(unknown) === "");
+unknown.image = "/tmp/shot.png";
+ok("then the message's own picture", state.iconOf(unknown) === "/tmp/shot.png");
+const b = note("Mail", "Invoice", "<b>Your invoice</b> is ready &amp; waiting");
+state.message(b);
+ok("the newest shows, with 1 more", state.noticeTitle === "Invoice" && state.noticeDetail === "Your invoice is ready & waiting" && state.noticeMore === 1);
+const a2 = note("Slack", "Ben", "Lunch?", { actions: [["default", "Open"], ["reply", "Reply"], ["read", "Mark as read"]] });
+const serial = state.noticeSerial;
+state.message(a2);
+ok("several from one app are one entry, its newest on show", state.noticeTitle === "Ben" && state.noticeGroup === 2 && state.noticeMore === 1 && state.queue.length === 2);
+ok("a new message is spoken", state.noticeSerial === serial + 1);
+ok("the app's buttons, without its default", JSON.stringify(state.noticeActions) === JSON.stringify([{ id: "reply", text: "Reply" }, { id: "read", text: "Mark as read" }]));
+state.invokeNoticeAction("reply");
+ok("a button runs the app's action and the entry goes", log.includes("invoke Ben reply") && log.includes("dismiss Ana Lima") && state.noticeTitle === "Invoice" && state.noticeMore === 0);
+ok("the answered message is not closed twice", !log.includes("dismiss Ben"));
+tick(4000);
+ok("five seconds: still there after four", state.noticeActive);
+tick(1500);
+ok("five seconds: gone after five, expired", !state.noticeActive && log.includes("expire Invoice"));
+
+const c1 = note("Signal", "Mum", "Call me", { actions: [["default", ""], ["call", "Call back"]] });
+state.message(c1);
+tick(6000);
+ok("eight seconds for a message with buttons", state.noticeActive);
+tick(2500);
+ok("and then it goes", !state.noticeActive);
+
+const u = note("Battery", "Battery at 3%", "Plug in now", { urgent: true });
+state.message(u);
+tick(120000);
+ok("an urgent message stays until put away", state.noticeActive && state.noticeTitle === "Battery at 3%");
+state.dismissNotice();
+ok("the right button puts it away", !state.noticeActive && log.includes("dismiss Battery at 3%"));
+
+const o1 = note("Bank", "Sign-in code", "Your verification code is 482913", { actions: [["default", "Open"]] });
+state.message(o1);
+ok("a code is found", state.noticeCode === "482913");
+state.actNotice();
+ok("the key copies the code through the environment and the message is done", state.copier.running && state.copier.environment.TAKUMI_COPY === "482913" && log.includes("dismiss Sign-in code") && state.noticeTitle === "Copied 482913");
+state.endFlash();
+const d1 = note("Files", "Copied 3 files", "", { actions: [["default", "Show"]] });
+state.message(d1);
+state.actNotice();
+ok("the key runs the default action when there is no code", log.includes("invoke Copied 3 files default") && !state.noticeActive);
+
+const m1 = note("Mail", "One", "x"), m2 = note("Chat", "Two", "y"), m3 = note("News", "Three", "z");
+state.message(m1); state.message(m2); state.message(m3);
+ok("3 apps: the newest and 2 more", state.noticeTitle === "Three" && state.noticeMore === 2);
+state.notice("vol", "Volume", "", 40);
+ok("a flash shows over the queue, with no count", state.noticeTitle === "Volume" && state.noticeValue === 40 && state.noticeMore === 0);
+const before = state.queue[0].left;
+tick(1000);
+ok("nothing counts down under a flash", state.queue[0].left === before);
+state.endFlash();
+ok("the queue comes back after the flash", state.noticeTitle === "Three");
+state.nextNotice();
+ok("3 more brings the next", state.noticeTitle === "Two" && state.noticeMore === 2);
+// Super+Alt+Page Up: Notices.qml's previous() brings the last one back to the front; Page Down is nextNotice.
+const nsrc = fs.readFileSync(process.argv[3], "utf8");
+const prevBody = nsrc.match(/\n    function previous\(\) \{([\s\S]*?)\n    \}/)[1];
+new Function("notices", prevBody)({ core: state });
+ok("the key for the one before brings it back, and keeps it a moment", state.noticeTitle === "Three" && state.noticeMore === 2 && state.queue[0].left >= 1500);
+state.nextNotice();
+ok("and the key for the next takes it on again", state.noticeTitle === "Two");
+m1.close("closed by the app");
+ok("an app taking its message back takes it off the queue", state.queue.length === 2 && !state.queue.some(e => e.key === "Mail"));
+state.holdNotice(true);
+ok("the pointer holds it", state.noticeHovered);
+state.holdNotice(false);
+state.clearNotices();
+ok("the clear key puts everything away", !state.noticeActive && log.includes("dismiss Two") && log.includes("dismiss Three"));
+
+setQuiet(true);
+const q1 = note("Slack", "Hi", "x"), q2 = note("Mail", "Hey", "y"), q3 = note("Slack", "Again", "z"), q4 = note("Spotify", "Now playing", "", { transient: true });
+[q1, q2, q3, q4].forEach(n => state.message(n));
+ok("quiet: messages are counted, not shown", !state.noticeActive && state.noticesHeld === 3 && q1.closedWith === "expired");
+const q5 = note("Battery", "Battery at 2%", "", { urgent: true });
+state.message(q5);
+ok("quiet: an urgent one still shows", state.noticeActive && state.noticeTitle === "Battery at 2%");
+state.dismissNotice();
+setQuiet(false);
+ok("quiet off: one notice says how many came in, and from whom", state.noticeTitle === "3 messages came in" && state.noticeDetail === "From Slack and Mail · press to see them");
+state.activateNotice();
+ok("a press lists them in the Palette", state.query === "earlier" && state.openOn === "DP-1");
+state.openOn = "";
+setQuiet(true); state.message(note("Mail", "x", "y")); state.clearNotices(); setQuiet(false);
+ok("the clear key empties the count too", !state.noticeActive && state.noticesHeld === 0);
+
+for (let k = 0; k < 14; k++) state.message(note("App" + k, "m" + k, ""));
+ok("a dozen apps at once: the oldest make room", state.queue.length === 12 && log.includes("expire m0") && log.includes("expire m1") && !log.includes("expire m2"));
+state.clearNotices();
+state.shot("/home/ana/Pictures/Screenshots/a b.png");
+ok("a screenshot: picture, press to open", state.noticeThumb && state.noticeImage === "file:///home/ana/Pictures/Screenshots/a%20b.png" && state.noticeOpen.endsWith("a b.png"));
+state.activateNotice();
+ok("a press opens it", log.includes("run gio open /home/ana/Pictures/Screenshots/a b.png") && !state.noticeActive);
+state.offer("video", "Recording saved", "Videos", "/tmp/r.mp4", 5);
+state.announce("restart", "Update undone", "Back to yesterday", 10);
+ok("announce replaces offer; flash fields reset", state.noticeTitle === "Update undone" && state.noticeOpen === "" && state.flashTimer.interval === 10000);
+if (fails.length) { console.log(fails.join("\n")); process.exit(1); }
+console.log("ok " + (log.length > 0));
+JS
+# Links in a message's body (Core/Notice.qml): its functions run under node, with CoreState's plain().
+cat > "$t/links.js" <<'JS'
+const fs = require("fs");
+const notice = fs.readFileSync(process.argv[2], "utf8"), core = fs.readFileSync(process.argv[3], "utf8");
+const fn = (src, name) => src.match(new RegExp("\\n    function " + name + "\\(([^)]*)\\) \\{([\\s\\S]*?)\\n    \\}|\\n    function " + name + "\\(([^)]*)\\) \\{ (.*) \\}\\n"));
+const make = (src, name, env) => { const m = fn(src, name); const args = m[1] ?? m[3], body = m[2] ?? m[4];
+  return new Function(...Object.keys(env), "return function(" + args + ") {" + body + "}")(...Object.values(env)); };
+const plain = make(core, "plain", {});
+const env = { core: { plain } };
+env.safe = make(notice, "safe", env);
+const linksIn = make(notice, "linksIn", env), esc = make(notice, "esc", env);
+env.esc = esc;
+const linked = make(notice, "linked", env);
+const fails = [], ok = (what, cond) => { if (!cond) fails.push(what); };
+let ls = linksIn('Your order shipped: <a href="https://shop.example/track?id=1&amp;x=2">Track it</a>');
+ok("an anchor: its words and its address", ls.length === 1 && ls[0].text === "Track it" && ls[0].href === "https://shop.example/track?id=1&x=2");
+ok("drawn as a link on the line, the rest escaped", linked("Your order shipped: Track it", ls) === 'Your order shipped: <a href="https://shop.example/track?id=1&amp;x=2">Track it</a>');
+ls = linksIn("Meeting moved, see https://cal.example/e/42. Bring <notes>");
+ok("an address written out, without the full stop after it", ls.length === 1 && ls[0].href === "https://cal.example/e/42");
+ok("markup in the words never becomes markup", linked("see https://cal.example/e/42. Bring <b>notes</b>", ls) === 'see <a href="https://cal.example/e/42">https://cal.example/e/42</a>. Bring &lt;b&gt;notes&lt;/b&gt;');
+ls = linksIn('<a href="file:///etc/passwd">open</a> <a href="javascript:alert(1)">run</a> <a href="mailto:ana@example.com">Ana</a>');
+ok("only web and mail links: never a file or a script", ls.length === 1 && ls[0].href === "mailto:ana@example.com");
+ok("a quote in an address cannot leave the link", linked("x", [{ text: "x", href: 'https://a.example/"onclick' }]) === '<a href="https://a.example/&quot;onclick">x</a>');
+ok("no links: the line, escaped", linked("a < b & c", []) === "a &lt; b &amp; c");
+if (fails.length) { console.log(fails.join("\n")); process.exit(1); }
+JS
+if command -v node >/dev/null; then
+  if out=$(node "$t/queue.js" "$cs" shell/Sources/Notices.qml 2>&1); then :; else echo "$out" | sed 's/^/notices: queue: /'; status=1; fi
+  if out=$(node "$t/links.js" shell/Core/Notice.qml "$cs" 2>&1); then :; else echo "$out" | sed 's/^/notices: links: /'; status=1; fi
+  queue_checks=$(grep -c '^ok("' "$0")
+queue_checks=$((queue_checks + $(grep -c '^ok("' "$t/links.js")))
+else
+  echo "   (node not installed; the queue's logic not run here)"; queue_checks=0
+fi
+
+check "Notices.qml reads only what CoreState has" '[[ -z "$(grep -ohE "\bc\.[a-zA-Z_]+" shell/Sources/Notices.qml | sed "s/^c\.//" | sort -u | while read -r u; do grep -qx "$u" <<< "$defs" || echo "$u"; done)" ]]'
+check "the keys move through waiting notices, and leave Super+Shift+Up and Down to windows" 'grep -qE "^    Mod\+Alt\+Page_Up .*\"notices\" \"previous\"; \}$" config/niri/takumi/defaults.kdl && grep -qE "^    Mod\+Alt\+Page_Down .*\"notices\" \"next\"; \}$" config/niri/takumi/defaults.kdl && grep -q "^    Mod+Shift+Up    { move-window-up-or-to-workspace-up; }" config/niri/takumi/defaults.kdl && grep -q "function next(): void { noticesService.next(); }" shell/shell.qml && grep -q "function previous(): void { noticesService.previous(); }" shell/shell.qml'
+check "a link opens only through gio, never a command a message chose" '[[ $(grep -c "execDetached" shell/Core/Notice.qml) -eq 1 ]] && grep -q "execDetached(\[\"gio\", \"open\", href\])" shell/Core/Notice.qml && grep -q "onLinkActivated: link => notice.openLink(link)" shell/Core/Notice.qml'
+check "the Core marks dictation, a running timer and remote help, from what the commands leave" 'grep -q "takumi-voice" shell/Sources/Poll.qml && grep -q "reminders.tsv" shell/Sources/Poll.qml && grep -q "takumi-remote" shell/Sources/Poll.qml && grep -q "visible: rest.poll.dictating" shell/Core/Rest.qml && grep -q "visible: rest.poll.remote > 0" shell/Core/Rest.qml && grep -q "visible: timerLeft.secs > 0" shell/Core/Rest.qml'
+check "where the marks look is where the commands write" 'grep -q "voice_marker=\"\$voice_run/takumi-voice\"" lib/voice.sh && grep -q "remind_file=\"\$clock_state/reminders.tsv\"" lib/clock.sh && grep -q "marker=\"\$run/takumi-remote\"" commands/screen/remote'
+echo "   $(grep -c '^check ' "$0") checks and $queue_checks queue checks for notices, crashes and the niri keys"
+exit $status

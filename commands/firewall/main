@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Say whether the firewall is on and which apps other devices may reach
+usage: [--json]
+example: takumi firewall
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/firewall.sh" ]] && { . "$l/firewall.sh"; . "$l/core.sh"; break; }; done
+declare -F firewall_state >/dev/null && declare -F core_done >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# In words at a terminal, one sentence in the Core, or one JSON object with --json: state (on, restart, off,
+# none), incoming (deny, reject, allow), apps and rules. What is let in comes from Takumi's note
+# (/etc/takumi/firewall), which takumi firewall allow, deny, on and off write from ufw's own rules.
+json=no
+case "${1:-}" in "") ;; --json) json=yes ;; *) echo "usage: takumi firewall [--json]" >&2; exit 2 ;; esac
+state=$(firewall_state); incoming=$(firewall_incoming)
+apps=$(firewall_allowed_apps); rules=$(firewall_other_rules)
+if [[ $json == yes ]]; then
+  command -v jq >/dev/null || { echo "takumi firewall --json needs jq" >&2; exit 1; }
+  S=$state I=$incoming A=$apps R=$rules jq -cn '{state: env.S, incoming: env.I,
+    apps: (env.A | split("\n") | map(select(. != ""))), rules: (env.R | split("\n") | map(select(. != "")))}'
+  exit 0
+fi
+
+names="" described=""
+while IFS= read -r a; do
+  [[ -n "$a" ]] || continue
+  names+="${names:+, }$a"; described+="${described:+, }$a ($(firewall_what "$a"))"
+done <<< "$apps"
+others=$(paste -sd ',' - <<< "$rules" | sed 's/,/, /g')
+
+case "$state" in
+  none) first="There is no firewall on this computer: ufw is not installed. takumi firewall on sets one up."
+        short="There is no firewall on this computer" ;;
+  off)  first="The firewall is off: other devices on the network can connect to anything this computer offers."
+        short="The firewall is off" ;;
+  *)
+    if [[ $incoming == allow ]]; then first="The firewall is on, but it lets every connection in."
+    elif [[ -n "$names$others" ]]; then first="The firewall is on: other devices cannot connect to this computer, except as below."
+    else first="The firewall is on: other devices cannot connect to this computer."; fi
+    short="The firewall is on"
+    [[ -n "$names" ]] && short+="; $names may be reached"
+    if [[ $state == restart ]]; then first+=" It is off again after a restart: takumi firewall on keeps it on."; short+=", until the computer restarts"; fi ;;
+esac
+if core_in_core; then core_done "$short"; exit 0; fi
+printf '%s\n' "$first"
+[[ "$state" == none || -z "$described" ]] || printf 'Allowed: %s.\n' "$described"
+[[ "$state" == none || -z "$others" ]] || printf 'Also let in: %s.\n' "$others"
+exit 0

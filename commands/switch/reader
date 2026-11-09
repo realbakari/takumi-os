@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Turn the screen reader on or off: Orca speaks what is on the screen
+usage: [on|off]
+example: takumi switch reader
+risk: 0
+title: Screen reader
+words: accessibility a11y screen reader orca speech speak voice blind narrator voiceover
+glyph: vol
+ABOUT
+set -euo pipefail
+# Orca reads apps and the Core through AT-SPI and speaks through speech-dispatcher with espeak-ng's voices.
+# On, it starts now and at every login (niri starts it from ~/.config/niri/takumi/accessibility.kdl, which
+# defaults.kdl includes); off, it stops and stays off. Super+Ctrl+Enter and Super+F5 switch it, at the lock
+# screen too (docs/accessibility.md).
+conf="$HOME/.config/niri/takumi/accessibility.kdl"
+running() { pgrep -x orca >/dev/null 2>&1; }
+# The file holds a line per choice; each takumi switch command rewrites its own line and keeps the others.
+set_line() {  # <pattern> [line]
+  local tmp
+  mkdir -p "${conf%/*}"
+  [[ -f "$conf" ]] || printf '%s\n' "// Your accessibility choices from the Core (docs/accessibility.md). takumi switch pointer and" \
+    "// takumi switch reader each rewrite their own line; Takumi's defaults.kdl includes this file." > "$conf"
+  tmp=$(mktemp "$conf.XXXXXX")
+  grep -v -- "$1" "$conf" > "$tmp" || true
+  [[ -z "${2:-}" ]] || printf '%s\n' "$2" >> "$tmp"
+  mv "$tmp" "$conf"
+}
+
+want=${1:-}
+case "$want" in
+  on|off) ;;
+  "") if running; then want=off; else want=on; fi ;;
+  *) echo "usage: takumi switch reader [on|off]" >&2; exit 2 ;;
+esac
+
+if [[ $want == on ]]; then
+  if ! command -v orca >/dev/null; then
+    takumi notice vol "The screen reader is not installed" "Update Takumi to add it" >/dev/null 2>&1 || true
+    echo "The screen reader (Orca) is not installed: update Takumi to add it" >&2
+    exit 3
+  fi
+  set_line '^spawn-at-startup "orca"' 'spawn-at-startup "orca"'
+  if command -v gsettings >/dev/null; then gsettings set org.gnome.desktop.a11y.applications screen-reader-enabled true 2>/dev/null || true; fi
+  if ! running; then
+    if command -v setsid >/dev/null; then setsid orca </dev/null >/dev/null 2>&1 & else orca </dev/null >/dev/null 2>&1 & fi
+  fi
+  takumi notice vol "Screen reader on" "Super+Ctrl+Enter turns it off" >/dev/null 2>&1 || true
+  echo "Screen reader on"
+else
+  set_line '^spawn-at-startup "orca"'
+  if command -v gsettings >/dev/null; then gsettings set org.gnome.desktop.a11y.applications screen-reader-enabled false 2>/dev/null || true; fi
+  pkill -x orca 2>/dev/null || true
+  # Orca is gone, so speech-dispatcher says the last word itself.
+  if command -v spd-say >/dev/null; then spd-say "Screen reader off" >/dev/null 2>&1 || true; fi
+  takumi notice vol "Screen reader off" >/dev/null 2>&1 || true
+  echo "Screen reader off"
+fi

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: How dates, numbers, money and paper are written, apart from the language, from your next login
+usage: [<code>]
+example: takumi language formats de_DE.UTF-8
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/language.sh" ]] && { . "$l/core.sh"; . "$l/language.sh"; break; }; done
+declare -F language_apply >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# LC_TIME, LC_NUMERIC, LC_MONETARY, LC_PAPER and LC_MEASUREMENT, together, through systemd-localed
+# (docs/languages.md). The language's own code puts them back with the language. Without a code it is a
+# conversation: it asks for a place. Exit status as takumi language set: 0 · 2 · 3 · 5 · 1.
+want=${1:-}
+case "$want" in -*) echo "usage: takumi language formats [<code>]" >&2; exit 2 ;; esac
+if [[ -z "$want" ]]; then
+  language_ask place "Formats of which place? A country, like Germany"
+  code=$LANGUAGE_PICKED
+else
+  code=$(language_resolve "$want")
+  [[ -n "$code" ]] || core_fail 5 "This computer knows no formats called $want"
+fi
+place=$(language_place "$code")
+if [[ "$code" == "$(language_formats_now)" ]]; then core_done "Dates, numbers and paper are already written as in $place."; exit 0; fi
+language_apply "$code" "$(language_assign formats "$code")" "" "Changing the formats needs your password"
+if [[ "$code" == "$(language_now)" ]]; then core_done "Dates, numbers and paper follow the language again from your next login."
+else core_done "Dates, numbers and paper as in $place from your next login."; fi

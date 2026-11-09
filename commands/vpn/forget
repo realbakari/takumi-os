@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Forget a VPN: its profile, its password and the certificates its file came with
+usage: <name>
+example: takumi vpn forget "Old Work"
+risk: 1
+words: vpn forget remove delete
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/vpn.sh" ]] && { . "$l/vpn.sh"; break; }; done
+declare -F vpn_uuids >/dev/null || { echo "takumi: the VPN library is missing" >&2; exit 1; }
+# Exit status: 0 forgotten · 5 no VPN by that name · 1 it could not be removed.
+name=${1:-}; [[ -n "$name" ]] || { echo "usage: takumi vpn forget <name>" >&2; exit 2; }
+command -v nmcli >/dev/null || { echo "NetworkManager is not installed"; exit 1; }
+uuids=$(vpn_uuids "$name")
+[[ -n "$uuids" ]] || { echo "There is no VPN called $name"; exit 5; }
+while IFS= read -r u; do
+  # An OpenVPN import writes the certificates inside its file to ~/.cert/nm-openvpn; they go with it.
+  for k in ca cert key ta tls-crypt tls-crypt-v2; do
+    f=$(vpn_data "$u" "$k"); f=${f#file://}
+    [[ "$f" == "$HOME/.cert/nm-openvpn/"* && -f "$f" ]] && rm -f -- "$f"
+  done
+  LC_ALL=C nmcli connection delete uuid "$u" >/dev/null 2>&1 || { echo "VPN $name could not be removed"; exit 1; }
+done <<< "$uuids"
+takumi notice lock "Forgot VPN $name" "its password and certificates are gone" >/dev/null 2>&1 || true
+echo "Forgot VPN $name"

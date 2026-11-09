@@ -1,0 +1,27 @@
+/* Firefox's toolbars, tabs, address bar, menus and sidebar in the theme's colours, read once at Firefox's
+   start. Rendered by takumi theme render; each profile's chrome/takumi.css links here once you turn it on
+   (takumi theme browsers). Pages keep their own colours. */
+:root {
+  --lwt-accent-color: {{background}} !important;
+  --lwt-text-color: {{foreground}} !important;
+  --toolbar-bgcolor: {{surface}} !important;
+  --toolbar-color: {{foreground}} !important;
+  --toolbar-field-background-color: {{background}} !important;
+  --toolbar-field-color: {{foreground}} !important;
+  --toolbar-field-focus-background-color: {{background}} !important;
+  --toolbar-field-focus-color: {{foreground}} !important;
+  --toolbar-field-focus-border-color: {{accent}} !important;
+  --tab-selected-bgcolor: {{surface}} !important;
+  --tab-selected-textcolor: {{foreground}} !important;
+  --focus-outline-color: {{accent}} !important;
+  --arrowpanel-background: {{surface}} !important;
+  --arrowpanel-color: {{foreground}} !important;
+  --arrowpanel-border-color: {{muted}} !important;
+  --urlbarView-highlight-background: {{accent}} !important;
+  --urlbarView-highlight-color: {{background}} !important;
+  --sidebar-background-color: {{surface}} !important;
+  --sidebar-text-color: {{foreground}} !important;
+  --tabpanel-background-color: {{background}} !important;
+}
+#navigator-toolbox, #TabsToolbar, #titlebar { background-color: {{background}} !important; color: {{foreground}} !important; }
+#nav-bar, #PersonalToolbar, #sidebar-box, #sidebar-header { background-color: {{surface}} !important; color: {{foreground}} !important; }

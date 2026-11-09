@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: OneDrive, Google Drive or Dropbox as a folder in your home and in Files' sidebar; remove disconnects, list says which are there
+usage: <add|remove|list> [onedrive|google|dropbox]
+example: takumi drive cloud add onedrive
+example: takumi drive cloud remove dropbox
+example: takumi drive cloud list
+risk: 1
+converse: yes
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/drive.sh" ]] && { . "$l/drive.sh"; . "$l/core.sh"; . "$l/backup.sh"; break; }; done
+declare -F drive_clouds >/dev/null && declare -F core_ask >/dev/null && declare -F backup_signin >/dev/null ||
+  { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh). add: the first time, rclone and fuse3 from Arch's packages (the password asked in
+# the Core); then rclone's own sign-in in the browser (lib/backup.sh backup_signin, the one backups use), which
+# keeps the sign-in in ~/.config/rclone/rclone.conf as the remote takumi-<cloud>. The cloud is then a folder,
+# ~/OneDrive, ~/Google Drive or ~/Dropbox, mounted by takumi-cloud@<cloud>.service (rclone mount with
+# --vfs-cache-mode full: a file is fetched when it is opened, kept on this computer, and what you change is sent
+# back) from every login on, and a place in Files' sidebar. remove: unmounted, the service off, the folder and the
+# sidebar place gone; then it asks whether to sign out and free what is kept on this computer, which loses
+# anything not sent yet. list: each cloud and how it stands (connected, signed in, off), --json for scripts.
+# serve <cloud> is what the service runs. Exit status: 0 done · 2 not a cloud Takumi knows · 3 an answer was
+# needed and none came · 4 the folder already holds files · 6 signing in did not finish · 1 anything else.
+usage="usage: takumi drive cloud <add|remove|list> [onedrive|google|dropbox]"
+verb=${1:-}; which=${2:-}
+log="$HOME/.local/state/takumi/drive-cloud.log"; mkdir -p "$(dirname "$log")" "$backup_run"
+
+cloud_of() {  # sets id ctype name settings remote folder cache unit from a word, or exits 2
+  local line
+  line=$(drive_cloud "$1") || core_fail 2 "$usage"
+  IFS='|' read -r id ctype name settings <<< "$line"
+  remote="takumi-$id"; folder=$(drive_cloud_folder "$name"); cache=$(drive_cloud_cache "$id"); unit=$(drive_cloud_unit "$id")
+}
+signed_in() { command -v rclone >/dev/null && [[ "$(backup_rclone_type "$remote")" == "$ctype" ]]; }
+running() { systemctl --user is-active --quiet "$unit" 2>/dev/null; }
+size_of() { du -sk "$1" 2>/dev/null | awk '{ printf "%.0f", $1 * 1024 }'; }
+
+case "$verb" in
+  # --- What the service runs ---
+  serve)
+    cloud_of "$which"
+    command -v rclone >/dev/null || { echo "takumi drive cloud: rclone is not installed" >&2; exit 1; }
+    mkdir -p "$folder" "$cache"
+    # A mount left by an rclone that died ("Transport endpoint is not connected") is let go first.
+    if ! ls "$folder" >/dev/null 2>&1 || drive_mounted "$folder"; then fusermount3 -uz "$folder" 2>/dev/null || true; fi
+    exec rclone mount "$remote:" "$folder" --vfs-cache-mode full --cache-dir "$cache" --vfs-cache-max-size 10G \
+      --vfs-cache-max-age 720h --dir-cache-time 5m --poll-interval 1m --log-level NOTICE ;;
+
+  # --- Which are here ---
+  list)
+    json=no; [[ "$which" == --json ]] && json=yes
+    while IFS='|' read -r i _ _ _; do
+      cloud_of "$i"
+      if running && drive_mounted "$folder"; then state=connected; elif signed_in; then state="signed in"; else state=off; fi
+      if [[ $json == yes ]]; then
+        jq -cn --arg id "$id" --arg n "$name" --arg f "$folder" --arg s "$state" '{id: $id, name: $n, folder: $f, state: $s}'
+      else
+        case "$state" in connected) w="a folder in your home: $folder" ;; "signed in") w="signed in, not connected" ;; *) w="not added" ;; esac
+        printf '%-14s %s\n' "$name" "$w"
+      fi
+    done <<< "$(drive_clouds)"
+    exit 0 ;;
+
+  # --- Adding one ---
+  add)
+    [[ -n "$which" ]] || core_fail 2 "$usage"
+    cloud_of "$which"
+    if running && drive_mounted "$folder"; then
+      drive_bookmark_add "$folder" "$name"
+      core_done "$name is already a folder in your home"; exit 0
+    fi
+    # Mounting over files would hide them: the folder must be empty, or be the cloud already.
+    if [[ -d "$folder" ]] && ! drive_mounted "$folder" && [[ -n "$(ls -A "$folder" 2>/dev/null)" ]]; then
+      core_fail 4 "~/$name already holds files. Move them somewhere else, then add $name again"
+    fi
+    need=()
+    command -v rclone >/dev/null || need+=(rclone)
+    command -v fusermount3 >/dev/null || need+=(fuse3)
+    if (( ${#need[@]} )); then
+      core_confirm "$name as a folder needs ${need[*]} from Arch's packages. Install now? It asks for your password." ||
+        core_fail 3 "Nothing changed. $name needs ${need[*]}."
+      core_note "Installing ${need[*]}…"
+      # installs /usr/bin/rclone and /usr/bin/fusermount3 (the packages named in need)
+      core_sudo "Installing what $name needs asks for your password" pacman -S --needed --noconfirm "${need[@]}" >> "$log" 2>&1 ||
+        core_fail 1 "${need[*]} did not install. What happened is in $log"
+    fi
+    trap 'if [[ -n "$backup_signin_pid" ]]; then kill "$backup_signin_pid" 2>/dev/null || true; fi; rm -rf "$backup_run/signin-$remote"' EXIT
+    trap 'exit 143' TERM INT
+    if ! signed_in || ! rclone lsd "$remote:" --max-depth 1 >/dev/null 2>> "$log"; then
+      backup_signin "$remote" "$ctype" "$name" "$settings" "$log"
+    fi
+    core_note "Connecting $name…"
+    mkdir -p "$folder"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user enable --now "$unit" >> "$log" 2>&1 || core_fail 1 "$name did not connect. What happened is in $log"
+    for _ in $(seq 1 "${TAKUMI_CLOUD_WAIT:-20}"); do drive_mounted "$folder" && break; sleep 1; done
+    drive_mounted "$folder" || core_fail 1 "$name did not connect. What happened is in $log and journalctl --user -u $unit"
+    drive_bookmark_add "$folder" "$name"
+    gio open "$folder" >/dev/null 2>&1 || true
+    core_done "$name is a folder in your home and in Files' sidebar. Files come down as you open them" ;;
+
+  # --- Disconnecting ---
+  remove)
+    [[ -n "$which" ]] || core_fail 2 "$usage"
+    cloud_of "$which"
+    known=no
+    { running || drive_mounted "$folder" || signed_in || systemctl --user is-enabled --quiet "$unit" 2>/dev/null; } && known=yes
+    [[ $known == yes ]] || { drive_bookmark_remove "$folder"; core_done "$name is not added"; exit 0; }
+    core_note "Disconnecting $name…"
+    systemctl --user disable --now "$unit" >> "$log" 2>&1 || true
+    if drive_mounted "$folder"; then fusermount3 -u "$folder" 2>> "$log" || fusermount3 -uz "$folder" 2>> "$log" || true; fi
+    drive_mounted "$folder" && core_fail 1 "Something is still using ~/$name. Close what is open from it, then disconnect again"
+    drive_bookmark_remove "$folder"
+    rmdir "$folder" 2>/dev/null || true    # empty once unmounted; never a folder with files of yours in it
+    kept=$(size_of "$cache"); kept=${kept:-0}
+    if signed_in || (( kept > 0 )); then
+      what="sign out"; (( kept > 0 )) && what="sign out and free the $(drive_human "$kept") kept on this computer"
+      if core_confirm "$name is disconnected. Also $what? Changes not sent to $name yet are lost"; then
+        command -v rclone >/dev/null && rclone config delete "$remote" >/dev/null 2>&1 || true
+        rm -rf "${cache:?}"
+        core_done "$name is disconnected and signed out"; exit 0
+      fi
+      core_done "$name is disconnected. Adding it again picks up where it was"; exit 0
+    fi
+    core_done "$name is disconnected" ;;
+
+  *) echo "$usage" >&2; exit 2 ;;
+esac

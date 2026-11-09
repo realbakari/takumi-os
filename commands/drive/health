@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Check the health of this computer's disks: healthy, wearing out or failing, how worn, how many hours
+usage: [disk] [--json]
+example: takumi drive health
+example: takumi drive health nvme0
+risk: 0
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/drive.sh" ]] && { . "$l/drive.sh"; . "$l/core.sh"; break; }; done
+declare -F drive_health_words >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh), because the disks answer only root: smartctl from smartmontools reads what each
+# disk says about itself (SMART; NVMe's health log), once, with the password asked in the Core. The first time,
+# it offers to install smartmontools from Arch. Each disk becomes one line ("Samsung SSD 980 1TB · Healthy · 2%
+# worn · 1,200 hours", lib/drive.sh drive_health_words); with several, each is a note and the last word sums them
+# up. --json prints {device, name, verdict, line} per disk. Exit status: 0 every disk is healthy (or says
+# nothing) · 4 a disk is wearing out or failing · 3 smartmontools is needed and was not installed · 5 no such
+# disk · 1 anything else.
+want="" json=no
+for a in "$@"; do case "$a" in --json) json=yes ;; -*) echo "usage: takumi drive health [disk] [--json]" >&2; exit 2 ;; *) want=$a ;; esac; done
+log="$HOME/.local/state/takumi/drive-health.log"; mkdir -p "$(dirname "$log")"; : > "$log"
+
+if ! command -v smartctl >/dev/null; then
+  core_confirm "Checking disks needs smartmontools from Arch's packages. Install it? It asks for your password." ||
+    core_fail 3 "Nothing was checked. Checking disks needs smartmontools."
+  core_note "Installing smartmontools…"
+  # installs /usr/bin/smartctl (the smartmontools package)
+  core_sudo "Installing smartmontools needs your password" pacman -S --needed --noconfirm smartmontools >> "$log" 2>&1 ||
+    core_fail 1 "smartmontools did not install. What happened is in $log"
+fi
+
+# The disks smartctl finds, with the way it talks to each (sat for a SATA disk, nvme, a USB bridge's own).
+disks=$(smartctl --scan -j 2>>"$log" | jq -r '.devices[]? | [.name, (.type // "auto")] | @tsv' 2>/dev/null || true)
+if [[ -n "$want" ]]; then
+  w=${want#/dev/}
+  disks=$(awk -F '\t' -v w="$w" '{ d = $1; sub(/^\/dev\//, "", d) } d == w || index(w, d) == 1 && w ~ /^nvme[0-9]+n[0-9]+$/' <<< "$disks")
+  [[ -n "$disks" ]] || core_fail 5 "There is no disk called $want"
+fi
+[[ -n "$disks" ]] || { core_done "No disk here reports its health (the disks of a virtual machine do not)"; exit 0; }
+devs=(); while IFS=$'\t' read -r d ty; do [[ -n "$d" ]] && devs+=("$d" "$ty"); done <<< "$disks"
+
+[[ $json == yes ]] || core_note "Asking the disks…"
+# reads /dev/sda, /dev/nvme0 and the other disks named in devs (their SMART data); writes nothing
+out=$(core_sudo "Checking the disks' health needs your password" sh -c 'while [ $# -gt 1 ]; do smartctl -j -a -d "$2" "$1"; shift 2; done; exit 0' sh "${devs[@]}" 2>>"$log") ||
+  core_fail 1 "The disks could not be asked. What happened is in $log"
+lines=$(jq -c 'select(type == "object" and .device != null)' <<< "$out" 2>/dev/null | drive_health_words) || lines=""
+[[ -n "$lines" ]] || core_fail 1 "The disks did not answer. What happened is in $log"
+
+if [[ $json == yes ]]; then
+  while IFS=$'\t' read -r d n v l; do
+    jq -cn --arg d "$d" --arg n "$n" --arg v "$v" --arg l "$l" '{device: $d, name: $n, verdict: $v, line: $l}'
+  done <<< "$lines"
+else
+  count=$(grep -c . <<< "$lines")
+  bad=$(awk -F '\t' '$3 == "failing" || $3 == "worn"' <<< "$lines")
+  if (( count == 1 )); then core_done "$(cut -f4 <<< "$lines")"
+  else
+    while IFS=$'\t' read -r _ _ _ l; do core_note "$l"; done <<< "$lines"
+    if [[ -n "$bad" ]]; then core_done "$(head -n 1 <<< "$bad" | cut -f4)"
+    else
+      healthy=$(awk -F '\t' '$3 == "healthy"' <<< "$lines" | grep -c . || true)
+      if (( healthy == count )); then core_done "All $count disks are healthy"
+      elif (( healthy == 0 )); then core_done "None of the $count disks reports its health"
+      else core_done "Every disk that reports its health is healthy"; fi
+    fi
+  fi
+fi
+awk -F '\t' '$3 == "failing" || $3 == "worn" { f = 1 } END { exit !f }' <<< "$lines" && exit 4
+exit 0

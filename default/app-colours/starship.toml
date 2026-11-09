@@ -1,0 +1,40 @@
+# The terminal prompt in the theme's colours, for starship (https://starship.rs/config/). Rendered by
+# takumi theme render; ~/.config/starship.toml links here while takumi theme prompt is on.
+add_newline = false
+format = "$directory$git_branch$git_state$git_status$cmd_duration$line_break$character"
+palette = "takumi"
+
+[palettes.takumi]
+accent = "{{accent}}"
+text = "{{foreground}}"
+quiet = "{{muted}}"
+red = "{{red}}"
+yellow = "{{yellow}}"
+green = "{{green}}"
+
+[directory]
+style = "bold accent"
+truncation_length = 3
+truncation_symbol = "…/"
+
+[git_branch]
+symbol = ""
+style = "quiet"
+format = "[on $branch]($style) "
+
+[git_state]
+style = "yellow"
+
+[git_status]
+style = "yellow"
+format = "([$all_status$ahead_behind]($style) )"
+
+[cmd_duration]
+min_time = 2000
+style = "quiet"
+format = "[$duration]($style) "
+
+[character]
+success_symbol = "[›](accent)"
+error_symbol = "[›](red)"
+vimcmd_symbol = "[‹](green)"

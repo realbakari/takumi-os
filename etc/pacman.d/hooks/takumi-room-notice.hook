@@ -1,0 +1,10 @@
+# The only thing Takumi says about a direct pacman upgrade. No abort. See docs/atomic-rooms.md.
+[Trigger]
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = Takumi room notice
+When = PreTransaction
+Exec = /usr/bin/sh -c 'if takumi room enabled 2>/dev/null; then echo ":: This upgrade changes the system you are using. takumi update would have prepared a new one you can undo."; fi'

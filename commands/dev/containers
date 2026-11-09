@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set up containers: rootless Podman, with the docker command and Compose working through it
+risk: 1
+converse: yes
+title: Set up containers
+words: docker podman containers compose devcontainer images developer
+glyph: chip
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; . "$l/core.sh"; break; }; done
+declare -F apps_subids_have >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh, docs/development.md). Takumi does not add you to the docker group, because
+# anyone in it can become root without a password; Podman runs containers as you instead. podman-docker is
+# the docker command (unless Docker's own is installed), docker-compose talks to Podman's socket, and
+# DOCKER_HOST points every other tool at it. Exit status: 0 · 1 anything else.
+log="$apps_state/dev.log"; mkdir -p "$apps_state"
+admin() { core_sudo "Setting up containers needs your password" "$@"; }
+run() { if core_in_core; then "$@" >> "$log" 2>&1; else "$@"; fi; }
+
+need=()
+command -v podman >/dev/null || need+=(podman)
+command -v docker >/dev/null || need+=(podman-docker)
+command -v docker-compose >/dev/null || need+=(docker-compose)
+if (( ${#need[@]} )); then
+  core_note "Installing Podman, the docker command and Compose…"
+  # pacman: the packages' files under /usr and their entries in /var/lib/pacman
+  run admin pacman -S --needed --noconfirm "${need[@]}" || core_fail 1 "Podman did not install. What happened is in $log"
+fi
+if ! apps_subids_have; then
+  range=$(apps_subids_range)
+  # usermod: adds the range to /etc/subuid and /etc/subgid
+  run admin usermod --add-subuids "$range" --add-subgids "$range" "$(id -un)" || core_fail 1 "Containers could not be set up for you. What happened is in $log"
+  run podman system migrate || true
+fi
+core_note "Starting Podman's socket…"
+run systemctl --user enable --now podman.socket || core_fail 1 "Podman's socket did not start. What happened is in $log"
+envd="$apps_config/environment.d/60-takumi-containers.conf"
+if [[ ! -f "$envd" ]]; then
+  mkdir -p "$(dirname "$envd")"
+  # shellcheck disable=SC2016 # ${XDG_RUNTIME_DIR} is for systemd to expand
+  printf '# takumi dev containers: tools that speak to Docker reach Podman, as you (docs/development.md)\nDOCKER_HOST=unix://${XDG_RUNTIME_DIR}/podman/podman.sock\n' > "$envd"
+fi
+core_done "Containers are ready: docker and docker compose run through Podman, as you, from your next login. Takumi leaves the docker group alone, because anyone in it can become root without a password."

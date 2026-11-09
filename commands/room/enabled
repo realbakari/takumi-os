@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Exit 0 when the running system is a Takumi room
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_current >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+[[ -n "$(rooms_current)" && -d "$TAKUMI_TOP/@rooms" ]]

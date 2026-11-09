@@ -1,0 +1,53 @@
+# The Shelf: apps a person asks for by name. A Flathub ID installs from Flathub, just for them (no password);
+# a web address becomes a web app in its own window (takumi app web). Rows: commands/app/shelf. Steam is
+# takumi install gaming and Windows takumi install windows, rows of their own.
+# name	flathub id or web address	search words	one line
+Spotify	com.spotify.Client	music streaming songs podcasts	Music and podcasts
+Zoom	us.zoom.Zoom	meetings video calls	Video meetings
+Slack	com.slack.Slack	chat work team	Team chat
+Discord	com.discordapp.Discord	chat voice gaming community	Voice and chat
+Telegram	org.telegram.desktop	chat messages	Messages
+Signal	org.signal.Signal	chat messages private	Private messages
+Obsidian	md.obsidian.Obsidian	notes writing markdown	Notes
+Visual Studio Code	com.visualstudio.code	code editor programming vscode	Code editor
+GIMP	org.gimp.GIMP	photoshop images photo editing	Photo editing
+Inkscape	org.inkscape.Inkscape	illustrator vector drawing	Vector drawing
+Krita	org.kde.krita	painting drawing illustration	Painting
+Blender	org.blender.Blender	3d modelling animation	3D
+VLC	org.videolan.VLC	video player media	Plays every video
+OBS Studio	com.obsproject.Studio	record stream screen	Recording and streaming
+Audacity	org.audacityteam.Audacity	audio sound editing	Audio editing
+Kdenlive	org.kde.kdenlive	video editing premiere imovie	Video editing
+Thunderbird	org.mozilla.Thunderbird	email mail outlook	Email
+Chromium	org.chromium.Chromium	browser web chrome	Web browser
+Google Chrome	com.google.Chrome	browser web	Web browser
+Brave	com.brave.Browser	browser web private	Web browser
+Bitwarden	com.bitwarden.desktop	passwords vault	Passwords
+Bottles	com.usebottles.bottles	windows exe wine	Run Windows apps
+Heroic	com.heroicgameslauncher.hgl	games epic gog	Epic and GOG games
+Mission Center	io.missioncenter.MissionCenter	task manager activity monitor cpu	What is using your computer
+LocalSend	org.localsend.localsend_app	airdrop share files phone	Send files to nearby devices
+Element	im.riot.Riot	chat matrix	Chat on Matrix
+Lutris	net.lutris.Lutris	games gaming windows games battle.net ea ubisoft	Games from every store
+RetroArch	org.libretro.RetroArch	games gaming retro emulator nintendo playstation sega	Classic games and consoles
+Moonlight	com.moonlight_stream.Moonlight	games gaming stream remote play sunshine nvidia	Play games streamed from another computer
+Outlook	https://outlook.office.com/mail/	email mail calendar microsoft 365 office hotmail live	Microsoft 365 email and calendar
+Word	https://www.office.com/launch/word	documents doc docx writing microsoft 365 office	Microsoft 365 documents
+Excel	https://www.office.com/launch/excel	spreadsheets sheets xls xlsx microsoft 365 office	Microsoft 365 spreadsheets
+PowerPoint	https://www.office.com/launch/powerpoint	slides presentations ppt pptx keynote microsoft 365 office	Microsoft 365 slides
+Teams	https://teams.microsoft.com/	meetings chat video calls microsoft 365 office	Microsoft 365 meetings and chat
+WhatsApp	https://web.whatsapp.com/	chat messages phone	Messages from your phone
+Gmail	https://mail.google.com/	email mail google	Google's email
+Google Calendar	https://calendar.google.com/	calendar events meetings google	Google's calendar
+Notion	https://www.notion.so/	notes docs wiki writing	Notes, documents and wikis
+Figma	https://www.figma.com/files	design ui prototype sketch	Design and prototypes
+Discord (web)	https://discord.com/app	chat voice gaming community discord	Voice and chat, without installing the app
+Microsoft Edge	com.microsoft.Edge	browser web microsoft edge	Microsoft's web browser
+1Password	com.onepassword.OnePassword	passwords vault password manager onepassword	Passwords
+Dropbox	com.dropbox.Client	files sync cloud storage backup	Your Dropbox files in a folder
+Prism Launcher	org.prismlauncher.PrismLauncher	minecraft games gaming java mods	Minecraft, with mods and many installs
+Sunshine	dev.lizardbyte.app.Sunshine	games gaming stream remote play host moonlight	Stream this computer's games to Moonlight
+ChatGPT	https://chatgpt.com/	ai assistant chat openai gpt	OpenAI's assistant
+Claude	https://claude.ai/	ai assistant chat anthropic	Anthropic's assistant
+GeForce NOW	https://play.geforcenow.com/	games gaming cloud stream nvidia	Games streamed from NVIDIA's computers
+Xbox Cloud Gaming	https://www.xbox.com/play	games gaming cloud stream microsoft game pass xcloud	Xbox games streamed with Game Pass

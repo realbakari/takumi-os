@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: The language your apps speak, from your next login; Takumi's own words stay English for now
+usage: [<code>]
+example: takumi language set de_DE.UTF-8
+example: takumi language set pt-BR
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/language.sh" ]] && { . "$l/core.sh"; . "$l/language.sh"; break; }; done
+declare -F language_apply >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# For the whole computer, through systemd-localed (/etc/locale.conf): glibc makes the locale first when it has
+# not, and Firefox and LibreOffice get their language packs (docs/languages.md). Without a code it is a
+# conversation: it asks for a language's name, in English or in its own words. Exit status: 0 done, or nothing
+# to do · 2 usage · 3 an answer or the password was needed and none came · 5 not a language this computer knows
+# · 1 anything else. The last line says it in words.
+want=${1:-}
+case "$want" in -*) echo "usage: takumi language set [<code>]" >&2; exit 2 ;; esac
+if [[ -z "$want" ]]; then
+  language_ask language "Which language? Its name, like German or Deutsch"
+  code=$LANGUAGE_PICKED
+else
+  code=$(language_resolve "$want")
+  [[ -n "$code" ]] || core_fail 5 "This computer knows no language called $want"
+fi
+name=$(language_name "$code")
+packs=$(language_packs "$code")
+if [[ "$code" == "$(language_now)" && -z "$packs" ]]; then core_done "Your apps already speak $name."; exit 0; fi
+language_apply "$code" "$(language_assign language "$code")" "$packs" "Changing the language needs your password"
+if [[ -n "$LANGUAGE_PACKS_FAILED" ]]; then
+  core_done "Your apps speak $name from your next login. Firefox and LibreOffice follow once this runs again with the internet. Takumi's own words stay in English for now."
+else
+  core_done "Your apps speak $name from your next login. Takumi's own words stay in English for now."
+fi

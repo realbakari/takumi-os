@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Turn the firewall off, after asking: other devices could then connect to anything this computer offers
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/firewall.sh" ]] && { . "$l/firewall.sh"; . "$l/core.sh"; break; }; done
+declare -F firewall_state >/dev/null && declare -F core_confirm >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh): one question, then the password. The rules you made stay, for when it is on again.
+case "$(firewall_state)" in none|off) core_done "The firewall is already off"; exit 0 ;; esac
+core_confirm "Other devices on the network could then connect to anything this computer offers. Turn the firewall off?" || core_fail 1 "Nothing changed"
+core_note "Turning the firewall off…"
+out=$(core_sudo "Turning the firewall off needs your password" takumi firewall apply off 2>&1) ||   # /etc/ufw/ufw.conf, /etc/takumi/firewall
+  core_fail 1 "The firewall is still on: $(sed -e 's/^ERROR: //' -e 's/^sudo: //' <<< "$out" | sed '/^[[:space:]]*$/d' | tail -n 1)"
+core_done "The firewall is off"

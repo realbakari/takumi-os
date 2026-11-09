@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Open Windows full screen: it starts first, and shuts down when you close it
+usage: [open|stop]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; break; }; done
+declare -F apps_windows_rdp >/dev/null || { echo "takumi: the apps library is missing" >&2; exit 1; }
+
+# The "Windows" app in the Core runs this; takumi install windows sets it up (docs/apps.md). Windows starts,
+# FreeRDP shows it full screen with sound and the clipboard, and closing that window shuts Windows down so
+# it holds no memory while you are not using it. Exit status: 0 · 2 usage · 3 not set up · 5 FreeRDP is
+# missing · 1 Windows did not start.
+say() { takumi notice display "$1" "${2:-}" -1 "${3:-5}" >/dev/null 2>&1 || true; printf '%s\n' "$1${2:+: $2}"; }
+case "${1:-open}" in
+  open) ;;
+  stop) if apps_windows_exists && apps_windows_running; then podman stop -t 120 "$apps_windows_name" >/dev/null; fi; exit 0 ;;
+  *) echo "usage: takumi app windows [open|stop]" >&2; exit 2 ;;
+esac
+apps_windows_exists || { say "Windows is not set up" "type windows in the Core to set it up"; exit 3; }
+bin=$(apps_freerdp) || { say "Windows needs FreeRDP" "type windows in the Core to set it up again"; exit 5; }
+
+# One window at a time.
+lock="${XDG_RUNTIME_DIR:-$apps_state}/takumi-windows.pid"
+if [[ -r "$lock" ]] && kill -0 "$(cat "$lock")" 2>/dev/null; then say "Windows is already open"; exit 0; fi
+mkdir -p "$(dirname "$lock")"; echo $$ > "$lock"
+trap 'rm -f "$lock"' EXIT
+
+if ! apps_windows_running; then
+  say "Starting Windows" "about a minute" 6
+  podman start "$apps_windows_name" >/dev/null 2>&1 || { say "Windows did not start" "run takumi app windows in a terminal to see why"; exit 1; }
+fi
+# Still installing itself (the setup ended before Windows let the account in): its screen, in the browser.
+if [[ ! -f "$apps_windows_conf/ready" ]]; then
+  if apps_windows_answers; then touch "$apps_windows_conf/ready"
+  else
+    gio open http://127.0.0.1:8006/ >/dev/null 2>&1 || xdg-open http://127.0.0.1:8006/ >/dev/null 2>&1 || true
+    say "Windows is still installing" "its screen is open in your browser; open Windows again when it is done" 8
+    exit 0
+  fi
+fi
+# Ready when Windows lets the account in: three minutes at most.
+n=0
+until apps_windows_answers; do
+  n=$((n + 1))
+  if (( n >= 60 )); then say "Windows did not answer" "it may still be starting; open it again in a minute"; exit 1; fi
+  sleep 3
+done
+extra=()
+[[ "$bin" != xfreerdp3 ]] || extra+=("/wm-class:$apps_windows_name")   # the Core names the window by it
+apps_windows_rdp /f /dynamic-resolution /sound:sys:pulse +clipboard /network:auto /title:Windows +auto-reconnect ${extra[@]+"${extra[@]}"} || true
+say "Windows is shutting down" "" 4
+podman stop -t 120 "$apps_windows_name" >/dev/null 2>&1 || true

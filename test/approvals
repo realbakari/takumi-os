@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Contract checks for approvals (commands/approve/askpass) against a fake shell: the answer comes back on stdout
+# for sudo, Esc refuses, the why reaches the Core, the FIFO is private and removed, and with no shell and
+# no terminal it fails rather than waits.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+repo=$PWD; status=0; n=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-approvals.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export XDG_RUNTIME_DIR=$t/run FAKE=$t/state PATH="$t/bin:$repo/bin:$PATH"; mkdir -p "$t/bin" "$t/run" "$FAKE"
+# The fake shell answers the way Sources/Approvals.qml does: it writes the answer into the FIFO.
+cat > "$t/bin/qs" <<'FAKE'
+#!/usr/bin/env bash
+[[ -f "$FAKE/down" ]] && exit 1
+while [[ $# -gt 0 && "$1" != ask ]]; do shift; done
+fifo=${2:-}; why=${3:-}
+printf '%s\n' "$why" > "$FAKE/why"
+stat -f %Lp "$fifo" 2>/dev/null > "$FAKE/mode" || stat -c %a "$fifo" > "$FAKE/mode"
+( printf '%s\n' "$(cat "$FAKE/answer")" > "$fifo" ) &
+exit 0
+FAKE
+chmod +x "$t/bin/qs"
+check() { n=$((n + 1)); if ! eval "$2"; then echo "   FAIL: $1"; status=1; fi; }
+ask() { TAKUMI_SUDO_WHY=${1:-} takumi approve askpass < /dev/null 2>/dev/null; }
+
+printf 'correct horse battery staple' > "$FAKE/answer"
+out=$(ask "Updating Takumi needs your password") && rc=0 || rc=$?
+check "the answer comes back on stdout" '[[ $rc -eq 0 && "$out" == "correct horse battery staple" ]]'
+check "the why reaches the Core" '[[ "$(cat "$FAKE/why")" == "Updating Takumi needs your password" ]]'
+check "the FIFO only this user can open" '[[ "$(cat "$FAKE/mode")" == 600 ]]'
+check "the FIFO is gone afterwards" '[[ -z "$(ls "$XDG_RUNTIME_DIR" | grep askpass || true)" ]]'
+: > "$FAKE/answer"
+out=$(ask) && rc=0 || rc=$?
+check "Esc refuses" '[[ $rc -ne 0 && -z "$out" ]]'
+touch "$FAKE/down"
+out=$(ask) && rc=0 || rc=$?
+check "no shell and no terminal fails instead of waiting" '[[ $rc -ne 0 ]]'
+echo "   $n approval checks against a fake shell"
+exit $status

@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Prepare a new system with the latest software; yours is not touched until you restart
+usage: [-y]
+example: takumi update
+example: takumi update -y
+risk: 2
+sudo: yes
+converse: yes
+title: Update Takumi
+words: upgrade updates new version
+glyph: restart
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/rooms.sh" ]] && { . "$l/rooms.sh"; . "$l/core.sh"; . "$l/power.sh"; . "$l/update.sh"; break; }; done
+declare -F rooms_current >/dev/null && declare -F update_why >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+# See docs/atomic-rooms.md. Every step is its own command so it can be run and re-run alone. In the Core
+# (TAKUMI_CORE=1, from the Palette) this is a conversation: one question, a note for each step, the
+# password asked in the Core, and the steps' own output kept in the log. At a terminal it prints as it goes.
+unattended=0; [[ "${1:-}" == "-y" ]] && unattended=1
+exec 9> "${XDG_RUNTIME_DIR:-/tmp}/takumi-update.lock"
+flock -n 9 || core_fail 1 "An update is already being prepared."
+# Not asleep halfway: an update stopped by sleep starts again from the beginning (lib/power.sh).
+if declare -F power_hold_awake >/dev/null; then power_hold_awake "Preparing an update"; fi
+state="$HOME/.local/state/takumi"; mkdir -p "$state"
+log="$state/update.log"; : > "$log"
+if core_in_core; then
+  quiet() { "$@" >> "$log" 2>&1; }
+else
+  exec > >(tee -a "$log") 2>&1
+  quiet() { "$@"; }
+fi
+admin() { core_sudo "Updating Takumi needs your password" "$@"; }
+# yes_or_no <question>: the Core asks with Enter for yes; a terminal keeps the old default of no.
+yes_or_no() {
+  (( unattended )) && return 0
+  if core_in_core; then core_confirm "$1"; return; fi
+  local a; read -r -p "$1 [y/N] " a; [[ "$a" == [yY] ]]
+}
+said() { tail -n 1 "$log" 2>/dev/null | sed 's/^:: //'; }
+# A failure, said in one sentence (lib/update.sh reads pacman's words since line $1 of the log): the cause, and
+# the fix offered when there is one. Sets why_kind, why_text (the cause) and why_said (the cause, and the next
+# step when trying again is not it) for the caller.
+lines() { wc -l < "$log" | tr -d ' '; }
+explain() {
+  local why next
+  why_kind=""; why_text=""; why_said=""
+  why=$(tail -n +"$(( $1 + 1 ))" "$log" | update_why) || return 0
+  IFS=$'\t' read -r why_kind why_text next <<< "$why"
+  why_said=$why_text; update_retryable "$why_kind" || why_said="$why_text $next."
+}
+# Not enough space: offer Free up space (takumi update clean) in the same conversation; this lock is passed on.
+free_up_space() {
+  (( unattended )) && return 0
+  yes_or_no "$1 Free up space now?" || return 0
+  TAKUMI_UPDATE_LOCK_HELD=1 exec takumi update clean
+}
+
+if ! quiet takumi update check-space; then
+  space=$(said | sed -n 's/.*only \([0-9]*\) GiB free on \/, need \([0-9]*\) GiB.*/Only \1 GB is free, and an update needs \2 GB./p')
+  space=${space:-There is not enough space for an update.}
+  free_up_space "$space"
+  core_fail 1 "$space Free up space, then update again."
+fi
+
+if ! takumi room enabled; then
+  core_note "This computer is not using rooms, so the update happens in place and cannot be undone."
+  yes_or_no "Update in place?" || core_fail 1 "Nothing changed."
+  tries=0
+  while true; do
+    start=$(lines)
+    # pacman in English, so its words can be read back (lib/update.sh). The running system.
+    if core_in_core; then quiet admin env LC_ALL=C pacman -Syu --noconfirm && break
+    else sudo env LC_ALL=C pacman -Syu && break; fi
+    explain "$start"; tries=$((tries + 1))
+    [[ -n "$why_kind" ]] || core_fail 1 "The update did not finish: $(said)"
+    case "$why_kind" in
+      space) free_up_space "$why_text" ;;
+      lock)
+        # pacman stopped halfway earlier and left its lock: no pacman is running, so it is nobody's.
+        if ! pgrep -x pacman >/dev/null 2>&1 && (( tries < 3 )) && yes_or_no "An earlier install stopped halfway and left pacman locked. Unlock it and try again?"; then
+          quiet admin rm -f /var/lib/pacman/db.lck && continue   # pacman's lock, /var/lib/pacman/db.lck
+        fi ;;
+      *)
+        if update_retryable "$why_kind" && (( tries < 3 )) && yes_or_no "$why_text Try again?"; then
+          # The keys first, from the keyring packages (pacman's database and /etc/pacman.d/gnupg).
+          if [[ "$why_kind" == keyring ]]; then
+            keyrings=$(pacman -Qq archlinux-keyring archlinuxarm-keyring 2>/dev/null || true)
+            # shellcheck disable=SC2086 # one word per keyring
+            [[ -z "$keyrings" ]] || quiet admin env LC_ALL=C pacman -Sy --noconfirm $keyrings || true
+          fi
+          continue
+        fi ;;
+    esac
+    core_fail 1 "The update did not finish. $why_said"
+  done
+  quiet takumi migrate
+  core_done "Updated in place."
+  exit 0
+fi
+
+# An update already prepared, by you or on the charger, is waiting for a restart: offer that, not a second one.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; break; }; done
+if declare -F updates_ready >/dev/null && updates_ready >/dev/null 2>&1; then
+  if (( unattended )); then core_done "An update is ready. Restart to use it."; exit 0; fi
+  if yes_or_no "An update is already prepared. Restart now to use it? If the new system does not start, you are back on this one."; then systemctl reboot; fi
+  core_done "The update starts the next time you restart."
+  exit 0
+fi
+
+room=$(date -u +%Y%m%d-%H%M%S)
+core_note "Preparing a new system. The one you are using is not touched."
+yes_or_no "Prepare it?" || core_fail 1 "Nothing changed."
+start=$(lines)
+if ! quiet admin takumi room snapshot "$room"; then
+  explain "$start"
+  [[ "$why_kind" == space ]] && free_up_space "$why_text"
+  core_fail 1 "The new system could not be started. ${why_said:-$(said)}"
+fi
+core_note "Downloading and installing the updates in the new system…"
+tries=0
+while true; do
+  start=$(lines)
+  quiet admin takumi room upgrade "$room" && break
+  explain "$start"; tries=$((tries + 1))
+  # Trying again needs no new room: what failed (a download, the keys) stopped before anything was installed.
+  if [[ -n "$why_kind" ]] && update_retryable "$why_kind" && (( tries < 3 )) && yes_or_no "$why_text Try again?"; then
+    core_note "Trying again…"; continue
+  fi
+  quiet admin takumi room discard "$room" || true
+  [[ "$why_kind" == space ]] && free_up_space "$why_text"
+  core_fail 1 "The update could not be prepared.${why_said:+ $why_said} Nothing changed; your system is as it was."
+done
+core_note "Getting the new system ready to start…"
+quiet admin takumi room stage "$room"
+quiet takumi migrate --stage
+[[ -x "$HOME/.config/takumi/on/update-ready" ]] && quiet "$HOME/.config/takumi/on/update-ready" "$room"
+takumi notice restart "Update ready" "restart to use it" -1 6
+takumi update check --local >/dev/null 2>&1 || true   # the waiting count clears: they are in the new system
+if (( unattended )); then core_done "Ready. Restart to use the new system."; exit 0; fi
+if yes_or_no "Ready. Restart now? If the new system does not start, you are back on this one."; then systemctl reboot; fi
+core_done "Ready. The new system starts the next time you restart."
+exit 0

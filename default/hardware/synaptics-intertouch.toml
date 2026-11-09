@@ -1,0 +1,14 @@
+# Synaptics touchpads the kernel found on the old PS/2 connection and says can use their own (InterTouch over
+# SMBus): the kernel's message names the option. Once it is on, the message is gone, so the fix is kept.
+# Kernel: drivers/input/mouse/synaptics.c ("Your touchpad ... says it can support a different bus").
+title = "Synaptics touchpad"
+part = "touchpad"
+says = "on its precise connection"
+keep = true
+
+[match]
+kernel_log = ["says it can support a different bus"]
+
+[apply]
+modprobe = ["options psmouse synaptics_intertouch=1"]
+note = "The kernel found this touchpad on its old, coarse connection and said it can use a better one. This switches it over, so pointing, scrolling and gestures are smooth."

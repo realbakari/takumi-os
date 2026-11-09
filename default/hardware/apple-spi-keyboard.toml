@@ -1,0 +1,13 @@
+# MacBook (2015 to 2017) and MacBook Pro (2016 and 2017): the keyboard and trackpad are on SPI (the kernel's
+# applespi). With the disk encrypted, their drivers have to be in the initramfs to type its password.
+# Kernel: drivers/input/keyboard/applespi.c
+title = "MacBook keyboard at the disk password"
+part = "computer"
+
+[match]
+dmi_vendor = "^Apple"
+dmi_product = '^(MacBook(8,1|9,1|10,1)|MacBookPro1[34],[123])$'
+
+[apply]
+initramfs_modules = ["applespi", "intel_lpss_pci", "spi_pxa2xx_platform"]
+note = "This MacBook's keyboard and trackpad are wired in a way that needs their own drivers. They now load in time for the disk's password, so it can be typed on the built-in keyboard."

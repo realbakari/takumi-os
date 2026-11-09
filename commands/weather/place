@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Choose the place Today's weather is for, or "here" for the city the clock is set to
+usage: [place | here]
+example: takumi weather place Porto
+example: takumi weather place here
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/weather.sh"; . "$l/core.sh"; break; }; done
+declare -F weather_find >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# A conversation: asks which place when none is given, and again when Open-Meteo knows none by that name. The
+# place is kept as its name and country ("Porto, Portugal"), so the same Porto comes back each time. Choosing a
+# place turns the weather in Today on. Exit status: 0 · 3 no answer came · 4 no such place · 1 no answer from
+# Open-Meteo.
+here=$(clock_city "$(clock_zone)")
+place="$*"
+if [[ -z "$place" ]]; then core_ask place "Which place? A city, or here for $here" || core_fail 3 "Nothing changed"; fi
+while :; do
+  case "$(clock_fold "$place")" in
+    here|"$(clock_fold "$here")") keep=""; shown=$here; break ;;
+  esac
+  core_note "Looking for $place on Open-Meteo…"
+  if found=$(weather_find "$place"); then
+    IFS=$'\t' read -r name country _ <<< "$found"
+    keep="$name${country:+, $country}"; shown=$name; break
+  fi
+  why="Open-Meteo knows no place called $place"
+  core_wrong "$why"
+  [[ "${TAKUMI_CORE:-}" == 1 ]] || core_fail 4 "$why"
+  core_ask place "Which place? A city, or here for $here" || core_fail 3 "Nothing changed"
+done
+weather_save true "$keep" "$(weather_setting units)"
+if out=$(weather_fetch "" yes); then core_done "Today's weather is for $shown: $(jq -r '.line' <<< "$out")"
+else core_done "Today's weather is for $shown, once Open-Meteo answers"; fi

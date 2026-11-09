@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Remind you of something at a time or in a while; it rings in the Core, with "Again in 10 min"
+usage: <in 10 min | at 15:00 | tomorrow 9:00 | friday at 18:00> <what>
+example: takumi remind in 10 min stretch
+example: takumi remind at 15:00 call Ana
+example: takumi remind tomorrow 9:00 dentist
+example: takumi remind call Ana at 3
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/core.sh"; break; }; done
+declare -F clock_when >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# The moment and the words come in either order ("in 10 min stretch", "call Ana at 3"); see clock_when in
+# lib/clock.sh. A conversation (lib/core.sh): what is missing is asked for, a time it does not understand is
+# asked for again in the Core. Exit status: 0 set · 3 an answer was needed and none came · 4 not a time it
+# knows · 1 systemd would not keep the timer. The last line says it in words.
+hint="in 10 min, at 15:00, tomorrow 9:00"
+at="" what=""
+if (( $# )); then
+  if r=$(clock_when "$@"); then at=${r%%$'\t'*}; what=${r#*$'\t'}
+  else what="$*"; what=${what#me }; what=${what#to }; fi
+else
+  core_ask what "What should I remind you of?" || core_fail 3 "No reminder was set"
+fi
+while [[ -z "$at" ]]; do
+  core_ask when "When? $hint" || core_fail 3 "No reminder was set"
+  if r=$(clock_when "$when"); then
+    at=${r%%$'\t'*}
+    if [[ -z "$what" ]]; then what=${r#*$'\t'}; fi
+    break
+  fi
+  core_wrong "That is not a time I know: try $hint"
+  [[ "${TAKUMI_CORE:-}" == 1 ]] || core_fail 4 "That is not a time I know: try $hint"
+done
+if [[ -z "$what" ]]; then core_ask what "What should I remind you of?" || core_fail 3 "No reminder was set"; fi
+[[ -n "$what" ]] || core_fail 3 "No reminder was set"
+now=$(clock_now)
+(( at > now )) || core_fail 4 "That moment has passed"
+id=$(remind_add remind "$at" "$what") || core_fail 1 "The reminder could not be set: systemd did not take its timer"
+when=$(clock_say_when "$at")
+(( at - now <= 3600 )) && when="in $(clock_length $(( at - now ))), $when"
+core_in_core || takumi notice bell "Reminder $when" "$what" >/dev/null 2>&1 || true
+core_done "Reminder $when: $what"

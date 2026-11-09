@@ -1,0 +1,33 @@
+# Sumi: ink stone black, paper white and a vermilion seal
+# A Takumi theme.
+
+[meta]
+name = "sumi"
+mode = "dark"
+title = "Sumi"
+about = "ink stone black, paper white and a vermilion seal"
+
+[palette]
+accent     = "#e0533d"
+background = "#121110"
+surface    = "#1a1917"
+foreground = "#e8e4dc"
+muted      = "#6d6862"
+red        = "#e0533d"
+yellow     = "#d9b25f"
+green      = "#8fae7a"
+cyan       = "#79b4b0"
+blue       = "#7c9cc4"
+magenta    = "#b88cb0"
+
+[phase.dawn]
+accent     = "#e08a3d"
+
+[phase.dusk]
+accent     = "#e0533d"
+
+[phase.night]
+accent     = "#a44937"
+background = "#0c0b0a"
+surface    = "#121210"
+foreground = "#cecbc4"

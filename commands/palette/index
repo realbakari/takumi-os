@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for a provider as JSON lines
+usage: <apps|commands|keys|shelf|start|themes|calc|wifi> [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+provider=${1:?}; q=${2:-}
+command -v jq >/dev/null || exit 0
+here=$(dirname "$(readlink -f "$0")")
+# A row that types words into the Palette's field (Open.qml's `search`); `run` does the same through the
+# shell's IPC, for a shell that does not know `search` yet.
+typing() {  # id title glyph kind words score keywords [subtitle]
+  jq -cn --arg id "$1" --arg t "$2" --arg g "$3" --arg k "$4" --arg s "$5" --argjson n "$6" --arg w "${7:-}" --arg sub "${8:-}" \
+    '{id: $id, title: $t, glyph: $g, kind: $k, search: $s, keywords: $w, steady: true, score: $n}
+     + (if $sub != "" then {subtitle: $sub} else {} end) + {
+      run: (["qs", "-c", "takumi"] + ["ipc", "--any-display", "call", "core", "search", $s])}'
+}
+# The guide, rendered at install (install/steps/50-user.sh), opened in the browser: from the empty Palette,
+# for "help", and among the settings.
+guide=/usr/share/takumi/guide/index.html
+[[ -f "$guide" ]] || guide="$here/../../guide/README.md"
+help_row() {  # score keywords [kind]
+  [[ -f "$guide" ]] || return 0
+  jq -cn --arg f "$guide" --argjson n "$1" --arg w "$2" --arg k "${3:-Find}" \
+    '{id: "find:help", title: "Help", subtitle: "The guide, for people coming from a Mac or Windows", glyph: "info", kind: $k,
+      keywords: $w, steady: true, run: ["xdg-open", $f], score: $n}'
+}
+case "$provider" in
+  apps)
+    # The first file with a name wins, as for every desktop: yours, then Flatpak's, then the system's.
+    seen=" "
+    for f in "$HOME/.local/share/applications"/*.desktop "$HOME/.local/share/flatpak/exports/share/applications"/*.desktop \
+             /var/lib/flatpak/exports/share/applications/*.desktop /usr/local/share/applications/*.desktop /usr/share/applications/*.desktop; do
+      [[ -f "$f" ]] || continue
+      id=$(basename "$f" .desktop)
+      [[ "$seen" == *" $id "* ]] && continue
+      seen="$seen$id "
+      grep -q '^NoDisplay=true' "$f" && continue
+      grep -q '^Hidden=true' "$f" && continue
+      # Helper entries some packages ship for other programs, never for a person to open. mpv is the engine
+      # under Celluloid, the video player people open.
+      case "$id" in foot-server|footclient|avahi-discover|bssh|bvnc|qv4l2|qvidcap|lstopo|cups|org.gnome.Sushi|nvim|mpv) continue ;; esac
+      name=$(sed -n 's/^Name=//p' "$f" | head -n 1); icon=$(sed -n 's/^Icon=//p' "$f" | head -n 1)
+      comment=$(sed -n 's/^Comment=//p' "$f" | head -n 1)
+      words="$(sed -n 's/^GenericName=//p' "$f" | head -n 1) $(sed -n 's/^Keywords=//p' "$f" | head -n 1 | tr ';' ' ')"
+      jq -cn --arg id "app:$(basename "$f" .desktop)" --arg t "$name" --arg s "$comment" --arg i "$icon" --arg f "$f" --arg w "$words" \
+        '{id:$id,title:$t,subtitle:$s,icon:$i,keywords:$w,run:["gio","launch",$f],score:1}'
+    done ;;
+  commands)
+    # Every routed command a person might want, in plain words: its title when it has one, else
+    # "takumi <group> <name>". Commands that need an argument are reached through their own rows (themes,
+    # volume, ...), and internal ones never show. A group's own command reads as the group. Wi-Fi has its
+    # own rows below, which know whether Wi-Fi is on, and so has the assistant.
+    takumi --manifest | jq -c '.[]
+      | select((.usage | contains("<")) | not)
+      | select(.group | IN("clipboard","doctor","intent","migrate","notice","palette","security","wifi","clock","remind","timer","weather","backup","phone","share","firewall","vpn","drive","printer","scan") | not)
+      | select((.group + " " + .name) | IN("switch wifi","switch nightlight","update main","update check","update prepare") | not)
+      | {id:("cmd:"+.group+" "+.name),
+         title:(if .title != "" then .title else "takumi "+.group+(if .name=="main" then "" else " "+.name end) end),
+         subtitle:(if .title != "" then .summary+" \u00b7 takumi "+.group+(if .name=="main" then "" else " "+.name end) else .summary end),
+         keywords:.words, glyph:(if .glyph != "" then .glyph else "cmd" end),
+         kind:(if .group=="power" then "Power" elif .group=="switch" then "Setting" else "Command" end),
+         run:(["takumi",.group]+(if .name=="main" then [] else [.name] end)),
+         interactive:(.interactive and (.converse | not)), converse:.converse, score:(if .group == "theme" then 0.6 else 0.8 end), risk:.risk}'
+    # The assistant's three ways in (docs/intent.md), each a conversation in the Core; the one in use says so.
+    in_use=$(sed -n 's/^engine *= *"\(.*\)"/\1/p' "$HOME/.config/takumi/intent.toml" 2>/dev/null | tail -n 1 || true)
+    while IFS='|' read -r engine title subtitle glyph words; do
+      jq -cn --arg e "$engine" --arg t "$title" --arg s "$subtitle" --arg g "$glyph" --arg w "$words" --arg u "$in_use" \
+        '{id: ("assistant:" + $e), title: $t, subtitle: ((if $e == $u then "In use \u00b7 " else "" end) + $s), glyph: $g, kind: "Setting",
+          keywords: ("assistant ai intent " + $w), converse: true, run: ["takumi", "intent", "setup", $e], score: 0.8, risk: 1}'
+    done <<'ROWS'
+claude|Use Claude for the assistant|With your Claude account, through Claude Code|quote|claude anthropic subscription sign in login
+anthropic|Use an Anthropic API key for the assistant|Claude, paid for by your API key|key|claude anthropic
+openai|Use OpenAI for the assistant|GPT, with your OpenAI API key|key|openai gpt chatgpt
+ROWS
+    # Settings by topic, for when you do not know the word: "settings", "preferences" or "control panel" lists
+    # them, and each types its own word into the field, where that topic's rows are. "help" finds the guide.
+    ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]' | sed 's/^ *//; s/ *$//')
+    topic=no
+    for w in settings setting preferences options "control panel" "system settings" "system preferences"; do
+      [[ ${#ql} -ge 3 && "$w" == "$ql"* ]] && topic=yes
+    done
+    kw="settings setting preferences options control panel system"
+    if [[ $topic == yes ]]; then
+      n=0
+      while IFS='|' read -r title word glyph sub; do
+        n=$((n + 1))
+        typing "topic:$word" "$title" "$glyph" Topic "$word" "$(awk -v n="$n" 'BEGIN { print 0.9 - n * 0.01 }')" "$kw $word" "$sub"
+      done <<'TOPICS'
+Wi-Fi|wifi|wifi|Networks, sharing one, hotel sign-in pages
+Bluetooth|bluetooth|bt|Headphones, speakers, pairing
+Sound|sound|vol|Speakers, microphone, volume, quality
+Displays|display|display|Brightness, size, screens, night light
+Keyboard & mouse|keyboard|keyboard|Layouts, input methods, touchpad, keys
+Power & battery|power|battery|Battery, sleep, profiles, the lid
+Look|theme|sun|Themes, the sky, fonts
+Apps|app|apps|Get, remove, defaults, open at login
+Privacy & security|security|shield|Fingerprint, firewall, Secure Boot, the disk
+Backups|backup|history|Hourly backups, restoring files
+TOPICS
+      help_row 0.78 "$kw help" Topic
+    else
+      help_row 0.85 "help guide manual documentation docs learn how tutorial support question"
+    fi
+    ;;
+  keys)
+    # The keys worth knowing, as rows: typing "keys", "screenshot" or "copy" shows the key.
+    n=0
+    while IFS='|' read -r keys what words; do
+      [[ -z "$keys" || "$keys" == \#* ]] && continue
+      n=$((n + 1))
+      jq -cn --arg k "$keys" --arg t "$what" --arg w "$words key keys shortcut hotkey keyboard" --argjson n "$n" \
+        '{id:("key:"+$k),title:$t,subtitle:$k,keywords:$w,glyph:"cmd",kind:"Key",run:["true"],score:(0.6 - $n * 0.001)}'
+    done <<'KEYS'
+Super+Space|Open the Core: find anything|search spotlight launcher start menu
+Super+C · V · X|Copy, paste, cut, in every app|copy paste cut clipboard command
+Super+Z · Shift+Z|Undo, redo|undo redo
+Super+A · S · F|Select all, save, find|select save find
+Super+W · T · N|Close tab, new tab, new window|tab window
+Super+Return|New terminal|terminal console
+Super+B|Browser|browser web firefox
+Super+E|Files|files finder explorer folders
+Super+Q|Close the window|close quit
+Super+← →|Move along the strip|move switch windows
+Super+↑ ↓|Up and down: windows in a column, then workspaces|workspaces spaces desktops
+Super+1 … 9|Go to a workspace|workspaces spaces desktops
+Super+Ctrl+1 … 5|Move the window to a workspace|move workspace
+Super+R|Change the window's width|resize width size
+Super+M|Fill the strip with this window|maximize fullscreen zoom
+Super+O|See everything|overview mission control expose task view
+Super+Tab|Switch windows: tap for the last one, hold Super to choose|switch alt tab cmd tab windows recent
+Super+`|The same app's other windows|switch windows app
+Super+Ctrl+↑|Float a window above the strip, and back|float floating on top pop out
+Super+Ctrl+← →|Go to the screen on that side|monitor screen display other
+Super+Shift+Ctrl+← →|Move the window to the screen on that side|monitor screen display move
+Super+L|Lock the screen|lock away
+Super+Shift+3|Screenshot of the screen|screenshot capture print
+Super+Alt+Escape|Force quit an app|force quit kill stuck frozen not responding
+Super+Alt+= · - · 0|Zoom in, out, off|zoom magnifier magnify accessibility
+Super+Alt+Page Up · Page Down|The notice before, the next notice|notices notifications next previous
+Super+Shift+4|Screenshot of a part|screenshot capture region
+Super+Shift+5|Screenshot of a window|screenshot capture window
+Super+Shift+6|Record the screen, again to stop|record recording video screencast capture
+Super+Shift+7|Screenshot of a part, then mark it up|screenshot markup annotate draw arrow
+Super+H|Dictate: speak, then press again to type it|dictation dictate voice speech speak talk typing
+Super+Shift+Space|Act on the notice: its button, or copy its code|notification notice message act copy code
+Super+Escape|Put every notice away|notification notice message dismiss clear
+Super+Ctrl+Enter or Super+F5|Screen reader on or off|accessibility screen reader orca blind speech narrator voiceover
+Super+U|Accessibility: screen reader, pointer, sticky keys, contrast|accessibility a11y ease of access
+Shift+Mute|Send the sound to the next output|sound output speakers headphones switch
+Alt+Mute|Mute the microphone|microphone mic mute
+Shift+Play|Choose which app the media keys control|media player music keys
+Super+I|Quick settings: Wi-Fi, Bluetooth, sound, night light|quick settings control center action center wifi bluetooth
+Super+P|Clipboard history: paste something copied earlier|clipboard history paste copied
+Super+. or Super+;|Emoji and symbols|emoji emoticon symbol smiley
+KEYS
+    ;;
+  shelf)
+    # Apps you can get by name, web apps and what you can remove: takumi app shelf filters its own rows.
+    takumi app shelf "$q"
+    ;;
+  start)
+    # The empty Palette. The first week: what to do first, as rows; a row leaves once you have used it. Always:
+    # Settings, whose topics are found without knowing their words, and Help.
+    first=$(stat -c %Y "$HOME/.local/state/takumi/firstlight" 2>/dev/null || echo 0)
+    hist="$HOME/.local/state/takumi/palette/history"
+    order=0
+    row() {  # id title subtitle glyph run...
+      local id=$1 t=$2 s=$3 g=$4; shift 4
+      grep -qx "$id" "$hist" 2>/dev/null && return 0
+      # The command as a JSON array, built from stdin: jq would read "--any-display" in its own arguments as an option.
+      local run; run=$(printf '%s\n' "$@" | jq -R . | jq -cs .)
+      order=$((order + 1))
+      jq -cn --arg id "$id" --arg t "$t" --arg s "$s" --arg g "$g" --argjson run "$run" --argjson n "$order" '{id:$id,title:$t,subtitle:$s,glyph:$g,kind:"Start",run:$run,score:(1 - $n * 0.01)}'
+    }
+    search() { echo qs -c takumi ipc --any-display call core search "$1"; }
+    if (( $(date +%s) - first < 7 * 86400 )); then
+      [[ "$(nmcli -t -f STATE general 2>/dev/null)" == connected* ]] || \
+        row start:wifi "Connect to Wi-Fi" "Pick a network and type its password" wifi $(search wifi)
+      row start:look "Pick a look" "$(takumi theme list | wc -l | tr -d ' ') themes, light and dark; the sky follows your clock" sun $(search theme)
+      row start:keys "Keys you already know" "Super works like Command: copy, paste, undo, in every app" cmd $(search keys)
+      row start:apps "Get your apps" "Type an app's name: Spotify, Zoom, Steam, VS Code" down $(search get)
+      row start:assistant "Set up the assistant" "Claude or OpenAI, acting through Takumi's own commands" quote $(search assistant)
+    fi
+    typing find:settings Settings toggle Find settings 0.5 "settings preferences control panel"
+    help_row 0.49 "help guide"
+    ;;
+  themes)
+    here=$(dirname "$(readlink -f "$0")")
+    # Each theme by its own title and mood ([meta] title and about), the one in use first in words, and
+    # "light" or "dark" among its search words, so "light theme" finds the light ones.
+    cur=$(sed -n 's/^name = "\(.*\)"/\1/p' "$HOME/.local/state/takumi/look/palette.toml" 2>/dev/null | head -1)
+    meta() { sed -n "/^\[meta\]/,/^\[/s/^$1 *= *\"\(.*\)\"/\1/p" "$f" | head -1; }
+    for t in $(takumi theme list); do
+      tdir=""; for d in "$HOME/.config/takumi/themes" /usr/share/takumi/themes "$here/../../themes"; do [[ -f "$d/$t/theme.toml" ]] && { tdir="$d/$t"; break; }; done
+      f="$tdir/theme.toml"
+      prev=""; [[ -f "$tdir/sample.png" ]] && prev="$tdir/sample.png"
+      sw=$(for k in background surface accent foreground; do sed -n "/^\[palette\]/,/^\[/s/^$k *= *\"\(#[0-9a-fA-F]\{6\}\)\"/\1/p" "$f" | head -1; done | jq -Rsc 'split("\n") | map(select(length > 0))')
+      jq -cn --arg t "$t" --arg ti "$(meta title)" --arg ab "$(meta about)" --arg mo "$(meta mode)" --arg cur "${cur:-}" --arg pr "$prev" --argjson sw "${sw:-[]}" \
+        '{id:("theme:"+$t), title:("Theme " + (if $ti != "" then $ti else $t end)),
+          subtitle:((if $t == $cur then "In use · " else "" end) + (if $ab != "" then $ab else "Switch theme, keep the phase" end)),
+          keywords:("theme look colours colors " + $t + " " + $mo), swatch:$sw, run:["takumi","theme","set",$t],
+          score:(if $t == $cur then 0.72 else 0.7 end)} + (if $pr != "" then {preview:$pr} else {} end)'
+    done
+    for p in dawn day dusk night auto; do jq -cn --arg p "$p" '{id:("phase:"+$p),title:("Phase "+$p),subtitle:(if $p=="auto" then "Follow the clock" else "Pin the "+$p+" sky" end),run:["takumi","phase","set",$p],score:0.7}'; done ;;
+  wifi)
+    # Nearby networks and what you can do with them (docs/wifi.md). "wifi", "network" or "internet"
+    # lists them; three letters of a network's name find it. Enter on a network joins it in the Core,
+    # as a conversation: the command asks for the password only when it has to.
+    command -v nmcli >/dev/null || exit 0
+    here=$(dirname "$(readlink -f "$0")")
+    for l in /usr/share/takumi/lib/wifi.sh "$here/../../lib/wifi.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+    declare -F wifi_scan >/dev/null || exit 0
+    ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
+    topic=no
+    for w in wifi wi-fi wireless network networks internet; do [[ ${#ql} -ge 3 && "$w" == "$ql"* ]] && topic=yes; done
+    if ! wifi_present; then
+      [[ $topic == yes ]] || exit 0
+      s="Plug in a network cable, or add a Wi-Fi adapter"
+      [[ "$(LC_ALL=C nmcli -t -f TYPE,STATE device 2>/dev/null)" == *ethernet:connected* ]] && s="Connected by cable"
+      jq -cn --arg s "$s" '{id:"wifi:none",title:"No Wi-Fi on this computer",subtitle:$s,glyph:"wired",kind:"Wi-Fi",keywords:"wifi wi-fi wireless network internet",run:["true"],score:0.9}'
+      exit 0
+    fi
+    if ! wifi_on; then
+      jq -cn '{id:"wifi:on",title:"Turn Wi-Fi on",subtitle:"Wi-Fi is off",glyph:"wifi",kind:"Setting",keywords:"wifi wi-fi wireless network internet radio on",run:["takumi","switch","wifi"],score:0.95}'
+      exit 0
+    fi
+    # Ask for a fresh scan (it runs in the background; the rows refresh themselves and pick it up).
+    nmcli device wifi rescan >/dev/null 2>&1 || true
+    scan=$(wifi_scan no); saved=$(wifi_saved | cut -f2-)
+    # One row per network: the one in use first, then saved ones, then by signal. The row says what Enter
+    # does: share the one you are on (or open its sign-in page), join any other.
+    [[ -z "$scan" ]] || SAVED="$saved" CONN="$(wifi_connectivity)" TOPIC="$topic" Q="$ql" jq -Rc '
+      def bars: if . >= 67 then 3 elif . >= 34 then 2 else 1 end;
+      (env.SAVED | split("\n")) as $saved
+      | split("\t") | (.[0] == "1") as $on | (.[1] | tonumber) as $sig | .[2] as $kind | (.[3:] | join("\t")) as $name
+      | select(env.TOPIC == "yes" or ((env.Q | length) >= 3 and ($name | ascii_downcase | contains(env.Q))))
+      | ($saved | any(. == $name)) as $known
+      | {id: ("wifi:" + $name), title: $name, kind: "Wi-Fi", glyph: "wifi", bars: ($sig | bars), steady: true, refresh: 10,
+         keywords: "wifi wi-fi wireless network internet join connect",
+         score: (if $on then 0.99 elif $known then 0.9 + $sig / 10000 else 0.8 + $sig / 10000 end)}
+      | if $on then
+          if env.CONN == "portal" then . + {subtitle: "Connected · sign in to use the internet", run: ["takumi", "wifi", "signin"]}
+          else . + {subtitle: (if env.CONN == "limited" or env.CONN == "none" then "Connected, but no internet" else "Connected · Enter to share" end),
+                    card: true, run: ["takumi", "wifi", "share", "--card", $name]} end
+        else . + {converse: true, run: ["takumi", "wifi", "join", $name],
+                  subtitle: ((if $known then "Saved" elif $kind == "enterprise" then "Work or school sign-in"
+                              elif $kind == "open" then "Open, no password" elif $kind == "owe" then "Open, encrypted"
+                              else "Needs a password" end) + (if $sig < 25 then " · weak signal" else "" end))} end' <<< "$scan"
+    jq -cn '{id:"wifi:hidden",title:"Join a hidden network",subtitle:"Type its name, then its password",glyph:"wifi",kind:"Wi-Fi",keywords:"wifi wi-fi wireless hidden other network ssid join",converse:true,run:["takumi", "wifi", "join","--hidden"],score:0.5}'
+    jq -cn '{id:"wifi:off",title:"Turn Wi-Fi off",subtitle:"Wi-Fi is on",glyph:"wifiOff",kind:"Setting",keywords:"wifi wi-fi wireless radio off airplane",run:["takumi","switch","wifi"],score:0.45}'
+    # Sharing and sign-in pages are found by their own words ("share wifi", "hotel"), not in the plain list.
+    if [[ $topic == no ]] && [[ "$scan" == 1* || "$scan" == *$'\n'1* ]]; then
+      jq -cn '{id:"wifi:share",title:"Share Wi-Fi",subtitle:"A code a phone camera can scan, and the password",glyph:"qr",kind:"Wi-Fi",keywords:"share password qr code guest phone",card:true,run:["takumi", "wifi", "share","--card"],score:0.6}'
+      jq -cn '{id:"wifi:signin",title:"Open the Wi-Fi sign-in page",subtitle:"For hotel, café and airport networks",glyph:"globe",kind:"Wi-Fi",keywords:"sign in signin login hotel cafe café airport portal captive",run:["takumi","wifi","signin"],score:0.6}'
+    fi
+    [[ -z "$saved" ]] || printf '%s\n' "$saved" | jq -Rc 'select(length > 0) | {id: ("wifi-forget:" + .), title: ("Forget " + .), subtitle: "Removes it from this computer",
+      glyph: "wifiOff", kind: "Wi-Fi", keywords: "forget remove delete saved", risk: 1, run: ["takumi", "wifi", "forget", .], score: 0.5}'
+    ;;
+  calc)
+    [[ "$q" =~ ^[0-9[:space:]().+*/%^-]+$ && "$q" =~ [0-9] ]] || exit 0
+    command -v qalc >/dev/null || exit 0
+    r=$(qalc -t "$q" 2>/dev/null) || exit 0
+    # The expression rides along as a search word, so the query filter below keeps the answer.
+    [[ -n "$r" && "$r" != "$q" ]] && jq -cn --arg r "$r" --arg q "$q" '{id:"calc",title:$r,subtitle:"Copy to clipboard",keywords:$q,run:["sh","-c","printf %s \"$1\" | wl-copy","_",$r],score:1}'
+    exit 0 ;;
+esac | {
+  # Every word of the query, anywhere in the row, hyphens ignored: "wifi off" finds "Turn Wi-Fi off".
+  [[ -n "$q" ]] && jq -c --arg q "$q" '
+    ($q | ascii_downcase | gsub("-"; "") | split(" ") | map(select(length > 0))) as $words
+    | select((.title + " " + (.subtitle // "") + " " + (.keywords // "")) | ascii_downcase | gsub("-"; "") as $t
+             | all($words[]; . as $w | $t | contains($w)))' || cat
+}

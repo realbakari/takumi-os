@@ -1,0 +1,14 @@
+# AMD Radeon graphics, built in or a card: the kernel's amdgpu and Mesa do the work, video decoding included
+# (Mesa's VA-API driver is part of the mesa package); this adds Mesa's Vulkan driver, RADV.
+# Mesa: https://docs.mesa3d.org/drivers/radv.html
+title = "AMD graphics"
+part = "graphics"
+says = "works, with video decoding"
+
+[match]
+pci = ["1002:*"]
+pci_class = ["03??"]
+
+[apply]
+packages = ["vulkan-radeon", "lib32-vulkan-radeon"]
+note = "AMD's graphics work with the open drivers in Linux and Mesa, video decoding included. This adds Vulkan for games and apps."

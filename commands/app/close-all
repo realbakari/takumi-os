@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Close every window, as each one's close button would; asks first
+risk: 1
+title: Close all windows
+words: close all windows every apps quit clean slate tidy clear desktop
+glyph: cross
+converse: yes
+ABOUT
+set -euo pipefail
+# A clean slate without logging out: niri asks each window to close (niri msg action close-window --id), the way
+# its own close button does, so an app with unsaved work asks about it in its own window and stays. A
+# conversation (lib/core.sh): it says how many first. Exit status: 0 closed, or nothing was open · 1 you said no
+# · 3 niri is not running · 5 some stayed open (an app asking about unsaved work), named in the last line.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; break; }; done
+declare -F core_confirm >/dev/null || { echo "takumi: lib/core.sh is missing" >&2; exit 1; }
+command -v jq >/dev/null || core_fail 1 "takumi: jq is missing"
+wait_secs=${TAKUMI_CLOSE_WAIT:-5}
+
+all=$(niri msg --json windows 2>/dev/null) || core_fail 3 "niri is not running"
+n=$(jq 'length' <<< "${all:-[]}" 2>/dev/null || echo 0)
+if [[ "$n" == 0 ]]; then core_done "No windows are open"; exit 0; fi
+if [[ "$n" == 1 ]]; then q="Close the one window that is open?"; else q="Close all $n windows? Apps with unsaved work will ask about it"; fi
+core_confirm "$q" || core_fail 1 "Nothing was closed"
+core_note "Closing $n windows…"
+while IFS= read -r id; do
+  [[ -n "$id" ]] && { niri msg action close-window --id "$id" >/dev/null 2>&1 || true; }
+done <<< "$(jq -r '.[].id' <<< "$all")"
+left=$all
+for _ in $(seq 1 $(( wait_secs * 4 ))); do
+  left=$(niri msg --json windows 2>/dev/null || echo "[]")
+  [[ "$(jq 'length' <<< "${left:-[]}" 2>/dev/null || echo 0)" == 0 ]] && { core_done "Every window is closed"; exit 0; }
+  sleep 0.25
+done
+names=$(jq -r '[.[] | (.title // .app_id // "a window")] | unique | .[0:3] | join(", ")' <<< "$left")
+core_fail 5 "Still open, asking about unsaved work: $names"

@@ -1,0 +1,33 @@
+# Kuro: high contrast on black, for the clearest reading
+# A Takumi theme.
+
+[meta]
+name = "kuro"
+mode = "dark"
+title = "Kuro"
+about = "high contrast on black, for the clearest reading"
+
+[palette]
+accent     = "#ffd60a"
+background = "#000000"
+surface    = "#101010"
+foreground = "#ffffff"
+muted      = "#a6a6a6"
+red        = "#ff6b6b"
+yellow     = "#ffd60a"
+green      = "#5df07a"
+cyan       = "#5ce1ff"
+blue       = "#7aa7ff"
+magenta    = "#ff8cf5"
+
+[phase.dawn]
+accent     = "#ffab40"
+
+[phase.dusk]
+accent     = "#ff954f"
+
+[phase.night]
+accent     = "#6489d1"
+background = "#000000"
+surface    = "#0a0a0a"
+foreground = "#f2f2f2"

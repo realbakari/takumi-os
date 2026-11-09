@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Show the time on the 12-hour or the 24-hour clock in the Core, the lock and Today
+usage: <12h|24h>
+example: takumi clock format 12h
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; break; }; done
+declare -F clock_save >/dev/null || { echo "takumi: the clock library is missing" >&2; exit 1; }
+# The shell reads `format` from ~/.config/takumi/clock.toml as it changes (shell/Core/Today.qml; docs/time.md).
+case "${1:-}" in
+  12|12h|12-hour) want=12h ;;
+  24|24h|24-hour) want=24h ;;
+  *) echo "usage: takumi clock format <12h|24h>" >&2; exit 2 ;;
+esac
+clock_save "$want" "$(clock_auto_word)" "$(clock_cities)"
+clock_fmt=$want; t=$(clock_hm "$(clock_now)")
+name="${want%h}-hour clock"
+takumi notice clock "The $name" "$t in the Core, the lock and Today" >/dev/null 2>&1 || true
+echo "The $name: $t"

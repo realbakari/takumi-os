@@ -1,0 +1,34 @@
+# Iceberg: cool, quiet blues of deep water
+# Colours after Iceberg by cocopon (https://github.com/cocopon/iceberg.vim); phases by Takumi.
+
+[meta]
+name = "iceberg"
+mode = "dark"
+title = "Iceberg"
+about = "cool, quiet blues of deep water"
+credit = "Iceberg by cocopon (https://github.com/cocopon/iceberg.vim)"
+
+[palette]
+accent     = "#84a0c6"
+background = "#161821"
+surface    = "#1e2132"
+foreground = "#c6c8d1"
+muted      = "#6b7089"
+red        = "#e27878"
+yellow     = "#e2a478"
+green      = "#b4be82"
+cyan       = "#89b8c2"
+blue       = "#84a0c6"
+magenta    = "#a093c7"
+
+[phase.dawn]
+accent     = "#e2a478"
+
+[phase.dusk]
+accent     = "#e29578"
+
+[phase.night]
+accent     = "#877da9"
+background = "#0e1015"
+surface    = "#151723"
+foreground = "#b1b3bc"

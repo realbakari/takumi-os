@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Change a screen's resolution or refresh rate; it goes back unless you keep it
+usage: <native|smoother|WxH|WxH@Hz> [screen]
+example: takumi display mode smoother
+example: takumi display mode 1920x1080
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/display.sh" ]] && { . "$l/display.sh"; . "$l/core.sh"; break; }; done
+declare -F display_modes >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# native: the screen's own size and rate; smoother: the fastest rate at the size it shows now; WxH: the
+# fastest rate at that size; WxH@Hz: that size at the nearest rate. See docs/display.md.
+usage() { echo "usage: takumi display mode <native|smoother|WxH|WxH@Hz> [screen]" >&2; exit 2; }
+cap() { printf '%s' "$1" | awk '{ print toupper(substr($0, 1, 1)) substr($0, 2) }'; }   # a sentence starts with a capital
+want=${1:-}; [[ "$want" =~ ^(native|smoother|[0-9]+x[0-9]+(@[0-9.]+)?)$ ]] || usage
+screens=$(display_screens) || core_fail 1 "The screens could not be read"
+line=$(if [[ -n "${2:-}" ]]; then display_pick "$2" <<< "$screens"; else head -n 1 <<< "$screens"; fi)
+[[ -n "$line" ]] || core_fail 1 "There is no screen called ${2:-}"
+IFS=$'\t' read -r name label _ <<< "$line"
+modes=$(display_modes "$name") || core_fail 1 "The screens could not be read"
+[[ -n "$modes" ]] || core_fail 1 "$(cap "$label") does not say what it can show"
+cur=$(awk -F '\t' '$4 == 1 { print $1 "\t" $2; exit }' <<< "$modes")
+pick=$(display_pick_mode "$want" <<< "$modes")
+if [[ -z "$pick" ]]; then
+  case "$want" in
+    smoother) core_done "$(cap "$label") is as smooth as it goes"; exit 0 ;;
+    native)   core_fail 1 "$(cap "$label") does not say which size is its own" ;;
+    *)        core_fail 1 "$(cap "$label") cannot show ${want%@*}" ;;
+  esac
+fi
+[[ "$pick" == "$cur" ]] && { core_done "$(cap "$label") already shows that"; exit 0; }
+size=${pick%$'\t'*}; hz=${pick#*$'\t'}; csize=${cur%$'\t'*}; chz=${cur#*$'\t'}
+apply() { niri msg output "$name" mode "$(display_mode_arg "$size" "$hz")"; }
+undo()  { niri msg output "$name" mode "$(display_mode_arg "$csize" "$chz")"; }
+said=$(cap "$label at ${size/x/ × }, $(display_hz "$hz")")
+display_change "$said" apply undo

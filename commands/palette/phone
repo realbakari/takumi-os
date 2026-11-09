@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for your phone and for sending to phones and computers nearby as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "phone", "iphone", "android", "find my phone": the paired phone with its battery, ringing it, sending it the files
+# you copied and the clipboard, and pairing one, all through KDE Connect. "send", "share", "airdrop", "nearby": Send
+# to… and receiving through LocalSend, and sending to the phone (docs/sharing.md).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/share.sh" ]] && { . "$l/share.sh"; . "$l/palette.sh"; break; }; done
+declare -F phone_devices >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+q=${1:-}; ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
+phone=no nearby=no forget=no
+match() { [[ ${#ql} -ge 3 && ( "$1" == "$ql"* || "$ql" == *"$1"* ) ]]; }
+for w in phone phones iphone android mobile smartphone kdeconnect "kde connect" "find my" ring; do if match "$w"; then phone=yes; fi; done
+for w in send share sharing airdrop nearby localsend receive transfer; do if match "$w"; then nearby=yes; fi; done
+case "$ql" in *forget*|*unpair*|*remove*) if [[ $phone == yes ]]; then forget=yes; fi ;; esac
+[[ $phone == yes || $nearby == yes ]] || exit 0
+
+copied=$(share_copied | grep -c . || true)
+devices=""
+if phone_have && phone_up; then devices=$(phone_devices); fi
+{
+  paired=$(awk -F'\t' '$3 == 1' <<< "$devices")
+  # Phones asking to pair come first: the phone is waiting for the code to be checked.
+  awk -F'\t' '$3 == 0 && $5 == 1' <<< "$devices" | while IFS=$'\t' read -r id name _ _ _ _; do
+    jq -cn --arg id "$id" --arg n "$name" '{id: ("phone:asks:" + $id), title: ($n + " asks to pair"), subtitle: "Enter checks the code both screens show",
+      glyph: "phone", kind: "Phone", keywords: "phone pair connect kde connect", converse: true, run: ["takumi", "phone", "pair", $id], score: 0.98}'
+  done
+  if [[ -z "$paired" ]]; then
+    jq -cn '{id: "phone:connect", title: "Connect your phone", subtitle: "Its notifications here, files and the clipboard both ways, ringing it when lost",
+      glyph: "phone", kind: "Phone", keywords: "phone iphone android mobile kde connect pair link notifications", converse: true, run: ["takumi", "phone", "pair"], score: 0.95}'
+  fi
+  if [[ $phone == yes ]]; then
+    awk -F'\t' '$3 == 0 && $4 == 1 && $5 == 0' <<< "$devices" | while IFS=$'\t' read -r id name _ _ _ _; do
+      jq -cn --arg id "$id" --arg n "$name" '{id: ("phone:pair:" + $id), title: ("Pair with " + $n), subtitle: "Nearby, with KDE Connect open · checks a code on both screens",
+        glyph: "phone", kind: "Phone", keywords: "phone pair connect kde connect nearby", converse: true, run: ["takumi", "phone", "pair", $id], score: 0.85}'
+    done
+  fi
+  while IFS=$'\t' read -r id name _ near _ _; do
+    [[ -n "$id" ]] || continue
+    if [[ $forget == yes ]]; then
+      jq -cn --arg id "$id" --arg n "$name" '{id: ("phone:forget:" + $id), title: ("Forget " + $n), subtitle: "It needs pairing again to connect", glyph: "cross",
+        kind: "Phone", keywords: "phone forget unpair remove", risk: 1, run: ["takumi", "phone", "forget", "--to", $id], score: 0.9}'
+      continue
+    fi
+    if [[ $near != 1 ]]; then
+      jq -cn --arg id "$id" --arg n "$name" '{id: ("phone:" + $id), title: ($n + " is not connected"), subtitle: "Open KDE Connect on it, on the same Wi-Fi as this computer",
+        glyph: "phone", kind: "Phone", keywords: "phone iphone android mobile kde connect battery", steady: true, refresh: 10, run: ["true"], score: 0.96}'
+      continue
+    fi
+    charge=$(phone_prop "$id" charge battery); charging=$(phone_prop "$id" isCharging battery)
+    ID=$id N=$name C=$charge G=$charging K=$copied jq -cn '
+      env.ID as $id | env.N as $n
+      | {id: ("phone:" + $id), title: $n, kind: "Phone", glyph: "phone", steady: true, refresh: 10, run: ["true"], score: 0.97,
+         keywords: "phone iphone android mobile kde connect battery notifications",
+         subtitle: ("Connected" + (if env.C != "" and env.C != "-1" then " · battery " + env.C + "%" + (if env.G == "true" then ", charging" else "" end) else "" end))},
+        {id: ("phone:ring:" + $id), title: "Find my phone", subtitle: ("Rings " + $n + " loudly, even on silent"), glyph: "bell", kind: "Phone",
+         keywords: "phone find ring lost where locate", run: ["takumi", "phone", "ring", "--to", $id], score: 0.92},
+        {id: ("phone:send:" + $id), title: ("Send to " + $n), kind: "Phone", glyph: "folder", keywords: "phone send share files transfer",
+         subtitle: (if env.K == "0" then "Copy files in Files first, or right-click them: Scripts, Send to phone"
+                    elif env.K == "1" then "The file you copied" else "The " + env.K + " files you copied" end),
+         run: ["takumi", "phone", "send", "--to", $id], score: 0.9},
+        {id: ("phone:clip:" + $id), title: ("Send the clipboard to " + $n), subtitle: "What you copied, ready to paste there", glyph: "edit", kind: "Phone",
+         keywords: "phone clipboard copy paste send text link", run: ["takumi", "phone", "clipboard", "--to", $id], score: 0.89}'
+  done <<< "$paired"
+  K=$copied jq -cn '{id: "nearby:send", title: "Send to…", kind: "Nearby", glyph: "send", converse: true, run: ["takumi", "share"], score: 0.86,
+      keywords: "send share airdrop nearby localsend files transfer computer",
+      subtitle: ((if env.K == "0" then "To a phone or computer nearby" elif env.K == "1" then "The file you copied, to a phone or computer nearby"
+                  else "The " + env.K + " files you copied, to a phone or computer nearby" end) + ", through LocalSend")}'
+  jq -cn '{id: "nearby:receive", title: "Receive from nearby", subtitle: "Phones and computers nearby can send to this computer, through LocalSend",
+    glyph: "down", kind: "Nearby", keywords: "receive airdrop nearby localsend share files transfer get", converse: true, run: ["takumi", "share", "--receive"], score: 0.8}'
+} | palette_filter "$q"

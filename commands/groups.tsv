@@ -1,0 +1,54 @@
+app	Apps: get, remove, defaults, web apps, Windows
+approve	Passwords the system asks for, in the Core
+audio	Sound: outputs, volume, microphone, media keys, quality, speaker tuning
+bluetooth	Bluetooth devices: pair, connect, forget
+clipboard	What you copied: keep, paste, type, clear
+debug	Logs, diagnostics, why an app quit
+disk	The encrypted disk: recovery code, opening by itself
+display	Screens: brightness, size, turn, arrange, night light, text
+doctor	Check the computer and fix what is safe
+firmware	Firmware updates through fwupd
+greeter	The login screen
+install	Optional software: Windows, Steam, agents, anything by name
+intent	The assistant: Claude or OpenAI, acting through Takumi's own commands
+keys	Harmony's Command key, layouts and the keyboard light
+lock	Lock the screen
+mcp	Takumi's commands as tools for Claude Code and other MCP clients
+migrate	Bring this home up to date
+notice	Notices in the Core
+palette	Palette index and providers
+phase	Time-of-day phases
+power	Shut down, restart, sleep, hibernate, the lid and the battery
+rollback	Boot the previous room next time
+room	List, inspect, pin and prune rooms
+screen	Screenshots, recording, colour and text from the screen
+session	The desktop session
+settings	Reset settings to Takumi's defaults
+setup	The setup disc
+switch	Bluetooth, Wi-Fi, night light, do not disturb, the touchpad, accessibility
+theme	Themes: set, list, make from a picture, check; the browsers and the prompt
+update	Atomic update into a new room
+version	Print the Takumi version
+vm	The virtual machine's screen
+wifi	Nearby networks: list, join, forget, share, sign in
+password	Your password, for logging in and the disk
+security	Fingerprints and Secure Boot
+voice	Dictation: speak, and it is typed where you were
+language	The language your apps speak, and how dates and numbers are written
+hardware	This computer: what is in it, what works, and the fixes it needs
+clock	The time zone, the clock's format and clocks for other cities
+remind	Reminders at a time or in a while
+timer	Timers that count down in Today
+weather	The weather in Today, from Open-Meteo
+dev	Developer setup: languages, containers, Git and GitHub
+agent	Coding agents in a terminal: Claude Code, Codex, OpenCode
+backup	Backups of your home folder: set up, now, status, restore
+phone	Your phone through KDE Connect: pair, ring, send, clipboard
+share	Send to phones and computers nearby through LocalSend
+firewall	The firewall: whether it is on, and which apps other devices may reach
+vpn	VPNs and Tailscale: import, connect, forget, exit nodes
+drive	USB drives and memory cards: open, eject, erase
+printer	Printers: set up, the default, a test page, remove
+scan	Scan a page into Documents
+about	About this computer: the model, memory, disk, graphics and room
+font	Fonts: the interface, code and text size; more from Arch

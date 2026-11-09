@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Tune the built-in speakers (an EQ and a limiter in front of them), or hear them as they are
+usage: <on|off|list|default|run> [<tuning>] [--for <output>]
+example: takumi audio tuning on
+example: takumi audio tuning on laptop-speakers
+example: takumi audio tuning off
+risk: 0
+ABOUT
+set -euo pipefail
+# on [tuning] [--for output]   remember it and start it now. Without a name: the last one, else the
+#                              computer's own, else the general laptop-speakers. --for tunes another output.
+# off                          the speakers as they are, remembered
+# list                         the tunings there are; with no word, which one is on
+# default <tuning|none>        the tuning this computer's hardware calls for, for everyone who has not chosen.
+#                              The hardware setup runs it as root: it writes /var/lib/takumi/audio/tuning.
+# run                          what takumi-tuning.service runs at login: the tuning wanted, in front of the
+#                              speakers, on while their route is in use, until it is stopped
+# Exit 2 usage, 3 no such tuning, 4 nothing to tune, 5 a part it needs is not installed, 6 only an
+# administrator can set the computer's tuning, 1 it did not start or sound is not running.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/audio.sh" ]] && { . "$l/audio.sh"; break; }; done
+declare -F audio_tuning_file >/dev/null || { echo "takumi: the sound library is missing" >&2; exit 1; }
+usage() { echo "usage: takumi audio tuning <on|off|list|default|run> [<tuning>] [--for <output>]" >&2; exit 2; }
+what=${1:-}; [[ $# -eq 0 ]] || shift
+name="" output=""
+while (( $# )); do
+  case "$1" in
+    --for) output=${2:-}; [[ -n "$output" ]] || usage; shift 2 ;;
+    -*) usage ;;
+    *) [[ -z "$name" ]] || usage; name=$1; shift ;;
+  esac
+done
+title_of() { local f t; f=$(audio_tuning_file "$1") || { echo "$1"; return 0; }; t=$(audio_tuning_meta "$f" title); echo "${t:-$1}"; }
+
+case "$what" in
+  '')
+    want=$(audio_tuning_wanted)
+    if [[ -n "$want" ]]; then
+      state=", not running"
+      if dump=$(audio_dump) && audio_tuning_running <<< "$dump"; then state=""; fi
+      echo "Speaker tuning: $(title_of "$want")$state"
+    elif [[ "$(audio_setting tuning state)" == off ]]; then echo "Speaker tuning: off"
+    else echo "Speaker tuning: none for this computer"; fi ;;
+
+  list)
+    audio_tuning_list | while IFS=$'\t' read -r n t; do printf '%-20s %s\n' "$n" "$t"; done ;;
+
+  on)
+    [[ -n "$name" ]] || name=$(audio_setting tuning profile)
+    [[ -n "$name" ]] || name=$(audio_tuning_computer)
+    [[ -n "$name" ]] || name=laptop-speakers
+    file=$(audio_tuning_file "$name") || audio_fail 3 "There is no speaker tuning called $name"
+    title=$(title_of "$name")
+    if need=$(audio_tuning_missing "$file"); then audio_fail 5 "$title needs $need, which is not installed"; fi
+    dump=$(audio_dump) || audio_fail 1 "Sound is not running"
+    node="" route=""
+    if [[ -n "$output" ]]; then
+      dev=$(audio_devices <<< "$dump" | audio_find out "$output")
+      [[ -n "$dev" ]] || audio_fail 4 "There is no output called $output"
+      IFS=$'\t' read -r node route <<< "$(jq -r '[.name, .route] | @tsv' <<< "$dev")"
+    elif [[ -z "$(audio_speakers <<< "$dump")" ]]; then
+      audio_fail 4 "This computer has no built-in speakers to tune"
+    fi
+    before=""; if [[ -f "$audio_config" ]]; then before=$(cat "$audio_config"); fi
+    audio_tuning_save on "$name" "$node" "$route"
+    audio_tuning_start || true
+    # Wait for its filter to join the graph: a tuning PipeWire cannot load (a plugin missing) never does.
+    tries=${TAKUMI_TUNING_WAIT:-10}
+    while (( tries > 0 )); do
+      sleep "${TAKUMI_TUNING_PAUSE:-0.5}"
+      if dump=$(audio_dump) && audio_tuning_running <<< "$dump"; then
+        takumi notice vol "Speakers tuned" "$title" >/dev/null 2>&1 || true
+        echo "Speakers tuned: $title"; exit 0
+      fi
+      tries=$((tries - 1))
+    done
+    audio_tuning_stop
+    if [[ -n "$before" ]]; then printf '%s\n' "$before" > "$audio_config"; else rm -f "$audio_config"; fi
+    audio_fail 1 "The speaker tuning did not start" ;;
+
+  off)
+    audio_tuning_save off "$(audio_setting tuning profile)" "$(audio_setting tuning node)" "$(audio_setting tuning route)"
+    audio_tuning_stop
+    takumi notice vol "Speaker tuning off" "the speakers play as they are" >/dev/null 2>&1 || true
+    echo "Speaker tuning off" ;;
+
+  default)
+    [[ -n "$name" && -z "$output" ]] || usage
+    if [[ $name == none ]]; then
+      rm -f "$audio_machine/tuning" 2>/dev/null || true
+      [[ ! -e "$audio_machine/tuning" ]] || audio_fail 6 "Only an administrator can change the computer's tuning"
+      echo "This computer has no speaker tuning of its own"; exit 0
+    fi
+    audio_tuning_file "$name" >/dev/null || audio_fail 3 "There is no speaker tuning called $name"
+    { mkdir -p "$audio_machine" && printf '%s\n' "$name" > "$audio_machine/tuning"; } 2>/dev/null ||
+      audio_fail 6 "Only an administrator can choose the computer's tuning: sudo takumi audio tuning default $name"
+    echo "$(title_of "$name") is this computer's speaker tuning from the next login, for everyone who has not chosen" ;;
+
+  run)
+    want=$(audio_tuning_wanted)
+    [[ -n "$want" ]] || exit 0
+    file=$(audio_tuning_file "$want") || { echo "There is no speaker tuning called $want"; exit 3; }
+    if need=$(audio_tuning_missing "$file"); then echo "$(title_of "$want") needs $need, which is not installed"; exit 5; fi
+    dump=$(audio_dump) || { echo "Sound is not running"; exit 1; }
+    node=$(audio_setting tuning node); route=$(audio_setting tuning route)
+    if [[ -z "$node" ]]; then
+      target=$(audio_speakers <<< "$dump")
+      [[ -n "$target" ]] || { echo "This computer has no built-in speakers to tune"; exit 0; }
+      IFS=$'\t' read -r node route <<< "$(jq -r '[.name, .route] | @tsv' <<< "$target")"
+    fi
+    mkdir -p "$audio_run"; conf="$audio_run/takumi-tuning.conf"
+    audio_tuning_config "$file" "$node" > "$conf"
+    pipewire -c "$conf" & pid=$!
+    cleanup() {
+      kill "$pid" 2>/dev/null || true
+      if [[ -n "$audio_tuning_fid" ]]; then pw-metadata -n filters -d "$audio_tuning_fid" filter.smart.disabled >/dev/null 2>&1 || true; fi
+    }
+    trap cleanup EXIT; trap 'exit 0' TERM INT HUP
+    echo "Tuning $node with $(title_of "$want")"
+    audio_tuning_follow "$node" "$route" "$pid" || exit 1 ;;
+
+  *) usage ;;
+esac

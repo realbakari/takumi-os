@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Open the sign-in page of a hotel, café or airport Wi-Fi network
+usage: [--auto]
+risk: 0
+title: Open the Wi-Fi sign-in page
+words: sign in login hotel cafe café airport portal captive page
+glyph: globe
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/wifi.sh "$(dirname "$(readlink -f "$0")")/../../lib/wifi.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F wifi_scan >/dev/null || { echo "takumi: the Wi-Fi library is missing" >&2; exit 1; }
+
+# Any plain http address brings up the sign-in page, because the network answers it with that page.
+# NetworkManager's own check address is the one it just found blocked.
+url=$(NetworkManager --print-config 2>/dev/null | awk '/^\[/ { c = ($0 == "[connectivity]") } c && /^uri=/ { print substr($0, 5); exit }' || true)
+[[ "$url" == http://* ]] || url=http://ping.archlinux.org/nm-check.txt
+name=$(wifi_current)
+
+# --auto: the shell saw the network start asking. Open the page once per network per hour.
+if [[ "${1:-}" == --auto ]]; then
+  mark="${XDG_RUNTIME_DIR:-/tmp}/takumi-signin-$(id -u)" tab=$(printf '\t') now=$(date +%s)
+  last=$(cat "$mark" 2>/dev/null || true)
+  if [[ -n "$last" && "${last#*"$tab"}" == "$name" ]] && (( now - ${last%%"$tab"*} < 3600 )); then exit 0; fi
+  printf '%s\t%s\n' "$now" "$name" > "$mark"
+fi
+takumi notice globe "Sign in to ${name:-this network}" "the sign-in page is opening" >/dev/null 2>&1 || true
+gio open "$url" >/dev/null 2>&1 || xdg-open "$url" >/dev/null 2>&1 || { echo "Open $url in a browser to sign in"; exit 1; }

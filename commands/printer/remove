@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Remove a printer from this computer, with the documents waiting for it; it can be set up again
+usage: <name>
+example: takumi printer remove "HP LaserJet M110w"
+risk: 1
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/printer.sh" ]] && { . "$l/printer.sh"; . "$l/core.sh"; break; }; done
+declare -F printer_queues >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# In the Core it asks first: a row that talks is not armed by the Palette. Exit status: 0 removed · 3 not
+# confirmed · 5 no such printer · 6 this account may not remove printers · 1 anything else.
+name=${1:-}
+[[ -n "$name" ]] || { echo "usage: takumi printer remove <name>" >&2; exit 2; }
+command -v lpadmin >/dev/null || core_fail 1 "Printing needs CUPS (the cups package)"
+q=$(printer_find "$name")
+[[ -n "$q" ]] || core_fail 5 "No printer called $name"
+desc=$(printer_queues | awk -F "$printer_sep" -v q="$q" '$1 == q { print $2; exit }')
+label=$(printer_label "$q" "$desc")
+if core_in_core; then core_confirm "Remove $label from this computer?" || core_fail 3 "Nothing was removed"; fi
+if ! out=$(printer_admin "Removing a printer needs your password" lpadmin -x "$q"); then
+  printer_unanswered "$out" && core_fail 3 "Without the password, nothing was removed"
+  printer_refused "$out" && core_fail 6 "Only an administrator of this computer can remove printers"
+  core_fail 1 "Could not remove $label: $(printer_said "$out")"
+fi
+core_in_core || takumi notice printer "Removed $label" "set it up again from the Core" -1 >/dev/null 2>&1 || true
+core_done "Removed $label"

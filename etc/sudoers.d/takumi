@@ -1,0 +1,5 @@
+# Takumi: a sudo authorization lasts 15 minutes in the same terminal, so an update asks once.
+Defaults timestamp_timeout=15
+# Sticky keys are for people who struggle to hold two keys, and so to type a password: the root part takes only
+# on or off and writes only /etc/keyd/default.conf (takumi switch sticky, docs/accessibility.md).
+%wheel ALL=(root) NOPASSWD: /usr/lib/takumi/commands/switch/sticky --system on, /usr/lib/takumi/commands/switch/sticky --system off

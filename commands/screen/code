@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Read a QR code or barcode in an area of the screen you draw, and copy what it says
+risk: 0
+title: Read a QR code on the screen
+words: qr code barcode scan read link
+glyph: qr
+ABOUT
+set -euo pipefail
+geo=$(slurp 2>/dev/null) || exit 0
+got=$(grim -g "$geo" - | zbarimg -q --raw - 2>/dev/null | head -n 1 || true)
+[[ -n "$got" ]] || { takumi notice qr "No code found there" "" -1; exit 0; }
+printf '%s' "$got" | wl-copy
+if [[ "$got" =~ ^https?:// ]]; then takumi notice --open "$got" qr "Copied a link" "${got:0:60} · press to open" 6
+else takumi notice qr "Copied what the code says" "${got:0:60}" -1; fi
+printf '%s\n' "$got"

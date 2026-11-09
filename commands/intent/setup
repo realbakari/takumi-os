@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set up the assistant: Claude through Claude Code, an Anthropic API key, or OpenAI
+usage: [claude|anthropic|openai]
+example: takumi intent setup claude
+example: takumi intent setup openai
+risk: 1
+converse: yes
+title: Set up the assistant
+words: assistant ai intent claude anthropic openai gpt chatgpt key sign in
+glyph: quote
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/intent.sh" ]] && { . "$l/intent.sh"; . "$l/core.sh"; break; }; done
+declare -F intent_set >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh, docs/intent.md). Without a word it sets up the engine already chosen, else Claude.
+# claude: Claude Code with the person's Claude account, installed from Anthropic when it is missing (in the home
+# folder, no password) and signed in through the browser; anthropic and openai: a key, checked with one free
+# request (the list of models) and kept in the keyring. Exit status, for scripts: 0 set up · 2 not an engine ·
+# 3 an answer was needed and none came, or Claude Code is still missing or signed out · 4 the key did not work
+# · 5 the service could not be reached · 1 anything else. The last line says it in words.
+engine=${1:-$(intent_engine)}; engine=${engine:-claude}
+case "$engine" in claude|anthropic|openai) ;; *) core_fail 2 "usage: takumi intent setup [claude|anthropic|openai]" ;; esac
+command -v jq >/dev/null || core_fail 1 "The assistant needs jq."
+command -v curl >/dev/null || core_fail 1 "The assistant needs curl."
+intent_begin; trap intent_end EXIT; trap 'exit 143' TERM INT
+intent_max_time=30
+mkdir -p "$intent_state"
+
+# Anthropic's own installer for Claude Code (https://code.claude.com/docs/en/setup): it puts claude in
+# ~/.local/bin and needs no password.
+install_claude() { curl -q -fsSL https://claude.ai/install.sh | bash; }
+
+# claude auth login where the person can see it: here at a terminal, else in a terminal window, then the browser.
+sign_in() {
+  if ! core_in_core; then "$1" auth login; return; fi
+  if command -v foot >/dev/null; then foot -e "$1" auth login >/dev/null 2>&1
+  elif command -v xdg-terminal-exec >/dev/null; then xdg-terminal-exec "$1" auth login >/dev/null 2>&1
+  else return 1; fi
+}
+
+use() {  # <engine> <model>: the engine and its model in intent.toml; the model resets when the engine changes
+  [[ "$(intent_engine)" == "$1" && -z "$2" ]] || intent_set model "$2"
+  intent_set engine "$1"
+}
+
+if [[ $engine == claude ]]; then
+  log="$intent_state/install.log"
+  core_note "Looking for Claude Code…"
+  if ! bin=$(intent_claude_bin); then
+    core_confirm "Claude Code is not on this computer. Install it from Anthropic? It goes in your home folder; no password needed." ||
+      core_fail 3 "Nothing changed. The assistant needs Claude Code, or an API key."
+    core_note "Installing Claude Code…"
+    if core_in_core; then install_claude > "$log" 2>&1 || core_fail 1 "Claude Code did not install. What happened is in $log"
+    else install_claude 2>&1 | tee "$log" || core_fail 1 "Claude Code did not install. What happened is in $log"; fi
+    bin=$(intent_claude_bin) || core_fail 1 "Claude Code did not install. What happened is in $log"
+  fi
+  if ! "$bin" auth status >/dev/null 2>&1; then
+    core_confirm "Claude Code needs you to sign in once with your Claude account: a terminal opens, then your browser. Open it now?" ||
+      core_fail 3 "To finish, run claude auth login in a terminal, then choose Use Claude for the assistant again."
+    core_note "Sign in in your browser, then come back here…"
+    sign_in "$bin" || true
+    "$bin" auth status >/dev/null 2>&1 ||
+      core_fail 3 "Not signed in yet. Run claude auth login in a terminal, then choose Use Claude for the assistant again."
+  fi
+  use claude ""
+  intent_link_skill
+  core_done "The assistant now uses Claude, through your Claude account."
+  exit 0
+fi
+
+# A key: asked for as a secret, checked, then kept. In the Core a wrong one is asked for again.
+who=$(intent_provider "$engine")
+again() { core_wrong "$1"; core_in_core || core_fail 4 "$1"; }
+while :; do
+  core_secret key "$who API key" || core_fail 3 "Nothing changed. The assistant needs an $who API key."
+  key=$(printf '%s' "$key" | tr -d '[:space:]')
+  intent_key_ok "$key" || { again "That does not look like an $who API key"; continue; }
+  core_note "Checking the key…"
+  intent_check_key "$engine" "$key"
+  case "$intent_status" in
+    200) break ;;
+    401|403) again "That key did not work" ;;
+    *) intent_trouble "$engine" || core_fail $? "$intent_why" ;;
+  esac
+done
+if [[ $engine == anthropic ]]; then
+  model=$(intent_get model); [[ "$(intent_engine)" == anthropic && -n "$model" ]] || model=claude-opus-5-5
+  said="The assistant now uses Claude through your Anthropic key"
+else
+  model=$(intent_pick_openai_model)
+  [[ -n "$model" ]] || core_fail 1 "That key works, but it cannot use any model."
+  said="The assistant now uses OpenAI's $model"
+fi
+where=$(printf '%s\n' "$key" | intent_key_store "$engine") || core_fail 1 "The key could not be saved."
+use "$engine" "$model"
+if [[ $where == keyring ]]; then core_done "$said, kept in your keyring."; else core_done "$said, kept in a file only you can read."; fi

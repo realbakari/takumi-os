@@ -1,0 +1,33 @@
+# Matcha: whisked green tea in a dark bowl
+# A Takumi theme.
+
+[meta]
+name = "matcha"
+mode = "dark"
+title = "Matcha"
+about = "whisked green tea in a dark bowl"
+
+[palette]
+accent     = "#9cc46b"
+background = "#141a14"
+surface    = "#1b231b"
+foreground = "#dfe6d6"
+muted      = "#66755f"
+red        = "#e07a6b"
+yellow     = "#d9c06a"
+green      = "#9cc46b"
+cyan       = "#7cc4b0"
+blue       = "#86aacf"
+magenta    = "#c79bc0"
+
+[phase.dawn]
+accent     = "#d9a05f"
+
+[phase.dusk]
+accent     = "#db9363"
+
+[phase.night]
+accent     = "#69a594"
+background = "#0d110d"
+surface    = "#131813"
+foreground = "#c7cebf"

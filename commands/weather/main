@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: The weather where you are, or in a place you name, from Open-Meteo
+usage: [place] [--json]
+example: takumi weather
+example: takumi weather Lisbon
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/weather.sh"; . "$l/core.sh"; break; }; done
+declare -F weather_fetch >/dev/null && declare -F core_done >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# One line: "Lisbon 19° · light rain · 24° later". Without a place: the one Today's weather is for (the city
+# the clock is set to, unless another was chosen), kept for half an hour. A place named is asked about once and
+# not kept. --refresh (Today and the Palette, in the background) asks again for Today's place, only while
+# Today shows the weather. Exit status: 0 · 1 Open-Meteo did not answer · 2 usage · 4 no such place.
+json=no refresh=no place=""
+for a in "$@"; do
+  case "$a" in
+    --json) json=yes ;;
+    --refresh) refresh=yes ;;
+    -*) echo "usage: takumi weather [place] [--json]" >&2; exit 2 ;;
+    *) place="${place:+$place }$a" ;;
+  esac
+done
+if [[ $refresh == yes ]]; then
+  weather_shown || exit 0
+  weather_fetch "" yes >/dev/null || exit 1
+  exit 0
+fi
+mine=$(weather_setting place)
+if [[ -z "$place" || "$(clock_fold "$place")" == "$(clock_fold "$mine")" ]]; then
+  if ! out=$(weather_cached ""); then
+    core_note "Asking Open-Meteo…"
+    out=$(weather_fetch "" yes) || core_fail 1 "Open-Meteo did not answer: no weather for now"
+  fi
+else
+  core_note "Asking Open-Meteo about $place…"
+  if ! out=$(weather_fetch "$place" no); then
+    weather_find "$place" >/dev/null || core_fail 4 "Open-Meteo knows no place called $place"
+    core_fail 1 "Open-Meteo did not answer: no weather for now"
+  fi
+fi
+if [[ $json == yes ]]; then printf '%s\n' "$out"; exit 0; fi
+core_done "$(jq -r '.line' <<< "$out")"

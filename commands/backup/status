@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: When your home folder was last backed up, how much, and where
+usage: [--json]
+example: takumi backup status
+risk: 0
+words: backup backups status last backed up when
+ABOUT
+set -euo pipefail
+# "Backed up 3 min ago · 41 GB" and where, from what the last backup wrote down: it asks neither restic nor the disk,
+# so it answers at once. --json prints the object the Palette's backup rows read (lib/backup.sh, backup_status_json).
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/backup.sh" ]] && { . "$l/backup.sh"; break; }; done
+declare -F backup_status_json >/dev/null || { echo "takumi: the backup library is missing" >&2; exit 1; }
+command -v jq >/dev/null || { echo "Backups need jq" >&2; exit 1; }
+case "${1:-}" in
+  --json) backup_status_json ;;
+  "") backup_status_json | jq -r '.line, .detail' ;;
+  *) echo "usage: takumi backup status [--json]" >&2; exit 2 ;;
+esac

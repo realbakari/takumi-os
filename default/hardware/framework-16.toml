@@ -1,0 +1,21 @@
+# Framework Laptop 16: its keyboard, numpad, RGB macropad and LED matrix are modules with their own USB ids
+# (vendor 32ac). Their lights and keys are set in a browser at keyboard.frame.work (VIA, over WebHID), which needs
+# the modules' hidraw nodes to be yours while you sit at the computer; the LED matrix's rule is Framework's own.
+# framework_tool (framework-system) reads the battery's charge limit, the fans and the expansion bay.
+# Framework: https://github.com/FrameworkComputer/inputmodule-rs (release/50-framework-inputmodule.rules)
+#            https://github.com/FrameworkComputer/framework-system  VIA: https://www.caniusevia.com/docs/manual_setup
+title = "Framework Laptop 16"
+part = "computer"
+
+[match]
+dmi_vendor = "^Framework$"
+dmi_product = "^Laptop 16"
+arch = ["x86_64"]
+
+[apply]
+packages = ["framework-system"]
+udev = [
+  'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="32ac", ATTRS{idProduct}=="0012|0013|0014|0018|0019", MODE="0660", TAG+="uaccess"',
+  'SUBSYSTEMS=="usb", ATTRS{idVendor}=="32ac", ATTRS{idProduct}=="0020", MODE="0660", TAG+="uaccess"',
+]
+note = "The keyboard's, the numpad's and the RGB macropad's lights and keys are set at keyboard.frame.work in a Chromium-based browser (Firefox cannot reach a keyboard). framework_tool reads the battery's charge limit, the fans and the expansion bay from a terminal (sudo framework_tool --help)."

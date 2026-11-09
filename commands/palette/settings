@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for putting one app's settings back as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "reset", "defaults", "reset terminal": a row for each app whose settings Takumi ships (config/), each a
+# conversation in the Core that runs takumi settings reset <app>; yours are kept aside (docs/migrations.md).
+# Resetting them all is the row of takumi settings reset itself.
+command -v jq >/dev/null || exit 0
+q=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+match=no
+for w in $q; do
+  for k in reset default defaults restore factory; do
+    if [[ ${#w} -ge 3 && "$k" == "$w"* ]]; then match=yes; fi
+  done
+done
+[[ $match == yes ]] || exit 0
+here=$(dirname "$(readlink -f "$0")")
+src=""; for d in /usr/share/takumi/config "$here/../../config"; do [[ -d "$d" ]] && { src=$d; break; }; done
+[[ -n "$src" ]] || exit 0
+n=0
+while IFS='|' read -r app folder title words; do
+  [[ -d "$src/$folder" ]] || continue
+  n=$((n + 1))
+  jq -cn --arg a "$app" --arg t "$title" --arg w "reset defaults restore settings $app $words" --argjson n "$n" \
+    '{id: ("reset:" + $a), title: $t, subtitle: ("Takumi'"'"'s settings for " + $a + " back; yours are kept aside"), glyph: "restart",
+      kind: "Setting", keywords: $w, converse: true, run: ["takumi", "settings", "reset", $a], score: (0.7 - $n * 0.001), risk: 1}'
+done <<'ROWS'
+foot|foot|Reset Terminal settings|terminal console foot font
+niri|niri|Reset window and key settings|windows keys binds layout input niri strip
+btop|btop|Reset System monitor settings|system monitor btop task manager
+gtk|gtk-3.0|Reset app look settings|gtk apps look style
+nvim|nvim|Reset Neovim settings|neovim vim editor
+takumi|takumi|Reset Takumi settings|theme power backup
+ROWS
+exit 0

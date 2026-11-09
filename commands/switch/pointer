@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Make the pointer bigger, or back to its normal size
+usage: [bigger|normal]
+example: takumi switch pointer bigger
+risk: 0
+title: Pointer size
+words: accessibility a11y pointer cursor mouse arrow bigger larger size see
+glyph: display
+ABOUT
+set -euo pipefail
+# One size everywhere: niri's own pointer (its cursor line in ~/.config/niri/takumi/accessibility.kdl, which also
+# sets XCURSOR_SIZE for what niri starts), GTK apps (gsettings cursor-size), and Qt and everything else started
+# with the session (XCURSOR_SIZE in ~/.config/environment.d, read at login). Apps that let niri draw their
+# pointer change at once; the few that draw their own change when they next open (docs/accessibility.md).
+conf="$HOME/.config/niri/takumi/accessibility.kdl"
+envfile="$HOME/.config/environment.d/60-takumi-pointer.conf"
+normal=24 bigger=48
+# The file holds a line per choice; each takumi switch command rewrites its own line and keeps the others.
+set_line() {  # <pattern> [line]
+  local tmp
+  mkdir -p "${conf%/*}"
+  [[ -f "$conf" ]] || printf '%s\n' "// Your accessibility choices from the Core (docs/accessibility.md). takumi switch pointer and" \
+    "// takumi switch reader each rewrite their own line; Takumi's defaults.kdl includes this file." > "$conf"
+  tmp=$(mktemp "$conf.XXXXXX")
+  grep -v -- "$1" "$conf" > "$tmp" || true
+  [[ -z "${2:-}" ]] || printf '%s\n' "$2" >> "$tmp"
+  mv "$tmp" "$conf"
+}
+
+now=$(sed -n 's/^cursor { xcursor-size \([0-9][0-9]*\); }$/\1/p' "$conf" 2>/dev/null | tail -n 1 || true)
+case "${1:-}" in
+  bigger) size=$bigger ;;
+  normal) size=$normal ;;
+  "") if (( ${now:-$normal} > normal )); then size=$normal; else size=$bigger; fi ;;
+  *) echo "usage: takumi switch pointer [bigger|normal]" >&2; exit 2 ;;
+esac
+
+if (( size == normal )); then
+  set_line '^cursor '
+  rm -f "$envfile"
+  systemctl --user unset-environment XCURSOR_SIZE >/dev/null 2>&1 || true
+else
+  set_line '^cursor ' "cursor { xcursor-size $size; }"
+  mkdir -p "${envfile%/*}"
+  printf '# The pointer size from takumi switch pointer (docs/accessibility.md).\nXCURSOR_SIZE=%s\n' "$size" > "$envfile"
+  systemctl --user set-environment XCURSOR_SIZE="$size" >/dev/null 2>&1 || true
+fi
+if command -v gsettings >/dev/null; then gsettings set org.gnome.desktop.interface cursor-size "$size" 2>/dev/null || true; fi
+if (( size == normal )); then
+  takumi notice display "Normal pointer" >/dev/null 2>&1 || true
+  echo "Normal pointer"
+else
+  takumi notice display "Bigger pointer" "Super+U to change it back" >/dev/null 2>&1 || true
+  echo "Bigger pointer"
+fi

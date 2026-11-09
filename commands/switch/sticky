@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Sticky keys: tap Shift, Ctrl, Alt or Super, then the key, instead of holding both
+usage: [on|off]
+example: takumi switch sticky
+risk: 1
+sudo: yes
+title: Sticky keys
+words: accessibility a11y sticky keys one hand modifier shift ctrl control alt super latch hold
+glyph: keyboard
+converse: yes
+ABOUT
+set -euo pipefail
+# keyd, which already turns Super into the Command key (docs/harmony-keys.md), does this below every app, the
+# login screen and the lock: a modifier tapped once holds for the next key, tapped twice it stays until tapped
+# again, and held it works as always. niri has no such option. The change is a marked block in
+# /etc/keyd/default.conf, so it needs your password, unless a sudoers rule lets this command's --system part
+# run without one (docs/accessibility.md).
+conf=${TAKUMI_KEYD_CONF:-/etc/keyd/default.conf}
+self=$(readlink -f "$0")
+
+# The keyd lines. Super keeps Harmony's layer when Harmony is on, and is plain Meta when it is off.
+block_main() {  # <cmd|meta>
+  printf '%s\n' "# Sticky keys (takumi switch sticky): a modifier tapped once holds for the next key; tapped twice, it stays." \
+    "leftshift = oneshot(shift)" "rightshift = oneshot(shift)" "leftcontrol = oneshot(control)" "rightcontrol = oneshot(control)" \
+    "leftalt = oneshot(alt)"
+  [[ "$1" == cmd ]] || printf '%s\n' "leftmeta = oneshot(meta)" "rightmeta = oneshot(meta)"
+  printf '%s\n' "# End of sticky keys"
+}
+block_locks() {
+  printf '%s\n' "" "# Sticky keys: a second tap keeps the modifier down until the next tap." \
+    "[shift]" "leftshift = toggle(shift)" "rightshift = toggle(shift)" "" \
+    "[control]" "leftcontrol = toggle(control)" "rightcontrol = toggle(control)" "" \
+    "[alt]" "leftalt = toggle(alt)" "# End of sticky keys"
+}
+# The file without sticky keys: the marked blocks gone and Super back on Harmony's layer.
+without() {
+  awk '/^# Sticky keys/ { skip = 1 } !skip { print } /^# End of sticky keys/ { skip = 0 }' |
+    sed -E 's/^(left|right)meta = oneshot\(cmd\)$/\1meta = layer(cmd)/' |
+    awk 'NF { for (; blank > 0; blank--) print ""; print; next } { blank++ }'
+}
+# The file with them: Super's layer made oneshot, the block right under [main], the locks at the end.
+with() {
+  local text super=meta
+  text=$(without)
+  grep -qE '^(left|right)meta = layer\(cmd\)$' <<< "$text" && super=cmd
+  BLOCK=$(block_main "$super") awk '{ print } /^\[main\]$/ && !done { print ENVIRON["BLOCK"]; done = 1 } END { if (!done) { print ""; print "[main]"; print ENVIRON["BLOCK"] } }' <<< "$text" |
+    sed -E 's/^(left|right)meta = layer\(cmd\)$/\1meta = oneshot(cmd)/'
+  block_locks
+}
+is_on() { [[ -f "$conf" ]] && grep -q '^# Sticky keys' "$conf"; }
+
+# The part that runs as root: write the file, then keyd reads it again.
+if [[ "${1:-}" == --system ]]; then
+  [[ $(id -u) == 0 || -n "${TAKUMI_KEYD_CONF:-}" ]] || { echo "takumi switch sticky --system runs as root" >&2; exit 1; }
+  tmp=$(mktemp)
+  case "${2:-}" in
+    on)
+      if [[ -f "$conf" ]]; then with < "$conf" > "$tmp"
+      else
+        # Harmony is off, so this file holds sticky keys alone, and going off removes it.
+        { printf '%s\n' "# Made by takumi switch sticky: Harmony is off, so this file holds sticky keys alone." "[ids]" "*" ""; printf '[main]\n'; } | with > "$tmp"
+      fi ;;
+    off)
+      if [[ -f "$conf" ]] && [[ "$(head -n 1 "$conf")" == "# Made by takumi switch sticky"* ]]; then rm -f "$conf" "$tmp"; tmp=""
+      elif [[ -f "$conf" ]]; then without < "$conf" > "$tmp"
+      else rm -f "$tmp"; tmp=""; fi ;;
+    *) rm -f "$tmp"; echo "usage: takumi switch sticky --system <on|off>" >&2; exit 2 ;;
+  esac
+  if [[ -n "$tmp" ]]; then install -m 644 "$tmp" "$conf"; rm -f "$tmp"; fi
+  keyd reload >/dev/null 2>&1 || systemctl restart keyd
+  exit 0
+fi
+
+for l in /usr/share/takumi/lib "$(dirname "$self")/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; break; }; done
+declare -F core_sudo >/dev/null || { echo "takumi: lib/core.sh is missing" >&2; exit 1; }
+command -v keyd >/dev/null || core_fail 4 "Sticky keys need keyd, which is not installed"
+
+want=${1:-}
+case "$want" in
+  on|off) ;;
+  "") if is_on; then want=off; else want=on; fi ;;
+  *) echo "usage: takumi switch sticky [on|off]" >&2; exit 2 ;;
+esac
+
+core_note "Turning sticky keys $want…"
+# A sudoers rule for this command's --system part spares the password; without one, sudo asks in the Core.
+if ! sudo -n "$self" --system "$want" >/dev/null 2>&1; then                                     # /etc/keyd/default.conf
+  core_sudo "Sticky keys need your password" "$self" --system "$want" >/dev/null || core_fail 3 "Sticky keys need your password"   # /etc/keyd/default.conf
+fi
+if [[ $want == on ]]; then
+  core_done "Sticky keys on: tap Shift, Ctrl, Alt or Super, then the key"
+else
+  core_done "Sticky keys off"
+fi

@@ -1,0 +1,16 @@
+[Unit]
+Description=Takumi: %i as a folder in your home, through rclone mount (docs/drives.md)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# takumi drive cloud add enables it; remove disables it. The command execs rclone mount, which tells systemd when the
+# folder is ready and unmounts it when stopped; files not sent yet wait in ~/.cache/takumi/cloud/%i for the next start.
+Type=notify
+NotifyAccess=all
+ExecStart=/usr/bin/takumi drive cloud serve %i
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=graphical-session.target

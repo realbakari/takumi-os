@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Forget a paired phone; it needs pairing again to connect
+usage: [--to phone]
+risk: 1
+title: Forget this phone
+words: phone forget unpair remove disconnect iphone android mobile
+glyph: cross
+ABOUT
+set -euo pipefail
+# The last phone forgotten also stops KDE Connect (takumi-phone.service) and takes Send to phone out of Files.
+# See docs/sharing.md.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/share.sh" ]] && { . "$l/share.sh"; break; }; done
+declare -F phone_pick >/dev/null || { echo "takumi: the sharing library is missing" >&2; exit 1; }
+to=""; if [[ "${1:-}" == --to ]]; then to=${2:-}; fi
+phone_have && phone_start || { echo "No phone is paired"; exit 0; }
+phone_pick "$to" || { echo "No phone is paired"; exit 0; }
+kdeconnect-cli -d "$phone_id" --unpair >/dev/null 2>&1 || { echo "$phone_name could not be forgotten"; exit 1; }
+if [[ -z "$(phone_devices | awk -F'\t' '$3 == 1')" ]]; then
+  systemctl --user disable --now "$phone_unit" >/dev/null 2>&1 || true
+  rm -f "$share_scripts/Send to phone"
+fi
+takumi notice cross "Forgot $phone_name" "it needs pairing again to connect" >/dev/null 2>&1 || true
+echo "Forgot $phone_name"

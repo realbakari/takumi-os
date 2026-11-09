@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Send what you copied to your phone, ready to paste there
+usage: [--to phone]
+risk: 0
+title: Send the clipboard to the phone
+words: phone clipboard copy paste send text link iphone android mobile
+glyph: edit
+ABOUT
+set -euo pipefail
+# KDE Connect reads the clipboard itself and sends it, so what you copied is never on a command line
+# (docs/sharing.md). Exit status: 0 sent · 1 not possible · 2 no phone is paired.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/share.sh" ]] && { . "$l/share.sh"; break; }; done
+declare -F phone_pick >/dev/null || { echo "takumi: the sharing library is missing" >&2; exit 1; }
+to=""; if [[ "${1:-}" == --to ]]; then to=${2:-}; fi
+say() { takumi notice "$1" "$2" "$3" -1 6 >/dev/null 2>&1 || true; echo "$2${3:+: $3}"; }
+phone_have && phone_start || { say bell "No phone is paired" "type phone in the Core to connect one"; exit 2; }
+phone_pick "$to" || { say bell "No phone is paired" "type phone in the Core to connect one"; exit 2; }
+[[ $phone_near == yes ]] || { say bell "$phone_name is not connected" "open KDE Connect on it, on the same Wi-Fi"; exit 1; }
+kdeconnect-cli -d "$phone_id" --send-clipboard >/dev/null 2>&1 || { say edit "The clipboard did not reach $phone_name" "try once more"; exit 1; }
+say edit "Sent the clipboard to $phone_name" "paste it there"

@@ -1,0 +1,23 @@
+# Takumi's apps for ufw (docs/firewall.md), installed by install/steps/25-firewall.sh. Nothing here is let in
+# until you say so: takumi firewall allow <app> asks first. SSH is ufw's own profile (ufw-loginserver), so it is
+# not repeated here: two profiles of one name make ufw warn on every run.
+
+[LocalSend]
+title=LocalSend
+description=Receives files from nearby devices
+ports=53317
+
+[Steam Remote Play]
+title=Steam Remote Play
+description=Streams your games to other devices on this network
+ports=27031:27036/udp|27036:27037/tcp
+
+[Sunshine]
+title=Sunshine
+description=Streams this computer's games to Moonlight on other devices
+ports=47984,47989,48010/tcp|47998:48000/udp
+
+[Remote help]
+title=Remote help
+description=Lets the person helping you see and use this screen (takumi screen remote), only while it is on
+ports=5900/tcp

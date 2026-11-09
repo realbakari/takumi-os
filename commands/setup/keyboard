@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Use a keyboard layout on the setup screen at once
+usage: <layout> [variant] | --guess | --again
+risk: 0
+hidden: yes
+ABOUT
+# Writes the setup screen's niri config with the layout; niri reads it again by itself. A layout without
+# Latin letters comes second, after US English (Left Alt + Right Alt between them), as on the login screen:
+# a password is typed in Latin letters.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib/setup.sh "$here/../../lib/setup.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+run=$(setup_run); mkdir -p "$run"
+variant=""
+case "${1:-}" in
+  --guess) layout=$(setup_country_layout "$(setup_country "$(setup_firmware_lang)")") ;;
+  --again) read -r layout variant < "$run/keyboard" 2>/dev/null || layout=us ;;
+  ""|-*)   echo "usage: takumi setup keyboard <layout> [variant] | --guess | --again" >&2; exit 2 ;;
+  *)       layout=$1; variant=${2:-} ;;
+esac
+[[ "$layout" =~ ^[a-z]{2,8}$ && "$variant" =~ ^[A-Za-z0-9_-]*$ ]] || { echo "not a keyboard layout: $layout $variant" >&2; exit 2; }
+printf '%s %s\n' "$layout" "$variant" > "$run/keyboard"
+xl=$layout xv=$variant xo=""
+setup_latin "$layout" || { xl="us,$layout"; xv=",$variant"; xo="grp:alts_toggle"; }
+{
+  echo "// Takumi setup: written by takumi setup keyboard; niri reads it again whenever it changes."
+  echo "input {"
+  echo "    keyboard {"
+  printf '        xkb { layout "%s"; variant "%s"; options "%s"; }\n' "$xl" "$xv" "$xo"
+  echo "        numlock"
+  echo "    }"
+  echo "    touchpad { tap; natural-scroll; }"
+  echo "}"
+  echo "prefer-no-csd"
+  echo "hotkey-overlay { skip-at-startup; }"
+  echo "layout {"
+  echo "    gaps 0"
+  echo "    focus-ring { off; }"
+  echo "    border { off; }"
+  echo "}"
+  echo "binds {"
+  echo "}"
+  if [[ -f "$run/drawing" ]]; then
+    echo "animations { off; }"
+    echo "environment { MESA_LOADER_DRIVER_OVERRIDE null; }"
+  fi
+} > "$run/niri.kdl.new"
+mv "$run/niri.kdl.new" "$run/niri.kdl"

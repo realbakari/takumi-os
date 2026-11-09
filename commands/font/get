@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Get a font family from Arch's repositories: Noto, Inter, JetBrains Mono, IBM Plex, Fira, Source, Cascadia, Nerd Fonts and more
+usage: <family>
+example: takumi font get "IBM Plex"
+example: takumi font get "JetBrains Mono Nerd Font"
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/font.sh" ]] && { . "$l/font.sh"; . "$l/core.sh"; break; }; done
+declare -F font_catalog >/dev/null && declare -F core_sudo >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# A conversation (lib/core.sh): pacman installs the family's package, asking for your password in the Core,
+# and fontconfig's own pacman hook makes it known to every app. Without a family, the families Takumi can
+# get and where each comes from. Exit status: 0 here now, or already · 1 it did not install · 3 not a
+# family Takumi knows, or more than one.
+want=${1:-}
+if [[ -z "$want" ]]; then
+  have=$(font_catalog | cut -d'|' -f2 | xargs pacman -Qq 2>/dev/null || true)
+  echo "Fonts Takumi can get, each from Arch's own repositories:"
+  font_catalog | while IFS='|' read -r name pkg repo _ _ about; do
+    here=""; grep -qx "$pkg" <<< "$have" && here="  (here)"
+    printf '  %-26s %-28s %-6s %s%s\n' "$name" "$pkg" "$repo" "$about" "$here"
+  done
+  echo "takumi font get \"<name>\" gets one."
+  exit 0
+fi
+rc=0; line=$(font_catalog_find "$want") || rc=$?
+if (( rc == 2 )); then core_fail 3 "Which one: $(cut -d'|' -f1 <<< "$line" | paste -sd ',' - | sed 's/,/, /g')?"; fi
+(( rc == 0 )) || core_fail 3 "Takumi does not know a font called $want: takumi font get lists the ones it can get"
+IFS='|' read -r name pkg repo role use _ <<< "$line"
+if [[ $role == symbols ]]; then next="prompts and tools that draw Nerd Fonts' symbols find them"
+elif core_in_core; then next="type “fonts” to choose $use"
+else next="choose it with: takumi font set $role \"$use\""; fi
+font_have_package "$pkg" && { core_done "$name is already here: $next"; exit 0; }
+core_note "Getting $name…"
+log="$HOME/.local/state/takumi/install.log"; mkdir -p "${log%/*}"
+# sudo: pacman installs the package $pkg from Arch's $repo repository; its fonts go under /usr/share/fonts/.
+if core_in_core; then core_sudo "Getting $name needs your password" pacman -S --needed --noconfirm "$pkg" >> "$log" 2>&1 || core_fail 1 "$name did not install: $log"
+else sudo pacman -S --needed "$pkg" || core_fail 1 "$name did not install"; fi
+core_done "$name is here ($pkg, from Arch's $repo repository): $next"

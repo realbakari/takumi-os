@@ -1,0 +1,34 @@
+# Oxocarbon: IBM Carbon's colours, cool and exact
+# Colours after Oxocarbon by nyoom-engineering (https://github.com/nyoom-engineering/oxocarbon.nvim); phases by Takumi.
+
+[meta]
+name = "oxocarbon"
+mode = "dark"
+title = "Oxocarbon"
+about = "IBM Carbon's colours, cool and exact"
+credit = "Oxocarbon by nyoom-engineering (https://github.com/nyoom-engineering/oxocarbon.nvim)"
+
+[palette]
+accent     = "#78a9ff"
+background = "#161616"
+surface    = "#262626"
+foreground = "#f2f4f8"
+muted      = "#6f6f6f"
+red        = "#ee5396"
+yellow     = "#ffe97b"
+green      = "#42be65"
+cyan       = "#3ddbd9"
+blue       = "#78a9ff"
+magenta    = "#be95ff"
+
+[phase.dawn]
+accent     = "#ff7eb6"
+
+[phase.dusk]
+accent     = "#ee5396"
+
+[phase.night]
+accent     = "#a07ed5"
+background = "#0e0e0e"
+surface    = "#1b1b1b"
+foreground = "#d8d9dd"

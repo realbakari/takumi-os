@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Pick a colour from anywhere on the screen and copy its hex code
+risk: 0
+title: Pick a colour
+words: colour color picker eyedropper hex rgb
+glyph: drop
+ABOUT
+set -euo pipefail
+# niri lets you click any pixel; the code is copied and the Core shows the colour itself.
+picked=$(niri msg --json pick-color 2>/dev/null || true)
+# niri gives the colour as three fractions; the shell writes the hex.
+rgb=$(jq -r 'if type == "object" and (.rgb | type) == "array" then .rgb | map(. * 255 | round) | map(tostring) | join(" ") else empty end' <<< "$picked" 2>/dev/null || true)
+[[ -n "$rgb" ]] || { takumi notice drop "No colour picked" "" -1; exit 0; }
+read -r r g b <<< "$rgb"
+hex=$(printf '#%02x%02x%02x' "$r" "$g" "$b")
+printf '%s' "$hex" | wl-copy
+takumi notice "$hex" "Copied $hex" "rgb($r, $g, $b)" -1
+echo "$hex"

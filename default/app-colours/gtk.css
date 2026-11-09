@@ -1,0 +1,25 @@
+/* The theme's colours for GTK 3 and 4 (libadwaita's named colours). The window, view, header and sidebar
+   backgrounds are a little see-through when the theme asks for glass; {{opacity}} is 1.0 otherwise. */
+@define-color accent_color {{accent}};
+@define-color accent_bg_color {{accent}};
+@define-color accent_fg_color {{background}};
+@define-color window_bg_color alpha({{background}}, {{opacity}});
+@define-color window_fg_color {{foreground}};
+@define-color view_bg_color alpha({{surface}}, {{opacity}});
+@define-color view_fg_color {{foreground}};
+@define-color headerbar_bg_color alpha({{surface}}, {{opacity}});
+@define-color headerbar_fg_color {{foreground}};
+@define-color headerbar_backdrop_color {{background}};
+@define-color sidebar_bg_color alpha({{surface}}, {{opacity}});
+@define-color sidebar_fg_color {{foreground}};
+@define-color secondary_sidebar_bg_color {{background}};
+@define-color secondary_sidebar_fg_color {{muted}};
+@define-color card_bg_color {{surface}};
+@define-color card_fg_color {{foreground}};
+@define-color dialog_bg_color {{surface}};
+@define-color dialog_fg_color {{foreground}};
+@define-color popover_bg_color {{surface}};
+@define-color popover_fg_color {{foreground}};
+@define-color destructive_color {{red}};
+@define-color warning_color {{yellow}};
+@define-color success_color {{green}};

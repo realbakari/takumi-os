@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Put the second screen to the right of, left of, above or below the first; it goes back unless you keep it
+usage: <right|left|above|below> [screen]
+example: takumi display arrange left
+example: takumi display arrange above
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/display.sh" ]] && { . "$l/display.sh"; . "$l/core.sh"; break; }; done
+declare -F display_screens >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+side=${1:-}
+case "$side" in right|left|above|below) ;; *) echo "usage: takumi display arrange <right|left|above|below> [screen]" >&2; exit 2 ;; esac
+screens=$(display_screens) || core_fail 1 "The screens could not be read"
+[[ $(grep -c . <<< "$screens") -ge 2 ]] || core_fail 1 "There is only one screen"
+first=$(head -n 1 <<< "$screens")
+second=$(if [[ -n "${2:-}" ]]; then display_pick "$2" <<< "$screens"; else sed -n 2p <<< "$screens"; fi)
+[[ -n "$second" && "$second" != "$first" ]] || core_fail 1 "There is no second screen called ${2:-}"
+IFS=$'\t' read -r _ _ _ _ fx fy fw fh <<< "$first"
+IFS=$'\t' read -r name label _ _ x y w h <<< "$second"
+# Side by side, the tops line up; one above the other, the left edges do. The pointer crosses where they meet.
+case "$side" in
+  right) nx=$((fx + fw)); ny=$fy; said="on the right" ;;
+  left)  nx=$((fx - w));  ny=$fy; said="on the left" ;;
+  above) nx=$fx; ny=$((fy - h)); said="above" ;;
+  below) nx=$fx; ny=$((fy + fh)); said="below" ;;
+esac
+apply() { niri msg output "$name" position set "$nx" "$ny"; }
+undo()  { niri msg output "$name" position set "$x" "$y"; }
+display_change "$label is $said" apply undo

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Find your phone: it rings loudly, even on silent, until you stop it on the phone
+usage: [--to phone]
+example: takumi phone ring
+risk: 0
+title: Find my phone
+words: phone find ring lost where locate iphone android mobile
+glyph: bell
+ABOUT
+set -euo pipefail
+# Through KDE Connect's find-my-phone (docs/sharing.md). Exit status: 0 ringing · 1 not possible · 2 no phone is paired.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/share.sh" ]] && { . "$l/share.sh"; break; }; done
+declare -F phone_pick >/dev/null || { echo "takumi: the sharing library is missing" >&2; exit 1; }
+to=""; if [[ "${1:-}" == --to ]]; then to=${2:-}; fi
+say() { takumi notice "$1" "$2" "$3" -1 6 >/dev/null 2>&1 || true; echo "$2${3:+: $3}"; }
+phone_have && phone_start || { say bell "No phone is paired" "type phone in the Core to connect one"; exit 2; }
+phone_pick "$to" || { say bell "No phone is paired" "type phone in the Core to connect one"; exit 2; }
+[[ $phone_near == yes ]] || { say bell "$phone_name is not connected" "open KDE Connect on it, on the same Wi-Fi"; exit 1; }
+kdeconnect-cli -d "$phone_id" --ring >/dev/null 2>&1 || { say bell "$phone_name did not ring" "try once more"; exit 1; }
+say bell "Ringing $phone_name" "it rings even on silent"

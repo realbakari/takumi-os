@@ -1,0 +1,14 @@
+# After a kernel or initramfs change in the running room, copy that room's kernel to the boot partition,
+# so the room keeps starting with its own kernel. Inside a room being built this does nothing.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/lib/modules/*/vmlinuz
+Target = boot/*
+Target = usr/lib/initcpio/*
+
+[Action]
+Description = Takumi: copy this room's kernel to the boot partition
+When = PostTransaction
+Exec = /usr/bin/takumi room kernel-sync

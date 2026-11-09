@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Watch for no use: lock, then sleep, after the minutes in power.toml
+usage: [--print]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# Run by takumi-idle.service. Builds the swayidle command for the current power source and becomes it;
+# the service is restarted when the source or the minutes change. --print shows the command instead.
+# Sleep is logind's sleep once Takumi has said what it means (it may hibernate after some hours, docs/power.md).
+# After waking, the keyboard's light comes back as it was (docs/laptop-keys.md); logind's lock (the lid set to
+# keep running, loginctl lock-session) locks the screen.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; break; }; done
+declare -F power_lock_after >/dev/null || { echo "takumi: the power library is missing" >&2; exit 1; }
+src=$(power_source); lock=$(power_lock_after "$src"); sleep_=$(power_sleep_after "$src")
+cmd=(swayidle -w)
+(( lock > 0 )) && cmd+=(timeout "$(( lock * 60 ))" "takumi lock" timeout "$(( lock * 60 + 60 ))" "niri msg action power-off-monitors")
+(( sleep_ > 0 )) && cmd+=(timeout "$(( sleep_ * 60 ))" "systemctl $(power_sleep_verb)")
+cmd+=(before-sleep "takumi lock" after-resume "takumi keys backlight restore" lock "takumi lock")
+if [[ "${1:-}" == --print ]]; then printf '%s\n' "${cmd[@]}"; exit 0; fi
+exec "${cmd[@]}"

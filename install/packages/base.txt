@@ -1,0 +1,42 @@
+# Takumi base system. One package per line. The ISO reads this file too.
+base
+base-devel
+btrfs-progs
+arch-install-scripts   # arch-chroot: takumi update builds the new room inside it
+cryptsetup
+systemd-ukify
+efibootmgr
+networkmanager
+iw                 # the Wi-Fi card's power saving off on the charger, on on battery (docs/wifi.md)
+bluez
+bluez-utils
+pipewire
+pipewire-pulse
+wireplumber
+zram-generator
+keyd
+plocate
+git
+jq
+curl
+rsync
+fzf
+fd
+ripgrep
+eza
+bat
+btop
+fastfetch
+brightnessctl
+man-db
+openssh
+sudo
+rtkit              # realtime scheduling for PipeWire, so sound never stutters under load
+libpulse           # pactl: the microphone light hears about mute changes
+sbctl              # Secure Boot with this computer's own keys (takumi security secure-boot)
+tpm2-tss           # the security chip opens the disk (takumi disk tpm)
+pciutils           # names for what is in the computer (takumi hardware)
+usbutils
+pacman-contrib     # checkupdates: how many updates wait, without touching the system
+ufw                # the firewall: on, nothing comes in unless you let an app (takumi firewall)
+networkmanager-openvpn   # OpenVPN files from work or a provider (takumi vpn import)

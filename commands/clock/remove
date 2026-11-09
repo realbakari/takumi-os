@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Take a city's clock out of Today
+usage: <city>
+example: takumi clock remove Tokyo
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; break; }; done
+declare -F clock_city_remove >/dev/null || { echo "takumi: the clock library is missing" >&2; exit 1; }
+place="$*"
+[[ -n "$place" ]] || { echo "usage: takumi clock remove <city>" >&2; exit 2; }
+clock_city_remove "$place" || { echo "Today has no clock for $place"; exit 4; }
+takumi notice clock "$place is out of Today" >/dev/null 2>&1 || true
+echo "$place is out of Today"

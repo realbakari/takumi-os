@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Refuse to update under 8 GiB free on /
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+need_gib=${TAKUMI_UPDATE_MIN_GIB:-8}
+free_kib=$(df --output=avail / | tail -1 | tr -d ' ') || exit 0
+(( free_kib / 1048576 >= need_gib )) && exit 0
+echo "takumi update: only $((free_kib / 1048576)) GiB free on /, need $need_gib GiB" >&2
+exit 1

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Start a chosen room from now on
+usage: <name>
+risk: 2
+sudo: yes
+interactive: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_current >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
+name=${1:?room name}
+rooms_mount_top
+[[ -d "$(rooms_path "$name")" ]] || { echo "no room $name" >&2; exit 1; }
+cur=$(rooms_current)
+rooms_write_entry "$name" ""
+[[ "$(state_get "$name" status)" == failed ]] && state_set "$name" status good
+bootctl set-default "takumi-$name.conf"
+[[ -n "$cur" && "$cur" != "$name" ]] && state_set "$cur" status left
+echo "From the next start: the system from $(rooms_label "$name")."

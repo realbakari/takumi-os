@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Keep the computer awake for a while: no lock, no sleep
+usage: <minutes|stop>
+example: takumi power awake 60
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; break; }; done
+declare -F power_awake_until >/dev/null || { echo "takumi: the power library is missing" >&2; exit 1; }
+stop() {
+  local pid until
+  if [[ -r "$power_awake_marker" ]] && read -r pid until < "$power_awake_marker"; then kill "$pid" 2>/dev/null || true; fi
+  rm -f "$power_awake_marker"
+  systemctl --user start takumi-idle.service >/dev/null 2>&1 || true
+}
+case "${1:-}" in
+  stop) stop; takumi notice clock "Back to normal" "the screen locks and sleeps as usual" >/dev/null 2>&1 || true; echo "Back to normal"; exit 0 ;;
+  ''|*[!0-9]*) echo "usage: takumi power awake <minutes|stop>" >&2; exit 2 ;;
+esac
+stop
+end=$(( $(date +%s) + $1 * 60 ))
+mkdir -p "$power_run"
+# The job stops the idle watcher, holds a sleep inhibitor for the time, then puts the watcher back.
+job='systemctl --user stop takumi-idle.service >/dev/null 2>&1
+systemd-inhibit --what=sleep:idle --who=Takumi --why="Stay awake" --mode=block sleep "$1"
+systemctl --user start takumi-idle.service >/dev/null 2>&1; rm -f "$2"'
+if command -v setsid >/dev/null; then setsid bash -c "$job" _ "$(( $1 * 60 ))" "$power_awake_marker" </dev/null >/dev/null 2>&1 &
+else bash -c "$job" _ "$(( $1 * 60 ))" "$power_awake_marker" </dev/null >/dev/null 2>&1 & fi
+echo "$! $end" > "$power_awake_marker"
+takumi notice clock "Awake until $(power_clock "$end")" "no lock, no sleep" >/dev/null 2>&1 || true
+echo "Awake until $(power_clock "$end")"

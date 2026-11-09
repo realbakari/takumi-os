@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Turn hibernation on or off, or hibernate now: everything is kept on the disk while the computer is off
+usage: <on|off|now>
+example: takumi power hibernate on
+example: takumi power hibernate now
+risk: 2
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+self=$(readlink -f "$0")
+for l in /usr/share/takumi/lib "$(dirname "$self")/../../lib"; do [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; . "$l/core.sh"; . "$l/rooms.sh"; break; }; done
+declare -F power_hibernate_ready >/dev/null && declare -F core_sudo >/dev/null && declare -F rooms_mount_top >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# A conversation (lib/core.sh): the password is asked for in the Core and the last line says what happened.
+# Exit status: 0 done · 1 not possible on this computer, or it failed and nothing was left half done · 2 usage ·
+# 3 the password was not given · 4 not enough free space · 5 (now) hibernation is off. See docs/power.md.
+
+# --- As root, through core_sudo below: --root on <GiB> | --root off. Silent when it worked; otherwise the reason
+# is its last line and it exits 6. Turning on puts back everything it changed when a step fails.
+if [[ "${1:-}" == --root ]]; then
+  set -E
+  say() { trap - ERR; printf '%s\n' "$1"; exit 6; }
+  trap 'say "Hibernation could not be changed"' ERR
+  fstab=$power_root/etc/fstab cmdline=$power_root/etc/kernel/cmdline swapdir=$power_root/swap
+  mark="# Hibernation, set up by takumi power hibernate (docs/power.md)"
+  # takumi-lid.conf, whole, keeping the lid's choices; without hibernation (no), its choices become sleep.
+  lid_conf() {
+    local b c h
+    b=$(power_lid_choice battery); c=""; if power_lid_own_charger; then c=$(power_lid_choice power); fi
+    h=$(power_hibernate_after)
+    if [[ $1 == no ]]; then
+      [[ $b != hibernate ]] || b=sleep
+      [[ $c != hibernate ]] || c=sleep
+      h=""
+    fi
+    mkdir -p "${power_lid_conf%/*}"
+    power_logind_conf "$b" "$c" "$h" > "$power_lid_conf"   # /etc/systemd/logind.conf.d/takumi-lid.conf
+  }
+  case "${2:-}" in
+    on)
+      gib=${3:-0}
+      [[ "$gib" =~ ^[0-9]+$ ]] && (( gib > 0 )) || say "The size of the memory could not be read"
+      [[ " $(cat "$cmdline" 2>/dev/null || true) " == *" root="* ]] || say "This computer's start options could not be read"
+      old_fstab=$(cat "$fstab"); old_cmdline=$(cat "$cmdline"); old_lid=$(cat "$power_lid_conf" 2>/dev/null || true)
+      made_sub=no made_file=no mounted=no swapped=no
+      undo() {
+        if [[ $swapped == yes ]]; then swapoff "$power_swapfile" >/dev/null 2>&1 || true; fi
+        if [[ $made_file == yes ]]; then rm -f "$power_swapfile"; fi
+        if [[ $mounted == yes ]]; then umount "$swapdir" >/dev/null 2>&1 || true; fi
+        if [[ $made_sub == yes ]]; then btrfs subvolume delete "$TAKUMI_TOP/@swap" >/dev/null 2>&1 || true; fi   # the @swap subvolume
+        printf '%s\n' "$old_fstab" > "$fstab" || true                                                        # /etc/fstab
+        printf '%s\n' "$old_cmdline" > "$cmdline" || true                                                    # /etc/kernel/cmdline
+        if [[ -n "$old_lid" ]]; then printf '%s\n' "$old_lid" > "$power_lid_conf" || true; else rm -f "$power_lid_conf"; fi
+      }
+      fail() { trap - ERR; undo; say "$1"; }
+      trap 'fail "Hibernation could not be turned on; nothing was changed"' ERR
+      uuid=$(findmnt -no UUID / 2>/dev/null || true)
+      [[ -n "$uuid" ]] || fail "The system disk could not be found"
+      rooms_mount_top >/dev/null 2>&1 || fail "The disk could not be opened to make room"
+      if [[ ! -d "$TAKUMI_TOP/@swap" ]]; then
+        btrfs subvolume create "$TAKUMI_TOP/@swap" >/dev/null 2>&1 || fail "The disk would not make room for hibernation"   # the @swap subvolume
+        made_sub=yes
+      fi
+      mkdir -p "$swapdir"
+      if ! grep -qE '^[^#[:space:]]+[[:space:]]+/swap[[:space:]]' "$fstab"; then
+        printf '%s\nUUID=%s /swap btrfs subvol=/@swap,noatime,nofail 0 0\n' "$mark" "$uuid" >> "$fstab"   # /etc/fstab
+      fi
+      if ! mountpoint -q "$swapdir"; then
+        mount -o subvol=/@swap,noatime "UUID=$uuid" "$swapdir" >/dev/null 2>&1 || fail "The space for hibernation could not be opened"   # /swap
+        mounted=yes
+      fi
+      # A swapfile from before that is smaller than the memory now (more memory was fitted) is made again.
+      if [[ -f "$power_swapfile" ]] && (( $(power_swapfile_gib) < gib )); then
+        if power_swap_active; then swapoff "$power_swapfile" >/dev/null 2>&1 || fail "The space for hibernation is in use and could not be made bigger"; fi
+        rm -f "$power_swapfile"
+      fi
+      if [[ ! -f "$power_swapfile" ]]; then
+        btrfs filesystem mkswapfile --size "${gib}g" "$power_swapfile" >/dev/null 2>&1 || fail "The disk would not make room for hibernation"   # /swap/swapfile
+        made_file=yes
+      fi
+      if ! grep -qE '^/swap/swapfile[[:space:]]' "$fstab"; then
+        printf '/swap/swapfile none swap defaults,nofail 0 0\n' >> "$fstab"   # /etc/fstab
+      fi
+      if ! power_swap_active; then
+        swapon "$power_swapfile" >/dev/null 2>&1 || fail "The space for hibernation could not be used"
+        swapped=yes
+      fi
+      offset=$(btrfs inspect-internal map-swapfile -r "$power_swapfile" 2>/dev/null || true)
+      [[ "$offset" =~ ^[0-9]+$ ]] || fail "Where to wake from could not be worked out"
+      printf '%s resume=UUID=%s resume_offset=%s\n' "$(power_without_resume <<< "$old_cmdline")" "$uuid" "$offset" > "$cmdline"   # /etc/kernel/cmdline
+      lid_conf yes
+      systemctl daemon-reload >/dev/null 2>&1 || true                       # systemd reads /etc/fstab again
+      systemctl kill -s HUP systemd-logind.service >/dev/null 2>&1 || true   # logind reads takumi-lid.conf again
+      takumi room kernel-sync >/dev/null 2>&1 || fail "The computer's start could not be updated, so hibernation stays off"   # this room's boot entry
+      ;;
+    off)
+      trap 'say "Hibernation could not be turned off completely; turning it off again finishes it"' ERR
+      if power_swap_active; then
+        swapoff "$power_swapfile" >/dev/null 2>&1 || say "What is kept for hibernation does not fit in memory right now: close some apps and try again"
+      fi
+      # From here hibernation is off whatever happens next: a step that fails leaves only disk space to give back.
+      awk -v mark="$mark" '$0 != mark && !($1 !~ /^#/ && ($2 == "/swap" || $1 == "/swap/swapfile"))' "$fstab" > "$fstab.takumi"
+      cat "$fstab.takumi" > "$fstab"; rm -f "$fstab.takumi"                   # /etc/fstab
+      if [[ -s "$cmdline" ]]; then
+        rest=$(power_without_resume < "$cmdline"); printf '%s\n' "$rest" > "$cmdline"   # /etc/kernel/cmdline
+      fi
+      rm -f "$power_sleep_conf"                                               # /etc/systemd/sleep.conf.d/takumi.conf
+      lid_conf no
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      systemctl kill -s HUP systemd-logind.service >/dev/null 2>&1 || true
+      if mountpoint -q "$swapdir"; then
+        umount "$swapdir" >/dev/null 2>&1 || say "Hibernation is off, but its space on the disk is still in use; turn it off again after a restart"   # /swap
+      fi
+      if rooms_mount_top >/dev/null 2>&1 && [[ -d "$TAKUMI_TOP/@swap" ]]; then
+        btrfs subvolume delete "$TAKUMI_TOP/@swap" >/dev/null 2>&1 || say "Hibernation is off, but its space on the disk could not be given back"   # the @swap subvolume
+      fi
+      rmdir "$swapdir" 2>/dev/null || true
+      # Last, so a failure here leaves nothing else undone; an entry that still names the file does no harm.
+      takumi room kernel-sync >/dev/null 2>&1 || say "Hibernation is off, but the computer's start could not be updated, which does no harm"   # this room's boot entry
+      ;;
+    *) exit 2 ;;
+  esac
+  exit 0
+fi
+
+what=${1:-}
+case "$what" in on | off | now) ;; *) echo "usage: takumi power hibernate <on|off|now>" >&2; exit 2 ;; esac
+
+if [[ $what == now ]]; then
+  power_hibernate_ready || core_fail 5 "Hibernation is off. Turn it on first: takumi power hibernate on"
+  takumi lock >/dev/null 2>&1 || true
+  sleep 1
+  systemctl hibernate || core_fail 1 "The computer could not hibernate"
+  exit 0
+fi
+
+# The part that needs root, with the password asked for in the Core. It writes /etc/fstab, /etc/kernel/cmdline,
+# /etc/systemd/logind.conf.d/takumi-lid.conf and /etc/systemd/sleep.conf.d/takumi.conf, makes or removes the @swap
+# subvolume with /swap/swapfile in it, and rewrites this room's boot entry (takumi room kernel-sync).
+as_root() {
+  local why out rc=0
+  if [[ $1 == on ]]; then why="Turning on hibernation needs your password"; else why="Turning off hibernation needs your password"; fi
+  out=$(core_sudo "$why" "$self" --root "$@" 2>&1) || rc=$?   # /etc/fstab, /etc/kernel/cmdline, logind and sleep drop-ins, /swap
+  if (( rc == 0 )); then return 0; fi
+  if (( rc == 6 )); then core_fail 1 "$(tail -n 1 <<< "$out")"; fi
+  core_fail 3 "Nothing changed: the password was not given"
+}
+
+if [[ $what == on ]]; then
+  if power_hibernate_ready; then core_done "Hibernation is already on"; exit 0; fi
+  why=$(power_hibernate_unable)
+  [[ -z "$why" ]] || core_fail 1 "$why"
+  gib=$(power_memory_gib); have=$(power_swapfile_gib); free=$(power_disk_free_gib)
+  (( gib > 0 )) || core_fail 1 "The size of the memory could not be read"
+  # What it takes: a file the size of the memory, less one kept from before, and 8 GB left over for updates.
+  need=$(( gib > have ? gib - have : 0 ))
+  if (( free < need + 8 )); then
+    core_fail 4 "Hibernation needs $need GB of the disk for what is in memory, with 8 GB left over for updates; $free GB is free"
+  fi
+  core_note "Making room for hibernation: $gib GB of the disk…"
+  as_root on "$gib"
+  core_done "Hibernation is on"
+  exit 0
+fi
+
+gib=$(power_swapfile_gib)
+if ! power_swap_active && [[ ! -e "$power_swapfile" && ! -d "$TAKUMI_TOP/@swap" ]] &&
+   [[ " $(cat "$power_root/etc/kernel/cmdline" 2>/dev/null || true) " != *" resume="* ]]; then
+  core_done "Hibernation is already off"
+  exit 0
+fi
+core_note "Giving the disk space back…"
+as_root off
+if (( gib > 0 )); then core_done "Hibernation is off; $gib GB of the disk is free again"; else core_done "Hibernation is off"; fi

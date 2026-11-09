@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Unlock and approve with your finger: on adds a finger, off removes your fingerprints
+usage: [on|off|--check]
+example: takumi security fingerprint on
+risk: 1
+converse: yes
+words: fingerprint finger touch id hello biometric sensor reader unlock security
+ABOUT
+#
+# on, a conversation (lib/core.sh): fprintd-enroll takes a finger while the Core says "Touch the sensor · 3 of 8",
+# then Takumi's lines go into sudo's and polkit's PAM files, so a finger answers there too (as root, asked in the
+# Core). The Lock checks a finger through its own file, /etc/pam.d/takumi-lock-finger. off: your fingerprints go,
+# and the PAM lines too once nobody on this computer has one. --check, for the Lock: exit 0 when your finger can
+# unlock it now. Without a word: the state, in words. Exit codes: 0 done, 1 not possible here, 3 the sensor was
+# not touched for a while, 4 the sensor could not take the finger. See docs/security.md.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/security.sh" ]] && { . "$l/core.sh"; . "$l/security.sh"; break; }; done
+declare -F security_fingers >/dev/null && declare -F core_note >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# As root (core_sudo, below): Takumi's lines in /etc/pam.d/sudo and /etc/pam.d/polkit-1.
+if [[ "${1:-}" == --root ]]; then
+  [[ "$(id -u)" == 0 ]] || exit 1
+  case "${2:-}" in
+    on) security_finger_pam on ;;
+    off) security_any_prints || security_finger_pam off ;;   # kept while someone else here still has a fingerprint
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+
+mode=${1:-}
+case "$mode" in on|off|--check|"") ;; *) echo "usage: takumi security fingerprint [on|off|--check]" >&2; exit 2 ;; esac
+user=$(id -un)
+self=$(readlink -f "$0")
+fprintd_here() { command -v fprintd-list >/dev/null && command -v fprintd-enroll >/dev/null && command -v fprintd-delete >/dev/null; }
+said_fingers() { local n; n=$(security_count "$1"); if [[ "$n" == 1 ]]; then echo "1 finger"; else echo "$n fingers"; fi; }
+
+if [[ "$mode" == --check ]]; then
+  fprintd_here && [[ -f "$security_pam_dir/takumi-lock-finger" ]] || exit 1
+  security_lid_closed && exit 1
+  fingers=$(security_fingers "$user") && [[ -n "$fingers" ]] || exit 1
+  exit 0
+fi
+
+if [[ -z "$mode" ]]; then
+  fprintd_here || { echo "Fingerprint unlock needs fprintd, which is not installed"; exit 0; }
+  fingers=$(security_fingers "$user") || { echo "This computer has no fingerprint reader"; exit 0; }
+  if [[ -z "$fingers" ]]; then echo "Fingerprint unlock is off"; else echo "Fingerprint unlock is on: $(said_fingers "$fingers")"; fi
+  exit 0
+fi
+
+fprintd_here || core_fail 1 "Fingerprint unlock needs fprintd, which is not installed."
+fingers=$(security_fingers "$user") || core_fail 1 "This computer has no fingerprint reader."
+
+if [[ "$mode" == off ]]; then
+  if [[ -n "$fingers" ]]; then
+    LC_ALL=C fprintd-delete "$user" >/dev/null 2>&1 || core_fail 1 "Your fingerprints could not be removed. Try again in a moment."
+  fi
+  if security_finger_pam_is_on; then
+    rc=0
+    core_sudo "Turning off fingerprint approvals needs your password" "$self" --root off >/dev/null 2>&1 || rc=$?   # /etc/pam.d/sudo, /etc/pam.d/polkit-1
+    (( rc == 0 )) || core_fail 1 "Your fingerprints are removed, but approvals still offer the sensor."
+  fi
+  if [[ -n "$fingers" ]]; then core_done "Your fingerprints are removed. Your password unlocks this computer"
+  else core_done "Fingerprint unlock is already off"; fi
+  exit 0
+fi
+
+# on: the next free finger, through fprintd-enroll, its lines read one at a time from a FIFO only this user can
+# open, so a sensor nobody touches can be timed.
+finger=$(security_next_finger "$fingers") || core_fail 1 "Every finger is already known."
+wait_for=${TAKUMI_FINGER_WAIT:-30}   # seconds without a word from the sensor
+dir=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/takumi-finger.XXXXXX")
+mkfifo -m 600 "$dir/out"
+# The last line says fprintd-enroll is gone, so a read that comes back empty can only mean a quiet sensor.
+( LC_ALL=C fprintd-enroll -f "$finger" "$user" 2>&1 || true; echo "takumi: the sensor is done" ) > "$dir/out" &
+pid=$!
+disown "$pid" 2>/dev/null || true   # ended here when nobody touches the sensor, without a word from bash
+trap 'pkill -P "$pid" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; rm -rf "$dir"' EXIT
+exec 4< "$dir/out"
+
+total="" stage=0 dev="" how="Touch the sensor" result=""
+progress() {   # <what to say>, with "· 3 of 8" when the reader says how many touches it takes
+  local at=$((stage + 1))
+  if [[ -n "$total" ]]; then
+    (( at <= total )) || at=$total
+    core_note "$1 · $at of $total"
+  else
+    core_note "$1"
+  fi
+}
+reader() {   # <property>: one of the reader's own values, from fprintd over D-Bus
+  local v
+  v=$(busctl --system get-property net.reactivated.Fprint "$dev" net.reactivated.Fprint.Device "$1" 2>/dev/null) || return 1
+  v=${v#* }; v=${v//\"/}
+  printf '%s' "$v"
+}
+while :; do
+  line=""
+  if ! IFS= read -r -t "$wait_for" line <&4 && [[ -z "$line" ]]; then result=quiet; break; fi   # nothing for a while
+  case "$line" in
+    "takumi: the sensor is done") result=${result:-ended}; break ;;
+    "Using device "*) dev=${line#Using device } ;;
+    "Enrolling "*)
+      # How many touches this reader takes, and whether it is touched or swiped: known once it is claimed.
+      if [[ -n "$dev" ]] && command -v busctl >/dev/null; then
+        t=$(reader num-enroll-stages || true)
+        if [[ "$t" =~ ^[0-9]+$ ]] && (( t > 0 )); then total=$t; fi
+        if [[ "$(reader scan-type || true)" == swipe ]]; then how="Swipe your finger across the sensor"; fi
+      fi
+      progress "$how" ;;
+    *enroll-stage-passed) stage=$((stage + 1)); progress "$how" ;;
+    *enroll-retry-scan) progress "$how again, a little longer" ;;
+    *enroll-swipe-too-short) progress "Swipe more slowly, all the way across" ;;
+    *enroll-finger-not-centered) progress "Center your finger on the sensor" ;;
+    *enroll-remove-and-retry) progress "Lift your finger, then try again" ;;
+    *enroll-completed) result=done; break ;;
+    *enroll-duplicate) result=duplicate; break ;;
+    *enroll-data-full) result=full; break ;;
+    "Enroll result: "*) result=failed; break ;;
+    *claim*) result=busy ;;                                  # another program has the reader
+  esac
+done
+exec 4<&-
+case "$result" in
+  done) ;;
+  quiet) core_fail 3 "Nothing was saved: the sensor was not touched for a while." ;;
+  duplicate) core_fail 4 "That finger is already known. Try another finger." ;;
+  full) core_fail 4 "The sensor holds no more fingers. Remove them with Stop unlocking with your finger, then try again." ;;
+  busy) core_fail 4 "The sensor is in use by something else. Try again in a moment." ;;
+  *) core_fail 4 "The sensor could not take that finger. Try again." ;;
+esac
+
+also=""
+if ! security_finger_pam_is_on; then
+  rc=0
+  core_sudo "Letting your finger approve changes needs your password" "$self" --root on >/dev/null 2>&1 || rc=$?   # /etc/pam.d/sudo, /etc/pam.d/polkit-1
+  (( rc == 0 )) || also=". Approvals still ask for your password"
+fi
+if [[ -n "$fingers" ]]; then core_done "Another finger unlocks this computer now$also"
+else core_done "Your finger unlocks this computer now$also"; fi

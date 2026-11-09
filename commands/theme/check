@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Check that a theme's text and accent read well in every phase
+usage: <name>
+example: takumi theme check kiln
+risk: 0
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/theme.sh" ]] && { . "$l/theme.sh"; break; }; done
+declare -F theme_check >/dev/null || { echo "takumi: the theme library is missing" >&2; exit 1; }
+# The rules Takumi's own makers keep (lib/theme.sh): text at 4.5:1 or better against the background and the
+# surface, the accent at 3:1 or better against both, in all four phases. Quiet text is shown, not ruled.
+# Without a name, the theme in use. Exit status: 0 reads well · 1 a phase breaks a rule · 3 no such theme.
+name=${1:-$(theme_current)}
+dir=$(theme_find "$name") || { echo "No theme called $name"; exit 3; }
+title=$(theme_meta "$dir/theme.toml" title); title=${title:-$name}
+rc=0; out=$(theme_check "$dir/theme.toml") || rc=$?
+awk '{ printf "  %-6s text %s:1 · accent %s:1 · quiet text %s:1%s\n", $1, $2, $3, $4, ($5 == "low" ? "   too low" : "") }' <<< "$out"
+if (( rc == 0 )); then echo "$title reads well in every phase"; exit 0; fi
+awk -v t="$title" -v text="$theme_rule_text" -v acc="$theme_rule_accent" '$5 == "low" {
+  what = ($2 < text) ? sprintf("text is %s:1, under %s:1", $2, text) : sprintf("the accent is %s:1, under %s:1", $3, acc)
+  printf "%s is hard to read at %s: %s\n", t, ($1 == "day" ? "midday" : $1), what; exit }' <<< "$out"
+exit 1

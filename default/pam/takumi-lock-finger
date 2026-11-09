@@ -1,0 +1,5 @@
+#%PAM-1.0
+# Takumi lock screen, by finger (shell/Lock/Lock.qml runs this beside takumi-lock while fingerprint unlock is on,
+# so typing a password never waits for the sensor; docs/security.md). No time limit while locked; three wrong
+# fingers and the Lock waits for the password.
+auth required pam_fprintd.so max-tries=3 timeout=-1

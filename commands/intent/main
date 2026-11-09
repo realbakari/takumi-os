@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Ask the assistant to do something; with --plan, only show the takumi lines it would run
+usage: [--plan] <request>
+example: takumi intent 'turn off bluetooth and dim the screen to 30'
+example: takumi intent --plan 'dim the screen to 30'
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/intent.sh" ]] && { . "$l/intent.sh"; break; }; done
+declare -F intent_call >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# See docs/intent.md. Without --plan this is `takumi intent ask`. With it, the model is asked once and the
+# calls it would make first are printed as one JSON array of the exact lines, ["takumi switch bluetooth", ...],
+# for the Palette's preview: nothing runs and nothing is written down. Exit status: 0 printed · 2 no request ·
+# 3 not set up · 4 the key or sign-in was refused · 5 the service could not be reached · 6 the model declined ·
+# 1 anything else. On a failure nothing is printed and stderr says why.
+plan=no; [[ "${1:-}" == --plan ]] && { plan=yes; shift; }
+[[ -n "${*//[[:space:]]/}" ]] || { echo "usage: takumi intent [--plan] <request>" >&2; exit 2; }
+[[ $plan == yes ]] || exec takumi intent ask "$@"
+command -v jq >/dev/null || { echo "takumi intent needs jq" >&2; exit 1; }
+
+engine=$(intent_engine)
+fail() { echo "$2" >&2; exit "$1"; }
+intent_ready "$engine" || fail $? "$intent_why"
+intent_begin; trap intent_end EXIT; trap 'exit 143' TERM INT
+intent_max_time=60; intent_tries=1           # a preview gives up quickly: the next pause asks again
+printf '%s' "$*" > "$intent_tmp/request"
+manifest=$(intent_manifest)
+
+# The calls, as {name, input} lines: Claude Code answers in JSON against a schema, with no tools at all; the APIs
+# answer with the tool calls they would make first, the same first step `takumi intent ask` takes.
+if [[ $engine == claude ]]; then
+  intent_plan_prompt "$manifest" > "$intent_tmp/system.txt"
+  intent_claude "$intent_tmp/request" -p --output-format json --tools "" --system-prompt-file "$intent_tmp/system.txt" \
+    --json-schema "$intent_plan_schema" --no-session-persistence --strict-mcp-config || fail $? "$intent_why"
+  calls=$(jq -c '(.structured_output // (.result | fromjson?) // {}) | .calls[]? | {name: .tool, input: {args: .args}}' "$intent_tmp/answer")
+else
+  intent_api_start "$engine" "$manifest"
+  intent_api_turn "$engine" low || fail $? "$intent_why"
+  case "$(jq -r .stop "$intent_tmp/turn.json")" in
+    refusal) fail 6 "The model declined that request." ;;
+    length) fail 1 "The model's answer was cut short." ;;
+  esac
+  calls=$(jq -c '.calls[] | {name, input}' "$intent_tmp/turn.json")
+fi
+
+# Only calls the manifest knows, as the exact lines that would run.
+lines=()
+while IFS= read -r c; do
+  [[ -n "$c" ]] || continue
+  call=$(intent_call "$manifest" "$(jq -r '.name // ""' <<< "$c")" "$(jq -c '.input' <<< "$c")")
+  [[ "$(jq -r '.line // ""' <<< "$call")" == "" ]] || lines+=("$(jq -r .line <<< "$call")")
+done <<< "$calls"
+if (( ${#lines[@]} )); then printf '%s\n' "${lines[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))'; else echo '[]'; fi

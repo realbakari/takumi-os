@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set up backups of your home folder every hour, to a USB disk or a cloud, encrypted with a key shown once
+usage: [disk:UUID | google-drive | dropbox | onedrive | pcloud | box | remote:NAME]
+example: takumi backup setup
+example: takumi backup setup google-drive
+risk: 1
+converse: yes
+title: Set up backups
+words: backup backups back up time machine file history usb disk cloud google drive dropbox onedrive
+glyph: drive
+ABOUT
+set -euo pipefail
+# A conversation in the Core (lib/core.sh). Without a word it asks where: the one USB disk plugged in, or a cloud by
+# name. A disk opens through udisks2; a cloud signs in through rclone, in the browser. When the place already holds
+# backups (this computer's, or another's after a new install) it offers to go on with them, asking for their key.
+# Otherwise it makes an encrypted restic repository there and ends on a card: the key, shown once, and as a code a
+# phone camera keeps; the keyring keeps the copy the hourly backup uses. Exit status, for scripts: 0 set up · 2 not
+# a place Takumi knows · 3 an answer was needed and none came · 4 the key did not open the backups · 5 the disk is
+# not here or cannot hold backups · 6 signing in to the cloud did not finish · 1 anything else. See docs/backup.md.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/backup.sh" ]] && { . "$l/core.sh"; . "$l/backup.sh"; break; }; done
+declare -F backup_load >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+command -v jq >/dev/null || core_fail 1 "Backups need jq."
+usage="usage: takumi backup setup [disk:UUID | google-drive | dropbox | onedrive | pcloud | box | remote:NAME]"
+mkdir -p "$backup_state" "$backup_run"
+log="$backup_state/setup.log"; : > "$log"
+key="" typed=""
+cleanup() {
+  if [[ -n "$backup_signin_pid" ]]; then kill "$backup_signin_pid" 2>/dev/null || true; fi
+  rm -rf "$backup_run/signin-$backup_cloud_remote"
+  if [[ $backup_we_mounted == yes && "${done_ok:-no}" != yes ]]; then backup_unmount "$uuid"; fi
+  return 0
+}
+trap cleanup EXIT
+trap 'exit 143' TERM INT
+again() { core_wrong "$1"; core_in_core || core_fail "$2" "$1"; }   # in the Core, ask again; elsewhere, stop
+
+# --- Where ---
+
+clouds_said() { backup_clouds | cut -d'|' -f3 | paste -sd, - | sed 's/,/, /g; s/, \([^,]*\)$/ or \1/'; }
+usable_disks() { backup_disks | jq -sc 'map(select(.ok))'; }
+pick() {  # a typed answer: disk:<uuid>, a cloud's id, or nothing
+  local a id rtype name extra
+  a=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/^ *//; s/ *$//')
+  [[ -n "$a" ]] || return 0
+  while IFS='|' read -r id rtype name extra; do
+    if [[ "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" == "$a"* || "$id" == "$a"* ]]; then echo "$id"; return 0; fi
+  done <<< "$(backup_clouds)"
+  jq -r --arg a "$a" '[.[] | select((.name | ascii_downcase | startswith($a)) or (.model | ascii_downcase | startswith($a)))]
+    | first | if . then "disk:" + .uuid else empty end' <<< "$(usable_disks)"
+}
+want=${1:-}
+if [[ -z "$want" ]]; then
+  disks=$(usable_disks)
+  if [[ "$(jq length <<< "$disks")" == 1 ]]; then
+    d=$(jq -c '.[0]' <<< "$disks")
+    if core_confirm "Back up to $(jq -r .name <<< "$d") ($(backup_disk_words "$d"))? Esc for a cloud instead"; then want="disk:$(jq -r .uuid <<< "$d")"; fi
+  fi
+  while [[ -z "$want" ]]; do
+    disks=$(usable_disks); n=$(jq length <<< "$disks")
+    if (( n > 1 )); then prompt="Which disk: $(jq -r 'map(.name) | join(", ")' <<< "$disks"); or a cloud: $(clouds_said)"
+    else prompt="Back up to $(clouds_said)? Or plug in a USB disk, then type disk"; fi
+    core_ask answer "$prompt" || core_fail 3 "Nothing changed."
+    case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in
+      disk*|usb*)
+        disks=$(usable_disks)
+        if [[ "$(jq length <<< "$disks")" == 1 ]]; then want="disk:$(jq -r '.[0].uuid' <<< "$disks")"
+        elif [[ "$(jq length <<< "$disks")" == 0 ]]; then again "No USB disk this computer can use is plugged in" 5
+        else again "Type the disk's name" 3; fi ;;
+      *) want=$(pick "$answer"); [[ -n "$want" ]] || again "That is not one of them" 3 ;;
+    esac
+  done
+fi
+kind="" uuid="" remote="" ctype="" csettings="" name=""
+case "$want" in
+  disk:?*) kind=disk; uuid=${want#disk:} ;;
+  remote:?*) kind=cloud; remote=${want#remote:} ;;
+  *) line=$(backup_cloud "$want") || core_fail 2 "$usage"
+     kind=cloud; remote=$backup_cloud_remote
+     ctype=$(cut -d'|' -f2 <<< "$line"); name=$(cut -d'|' -f3 <<< "$line"); csettings=$(cut -d'|' -f4 <<< "$line") ;;
+esac
+
+# --- What it needs, from Arch's packages ---
+
+need=()
+command -v restic >/dev/null || need+=(restic)
+command -v secret-tool >/dev/null || need+=(libsecret)
+command -v fusermount >/dev/null || need+=(fuse2)          # takumi backup restore shows the backups through it
+if [[ $kind == disk ]]; then command -v udisksctl >/dev/null || need+=(udisks2); fi
+if [[ $kind == cloud ]]; then command -v rclone >/dev/null || need+=(rclone); fi
+if (( ${#need[@]} )); then
+  core_confirm "Backups need ${need[*]} from Arch's packages. Install now? It asks for your password." ||
+    core_fail 3 "Nothing changed. Backups need ${need[*]}."
+  core_note "Installing ${need[*]}…"
+  # /usr/bin/restic, secret-tool, fusermount, udisksctl or rclone, with the rest of the packages named in need.
+  core_sudo "Installing the backup tools needs your password" pacman -S --needed --noconfirm "${need[@]}" >> "$log" 2>&1 ||
+    core_fail 1 "${need[*]} did not install. What happened is in $log"
+fi
+
+# --- The place ---
+
+if [[ $kind == disk ]]; then
+  d=$(backup_disk "$uuid")
+  [[ -n "$d" ]] || core_fail 5 "That disk is not plugged in."
+  name=$(jq -r .name <<< "$d")
+  [[ "$(jq -r .ok <<< "$d")" == true ]] || core_fail 5 "$name cannot hold backups. $(jq -r .why <<< "$d")."
+  core_note "Opening $name…"
+  backup_mount "$uuid" ask || core_fail 5 "$name could not be opened."
+  base="$backup_mountpoint/$backup_dir_name"
+else
+  if [[ -n "$ctype" ]]; then
+    if [[ "$(backup_rclone_type "$remote")" != "$ctype" ]] || ! rclone lsd "$remote:" --max-depth 1 >/dev/null 2>> "$log"; then
+      backup_signin "$remote" "$ctype" "$name" "$csettings" "$log"   # in the browser, rclone's own way (lib/backup.sh)
+    fi
+  else
+    [[ -n "$(backup_rclone_type "$remote")" ]] || core_fail 2 "rclone has no remote called $remote. Set it up with rclone config, then choose it here."
+    name=$remote
+  fi
+  base="rclone:$remote:$backup_dir_name"
+fi
+
+# --- Whose backups, and the key ---
+
+repo_of() { if [[ $kind == disk ]]; then printf '%s/%s' "$base" "$1"; else printf 'rclone:%s:%s/%s' "$remote" "$backup_dir_name" "$1"; fi; }
+existing() {  # the computers whose backups are already here, one folder name per line
+  local f
+  if [[ $kind == disk ]]; then
+    for f in "$base"/*/config; do [[ -f "$f" ]] && basename "$(dirname "$f")"; done
+  else
+    rclone lsf --files-only --max-depth 2 "$remote:$backup_dir_name" 2>/dev/null | sed -n 's|^\([^/]*\)/config$|\1|p'
+  fi
+  return 0
+}
+core_note "Looking for backups on $name…"
+me=$(backup_host)
+folders=$(existing)
+folder="" adopted=no newkey=no
+# The key in the keyring goes on with backups it opens, this computer's first.
+if [[ -n "$folders" ]] && backup_key_have; then
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    backup_repo=$(repo_of "$f")
+    if backup_restic cat config >/dev/null 2>> "$log"; then folder=$f; break; fi
+  done <<< "$(grep -xF -- "$me" <<< "$folders"; grep -vxF -- "$me" <<< "$folders")"
+fi
+# Backups the keyring cannot open: another computer's, or this one's before a new install. Their key opens them.
+if [[ -z "$folder" && -n "$folders" ]]; then
+  use=""
+  if [[ "$(grep -c . <<< "$folders")" == 1 ]]; then
+    if core_confirm "$name holds the backups of $folders. Go on with them here? You need their backup key."; then use=$folders; fi
+  else
+    while [[ -z "$use" ]]; do
+      core_ask answer "$name holds backups of $(paste -sd, - <<< "$folders" | sed 's/,/, /g'). Type one to go on with it, or Enter for new backups" ||
+        core_fail 3 "Nothing changed."
+      [[ -z "$answer" ]] && break
+      use=$(grep -ix -m 1 -F -- "$answer" <<< "$folders" || true)
+      [[ -n "$use" ]] || again "That is not one of them" 3
+    done
+  fi
+  if [[ -n "$use" ]]; then
+    backup_repo=$(repo_of "$use")
+    tries=0
+    while [[ -z "$folder" ]]; do
+      core_secret typed "The backup key for $use" || core_fail 3 "Nothing changed."
+      key=$(backup_key_typed "$typed"); typed=""
+      core_note "Checking the key…"
+      if backup_restic_typed "$key" cat config >/dev/null 2>> "$log"; then folder=$use; break; fi
+      tries=$((tries + 1))
+      (( tries < 3 )) || core_fail 4 "That key does not open the backups of $use."
+      again "That key does not open these backups" 4
+    done
+    printf '%s' "$key" | backup_key_store || core_fail 1 "The keyring did not keep the key. Log out and back in, then try again."
+    key=""; adopted=yes
+  fi
+fi
+# New backups: a folder of this computer's own, and the key the keyring has, or a new one shown once.
+if [[ -z "$folder" ]]; then
+  folder=$me; i=2
+  while grep -qx -F -- "$folder" <<< "$folders"; do folder="$me-$i"; i=$((i + 1)); done
+  if ! backup_key_have; then
+    key=$(backup_new_key); newkey=yes
+    printf '%s' "$key" | backup_key_store ||
+      core_fail 1 "Backups keep their key in your login keyring, and it did not answer. Log out and back in, then try again."
+  fi
+  backup_repo=$(repo_of "$folder")
+  core_note "Preparing $name for backups…"
+  [[ $kind == disk ]] && mkdir -p "$base"
+  if ! backup_restic init >> "$log" 2>&1; then
+    [[ $newkey == yes ]] && backup_key_forget
+    core_fail 1 "Backups could not be prepared on $name. What happened is in $log"
+  fi
+fi
+
+# --- Every hour from now on ---
+
+backup_set_place "$kind" "$name" "$uuid" "$remote" "$backup_dir_name/$folder"
+rm -f "$backup_state/problem" "$backup_state/reminded"
+backup_stamp seen
+backup_trigger_off
+if [[ $kind == disk ]]; then backup_trigger_on "$uuid"; fi
+systemctl --user daemon-reload >/dev/null 2>&1 || true
+systemctl --user enable --now takumi-backup.timer >/dev/null 2>&1 || true
+if [[ $backup_we_mounted == yes ]]; then backup_unmount "$uuid"; fi   # the backups open and close the disk themselves
+done_ok=yes
+takumi backup now >/dev/null 2>&1 || true                              # the first backup starts at once
+
+if [[ $newkey == yes ]]; then
+  core_card "$(backup_card "Backup key" "Your backup key" "This card is your only copy if the computer is lost: nobody can open the backups without it. Write it down or take a photo, and keep it away from this computer." "$key")"
+  key=""
+  exit 0
+fi
+if [[ $adopted == yes ]]; then core_done "Backups go on to $name, with the backups of $folder, every hour on the charger."
+else core_done "Backups go to $name every hour on the charger, with the backup key you already have."; fi

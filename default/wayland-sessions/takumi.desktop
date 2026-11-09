@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Takumi
+Comment=The Strip on niri, with the Sky and the Core
+Exec=takumi session start
+Type=Application
+DesktopNames=takumi;niri

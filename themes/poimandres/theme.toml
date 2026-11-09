@@ -1,0 +1,34 @@
+# Poimandres: minimal, with mint and ice
+# Colours after Poimandres by drcmda (https://github.com/drcmda/poimandres-theme); phases by Takumi.
+
+[meta]
+name = "poimandres"
+mode = "dark"
+title = "Poimandres"
+about = "minimal, with mint and ice"
+credit = "Poimandres by drcmda (https://github.com/drcmda/poimandres-theme)"
+
+[palette]
+accent     = "#5de4c7"
+background = "#1b1e28"
+surface    = "#252b37"
+foreground = "#e4f0fb"
+muted      = "#767c9d"
+red        = "#d0679d"
+yellow     = "#fffac2"
+green      = "#5de4c7"
+cyan       = "#89ddff"
+blue       = "#add7ff"
+magenta    = "#fcc5e9"
+
+[phase.dawn]
+accent     = "#fffac2"
+
+[phase.dusk]
+accent     = "#d0679d"
+
+[phase.night]
+accent     = "#93b6d8"
+background = "#12141a"
+surface    = "#1a1e26"
+foreground = "#ccd7e2"

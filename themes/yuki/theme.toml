@@ -1,0 +1,34 @@
+# Yuki: fresh snow under a clear sky
+# A Takumi theme.
+
+[meta]
+name = "yuki"
+mode = "light"
+title = "Yuki"
+about = "fresh snow under a clear sky"
+
+[palette]
+accent     = "#2f7fd1"
+background = "#f5f8fb"
+surface    = "#e7eef5"
+foreground = "#1f2a36"
+muted      = "#7f8fa1"
+red        = "#c93a4a"
+yellow     = "#a67b14"
+green      = "#2f8a55"
+cyan       = "#1b8a96"
+blue       = "#2f6fc4"
+magenta    = "#8a4fc2"
+
+[phase.dawn]
+accent     = "#c4612f"
+background = "#f8f6f2"
+
+[phase.dusk]
+accent     = "#c65338"
+
+[phase.night]
+accent     = "#286db4"
+background = "#eaeef1"
+surface    = "#dbe2ea"
+foreground = "#343f4a"

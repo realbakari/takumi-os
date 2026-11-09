@@ -1,0 +1,13 @@
+# Framework Laptop 13, 12th Gen Intel Core: the light sensor's driver takes the brightness and airplane-mode
+# keys; Framework's Linux guide for this model keeps it from loading. Takumi does not use the light sensor.
+# Framework: https://knowledgebase.frame.work/ (the Linux guides for the 12th Gen Intel Core model)
+title = "Framework Laptop 13, 12th Gen Intel"
+part = "computer"
+
+[match]
+dmi_vendor = "^Framework$"
+dmi_product = "12th Gen Intel"
+
+[apply]
+cmdline = ["module_blacklist=hid_sensor_hub"]
+note = "Framework's own setting for this model: the brightness and airplane-mode keys work, at the cost of the light sensor, which Takumi does not use."

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Choose a picture; its colours become a theme, readable in every phase
+risk: 0
+title: Make a theme from a picture…
+words: theme look colours colors picture photo image wallpaper background make create own personal choose
+glyph: picture
+ABOUT
+set -euo pipefail
+# zenity's file chooser (GTK, so it wears the theme), opening in Pictures; then takumi theme from, which
+# shows the new theme in the Core. Exit status: 0 made, or no picture chosen · 4 zenity is not installed ·
+# else takumi theme from's.
+if ! command -v zenity >/dev/null; then
+  takumi notice drop "Choosing a picture needs zenity" "or give one: takumi theme from <picture>" >/dev/null 2>&1 || true
+  echo "Choosing a picture needs zenity; or give one: takumi theme from <picture>"; exit 4
+fi
+start="$HOME/Pictures/"; [[ -d "$start" ]] || start="$HOME/"
+rc=0
+pic=$(zenity --file-selection --title="Choose a picture for your theme" --filename="$start" \
+  --file-filter="Pictures | *.jpg *.jpeg *.png *.webp *.heic *.heif *.avif *.bmp *.gif *.tif *.tiff *.JPG *.JPEG *.PNG *.WEBP *.HEIC *.HEIF *.AVIF" \
+  2>/dev/null) || rc=$?
+if (( rc != 0 )) || [[ -z "$pic" ]]; then echo "No picture chosen"; exit 0; fi
+exec takumi theme from "$pic"

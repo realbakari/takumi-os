@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for printers and scanners as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "printer", "print" or "scan" (docs/printing.md): the printers set up here, each saying how it is (ready,
+# printing, out of paper, offline), Enter making it the one apps print to; the printers found on this
+# network and by USB, Enter setting one up in the Core; scanning, when a scanner answers. A printer's name
+# finds it; "test page" and "remove printer" find what they say. Looking for printers and scanners takes
+# seconds, so it runs in the background and the rows look again while they are on show. An unrelated word
+# never starts the print service.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/printer.sh" ]] && { . "$l/printer.sh"; . "$l/palette.sh"; break; }; done
+declare -F printer_queues >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+q=${1:-}; ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
+# A word of the query that starts a printer word, or starts with one, makes it about printers: "pri",
+# "printers", "remove printer". "test page" asks for the test page rows, "remove" for the remove rows.
+topic=no scanning=no testing=no removing=no
+read -r -a words <<< "$ql"
+for word in ${words[@]+"${words[@]}"}; do
+  for w in printer printers print printing scan scanner scanning; do
+    if [[ ${#word} -ge 3 && ( "$w" == "$word"* || "$word" == "$w"* ) ]]; then topic=yes; fi
+  done
+done
+case "$ql" in *scan*) scanning=yes ;; esac
+case "$ql" in *test*) testing=yes ;; esac
+case "$ql" in *"test page"*) topic=yes ;; esac
+case "$ql" in *remove*|*delete*|*forget*|*uninstall*) removing=yes ;; esac
+if [[ $topic == no ]]; then
+  palette_short "$q" && exit 0
+  printer_running || exit 0
+fi
+if ! command -v lpstat >/dev/null; then
+  [[ $topic == yes ]] && jq -cn '{id: "printer:none", title: "Printing is not set up", subtitle: "It needs CUPS, the cups package", glyph: "printer",
+    kind: "Printer", keywords: "printer printers print printing", run: ["true"], score: 0.9}'
+  exit 0
+fi
+{
+  queues=$(printer_queues)
+  while IFS="$printer_sep" read -r pq desc state alerts def uri msg; do
+    [[ -n "$pq" ]] || continue
+    Q=$pq L=$(printer_label "$pq" "$desc") W=$(printer_status "$pq" "$state" "$alerts" "$msg") D=$def S=$state T=$testing R=$removing jq -cn '
+      {id: ("printer:" + env.Q), title: env.L, kind: "Printer", glyph: "printer", steady: true, refresh: 10,
+       keywords: "printer printers print printing status", score: (if env.D == "1" then 0.95 else 0.9 end)}
+      + (if env.S == "stopped" then {subtitle: (env.W + " · Enter starts it again"), converse: true, run: ["takumi", "printer", "resume", env.Q]}
+         elif env.D == "1" then {subtitle: (env.W + " · apps print to it"), run: ["true"]}
+         else {subtitle: (env.W + " · Enter makes it the one apps print to"), run: ["takumi", "printer", "default", env.Q]} end),
+      (if env.T == "yes" then {id: ("printer-test:" + env.Q), title: ("Print a test page on " + env.L), subtitle: "To see that it works",
+        kind: "Printer", glyph: "printer", keywords: "printer printers test page check", run: ["takumi", "printer", "test", env.Q], score: 0.88} else empty end),
+      (if env.R == "yes" then {id: ("printer-remove:" + env.Q), title: ("Remove " + env.L), subtitle: "Takes it off this computer; it can be set up again",
+        kind: "Printer", glyph: "printer", keywords: "printer printers remove delete forget uninstall", risk: 1, converse: true,
+        run: ["takumi", "printer", "remove", env.Q], score: 0.5} else empty end)'
+  done <<< "$queues"
+  if [[ $topic == yes ]]; then
+    # Printers found on this network and by USB, minus the ones already set up.
+    found=$(printer_found --cached)
+    shown=0
+    while IFS="$printer_sep" read -r furi fname _ how _; do
+      [[ -n "$furi" ]] || continue
+      awk -F "$printer_sep" -v u="$furi" '$6 == u { f = 1 } END { exit !f }' <<< "$queues" && continue
+      shown=$((shown + 1))
+      U=$furi N=$fname H=$how jq -cn '{id: ("printer-add:" + env.U), title: ("Add " + env.N),
+        subtitle: ((if env.H == "usb" then "Plugged in by USB" else "On this network" end) + " · Enter sets it up"),
+        kind: "Printer", glyph: "printer", keywords: "printer printers add new set up install found nearby network usb",
+        converse: true, steady: true, refresh: 5, run: ["takumi", "printer", "add", env.U, env.N], score: 0.85}'
+    done <<< "$found"
+    if [[ -z "$queues" && $shown -eq 0 ]]; then
+      if [[ -f "$printer_found_file" ]]; then
+        jq -cn '{id: "printer:nothing", title: "No printers found", subtitle: "Turn the printer on and connect it to this network, or plug it in",
+          kind: "Printer", glyph: "printer", keywords: "printer printers print printing", steady: true, refresh: 10, run: ["true"], score: 0.9}'
+      else
+        jq -cn '{id: "printer:looking", title: "Looking for printers…", subtitle: "On this network and plugged in by USB",
+          kind: "Printer", glyph: "printer", keywords: "printer printers print printing", steady: true, refresh: 3, run: ["true"], score: 0.9}'
+      fi
+    fi
+    jq -cn '{id: "printer:address", title: "Add a printer by its address", subtitle: "For one that does not show up here, like 192.168.1.20",
+      kind: "Printer", glyph: "printer", keywords: "printer printers add address ip network other", converse: true, run: ["takumi", "printer", "add"], score: 0.4}'
+  fi
+  # Scanning, when a scanner answered the last time SANE was asked.
+  if command -v scanimage >/dev/null; then
+    if [[ $scanning == yes ]]; then scanners=$(printer_scanners --cached); else scanners=$(cat "$printer_scanners_file" 2>/dev/null || true); fi
+    sname=$(head -n 1 <<< "$scanners" | cut -d "$printer_sep" -f2)
+    if [[ -n "$sname" ]]; then
+      N=$sname jq -cn '{id: "scan:pdf", title: "Scan a document", subtitle: ("A PDF in Documents · " + env.N), kind: "Scanner", glyph: "scan",
+        keywords: "scan scanner scanning document paper pdf copy", converse: true, run: ["takumi", "scan", "pdf"], score: 0.9}'
+      N=$sname jq -cn '{id: "scan:png", title: "Scan a photo", subtitle: ("A PNG in Documents, every detail kept · " + env.N), kind: "Scanner", glyph: "scan",
+        keywords: "scan scanner scanning photo picture image png", converse: true, run: ["takumi", "scan", "png"], score: 0.8}'
+    elif [[ $scanning == yes && ! -f "$printer_scanners_file" ]]; then
+      jq -cn '{id: "scan:looking", title: "Looking for scanners…", subtitle: "On this network and plugged in by USB", kind: "Scanner", glyph: "scan",
+        keywords: "scan scanner scanning", steady: true, refresh: 3, run: ["true"], score: 0.9}'
+    elif [[ $scanning == yes ]]; then
+      jq -cn '{id: "scan:nothing", title: "No scanner found", subtitle: "Turn it on and connect it to this network, or plug it in", kind: "Scanner", glyph: "scan",
+        keywords: "scan scanner scanning", steady: true, refresh: 10, run: ["true"], score: 0.9}'
+    fi
+  fi
+} | palette_filter "$q"
+exit 0

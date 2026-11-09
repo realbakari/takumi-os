@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Open Codex, OpenAI's coding agent, in a terminal in ~/Work
+risk: 1
+converse: yes
+title: Open Codex
+words: codex openai chatgpt gpt coding agent ai assistant terminal programming
+glyph: term
+ABOUT
+set -euo pipefail
+exec takumi agent open codex "$@"

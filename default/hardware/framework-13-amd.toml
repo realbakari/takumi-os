@@ -1,0 +1,16 @@
+# Framework Laptop 13 with AMD Ryzen (7040 series and Ryzen AI 300): Framework's own tool, framework_tool
+# (framework-system, Arch's extra repository), reads and sets what the laptop's embedded controller keeps: the
+# battery's charge limit, the fans, the expansion cards. The headset jack's microphone detection is fixed in
+# Linux itself (a Realtek quirk since 6.7); the built-in microphone has no setting to fix.
+# Framework: https://github.com/FrameworkComputer/framework-system  Kernel: sound/hda/codecs/realtek (Framework quirks)
+title = "Framework Laptop 13, AMD Ryzen"
+part = "computer"
+
+[match]
+dmi_vendor = "^Framework$"
+dmi_product = '^Laptop 13 \(AMD'
+arch = ["x86_64"]
+
+[apply]
+packages = ["framework-system"]
+note = "Framework's own tool for this laptop, framework_tool, which reads and sets the battery's charge limit, the fans and the expansion cards from a terminal (sudo framework_tool --help). A headset's microphone is found when it is plugged in."

@@ -1,0 +1,467 @@
+#!/usr/bin/env bash
+# Contract checks for signing in and starting safely (commands/password/main, commands/security/*,
+# commands/disk/tpm, commands/palette/security, lib/security.sh and the password and TPM parts of lib/disk.sh)
+# against fake tools first in PATH that keep what they were told: sudo, unix_chkpwd, chpasswd, cryptsetup,
+# systemd-cryptenroll, fprintd, busctl, sbctl and the firmware's variables. The conversations' lines in the Core,
+# the exit codes, the files before and after, and that no password reaches any command's arguments. Runs on
+# bash 3.2 with jq.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; security checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-security.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export T=$t CALLS=$t/calls HOME=$t/home XDG_RUNTIME_DIR=$t/run
+mkdir -p "$t/bin" "$HOME" "$XDG_RUNTIME_DIR" "$t/commands/room"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"   # fake takumi commands go in front of the real ones
+export TAKUMI_PAM_DIR=$t/pam.d TAKUMI_FPRINT_DIR=$t/fprint TAKUMI_LID=$t/lid TAKUMI_EFIVARS=$t/efivars TAKUMI_SBCTL_DIR=$t/sbctl \
+  TAKUMI_USR_LIB=$t/usr/lib TAKUMI_FWUPD_CONF=$t/fwupd.conf TAKUMI_TPM=$t/tpm TAKUMI_KERNEL_CMDLINE=$t/cmdline \
+  TAKUMI_GREETD_CONFIG=$t/greetd.toml TAKUMI_PASSWD=$t/passwd TAKUMI_FINGER_WAIT=1 TAKUMI_VENDOR_PAM_DIR=$t/vendor-pam
+fake() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$t/bin/$1"; chmod +x "$t/bin/$1"; }
+rec='printf "%s %s\n" "$(basename "$0")" "$*" >> "$CALLS"'
+
+# --- The fakes. Root is FAKE_ROOT, set by the fake sudo for what it runs.
+fake id 'case "$1" in -u) if [[ -n "${FAKE_ROOT:-}" ]]; then echo 0; else echo 501; fi ;; -un) echo ana ;; -nG) cat "$T/groups" ;; *) exec /usr/bin/id "$@" ;; esac'
+# sudo -S reads its password from stdin's first line (unless $T/nopasswd), -A says why; then the command, as root.
+fake sudo "$rec"'
+ask=no
+while [[ "${1:-}" == -* ]]; do
+  case "$1" in -S) ask=yes ;; -p) shift ;; -A) echo "why ${TAKUMI_SUDO_WHY:-}" >> "$CALLS" ;; esac
+  shift
+done
+if [[ $ask == yes && ! -f "$T/nopasswd" ]]; then IFS= read -r p || exit 1; [[ "$p" == "$(cat "$T/password")" ]] || exit 1; fi
+export FAKE_ROOT=1 SUDO_USER=ana
+exec "$@"'
+fake setsid "$rec"'; [[ "${1:-}" == -w ]] && shift; exec "$@"'
+fake unix_chkpwd "$rec"'; IFS= read -r -d "" p || true; [[ "$1" == ana && "$2" == nonull && "$p" == "$(cat "$T/password")" ]]'
+fake chpasswd "$rec"'; IFS= read -r l || true; [[ -f "$T/chpasswd-fails" ]] && exit 1; [[ "${l%%:*}" == ana ]] || exit 1; printf "%s" "${l#*:}" > "$T/password"'
+fake findmnt 'case "$*" in "-no SOURCE /") echo /dev/mapper/takumi ;; "-no OPTIONS /") echo "rw,noatime,subvol=/@rooms/20261108-093000" ;; *) exit 1 ;; esac'
+fake lsblk 'if [[ -f "$T/unencrypted" ]]; then echo part; else echo crypt; fi'
+fake bootctl "$rec"'; [[ "$1" == --print-esp-path ]] && echo "$T/esp"; exit 0'
+fake systemctl "$rec"
+fake mkinitcpio "$rec"
+fake systemd-analyze 'if [[ -f "$T/no-tpm-libs" ]]; then printf "partial\n+firmware\n+driver\n+system\n+subsystem\n-libraries\n"; exit 1; fi
+printf "yes\n+firmware\n+driver\n+system\n+subsystem\n+libraries\n"'
+printf '#!/bin/sh\necho "takumi room kernel-sync" >> "$CALLS"\n' > "$t/commands/room/kernel-sync"; chmod +x "$t/commands/room/kernel-sync"
+# The disk: a file per key slot in $T/slots holding what opens it, the tokens in $T/tokens.json.
+cat > "$t/bin/cryptsetup" <<'FAKE'
+#!/usr/bin/env bash
+printf 'cryptsetup %s\n' "$*" >> "$CALLS"
+key="" slot="" tid="" pos=()
+while (( $# )); do
+  case "$1" in
+    --key-file=*) key=${1#--key-file=} ;;
+    --key-slot) slot=$2; shift ;;
+    --token-id) tid=$2; shift ;;
+    --*) ;;
+    *) pos+=("$1") ;;
+  esac
+  shift
+done
+secret() { if [[ "$1" == - ]]; then cat; else cat "$1"; fi; }
+opens() {
+  local f
+  for f in "$T"/slots/*; do
+    [[ -f "$f" ]] || continue
+    if [[ -n "${2:-}" && "${f##*/}" != "$2" ]]; then continue; fi
+    [[ "$(cat "$f")" == "$1" ]] && return 0
+  done
+  return 1
+}
+case "${pos[0]}" in
+  status) [[ -f "$T/unencrypted" ]] && exit 4; echo "  device:  /dev/vda2" ;;
+  open) opens "$(secret "$key")" "$slot" || exit 2 ;;
+  luksChangeKey) old=$(secret "$key"); new=$(cat "${pos[2]}"); opens "$old" 0 || exit 2; printf '%s' "$new" > "$T/slots/0" ;;
+  luksUUID) echo 1111-2222 ;;
+  luksDump) jq -cn --argjson tokens "$(cat "$T/tokens.json")" --arg slots "$(ls "$T/slots" | tr '\n' ' ')" \
+              '{keyslots: ($slots | split(" ") | map(select(. != "")) | map({key: ., value: {}}) | from_entries), tokens: $tokens}' ;;
+  luksKillSlot) opens "$(secret "$key")" || exit 2; rm -f "$T/slots/${pos[2]}" ;;
+  token) [[ "${pos[1]}" == remove ]] || exit 1
+         jq -c --arg id "$tid" 'del(.[$id])' "$T/tokens.json" > "$T/t.json" && mv "$T/t.json" "$T/tokens.json" ;;
+  *) exit 1 ;;
+esac
+exit 0
+FAKE
+# systemd-cryptenroll: a new slot and a systemd-tpm2 token; --wipe-slot=tpm2 takes the earlier ones once it is in.
+cat > "$t/bin/systemd-cryptenroll" <<'FAKE'
+#!/usr/bin/env bash
+printf 'systemd-cryptenroll %s\n' "$*" >> "$CALLS"
+key="" wipe=no dev=""
+for a in "$@"; do
+  case "$a" in --unlock-key-file=*) key=$(cat "${a#--unlock-key-file=}") ;; --wipe-slot=tpm2) wipe=yes ;; --*) ;; *) dev=$a ;; esac
+done
+[[ -f "$T/tpm-fails" ]] && exit 1
+ok=no; for f in "$T"/slots/*; do [[ -f "$f" && "$(cat "$f")" == "$key" ]] && ok=yes; done
+[[ $ok == yes && "$dev" == /dev/vda2 ]] || exit 1
+old=$(jq -r 'to_entries[] | select(.value.type == "systemd-tpm2") | .key' "$T/tokens.json")
+n=0; while [[ -e "$T/slots/$n" ]]; do n=$((n + 1)); done
+echo "sealed to the chip" > "$T/slots/$n"
+id=0; while jq -e --arg id "$id" 'has($id)' "$T/tokens.json" >/dev/null; do id=$((id + 1)); done
+jq -c --arg id "$id" --arg s "$n" '. + {($id): {type: "systemd-tpm2", keyslots: [$s]}}' "$T/tokens.json" > "$T/t.json" && mv "$T/t.json" "$T/tokens.json"
+if [[ $wipe == yes ]]; then
+  for o in $old; do
+    for s in $(jq -r --arg id "$o" '.[$id].keyslots[]' "$T/tokens.json"); do rm -f "$T/slots/$s"; done
+    jq -c --arg id "$o" 'del(.[$id])' "$T/tokens.json" > "$T/t.json" && mv "$T/t.json" "$T/tokens.json"
+  done
+fi
+FAKE
+# fprintd: the enrolled fingers in $T/fingers; fprintd-enroll says what $T/enroll lists ("hang" stays quiet).
+cat > "$t/bin/fprintd-list" <<'FAKE'
+#!/usr/bin/env bash
+printf 'fprintd-list %s\n' "$*" >> "$CALLS"
+if [[ -f "$T/no-reader" ]]; then echo "No devices available"; exit 1; fi
+echo "found 1 devices"; echo "Device at /net/reactivated/Fprint/Device/0"; echo "Using device /net/reactivated/Fprint/Device/0"
+if [[ -s "$T/fingers" ]]; then
+  echo "Fingerprints for user $1 on Fake Sensor (press):"
+  n=0; while IFS= read -r f; do echo " - #$n: $f"; n=$((n + 1)); done < "$T/fingers"
+else
+  echo "User $1 has no fingers enrolled for Fake Sensor."
+fi
+FAKE
+cat > "$t/bin/fprintd-enroll" <<'FAKE'
+#!/usr/bin/env bash
+printf 'fprintd-enroll %s\n' "$*" >> "$CALLS"
+finger=right-index-finger; [[ "$1" == -f ]] && finger=$2
+if [[ -f "$T/busy" ]]; then echo "failed to claim device: Device was already claimed"; exit 1; fi
+echo "Using device /net/reactivated/Fprint/Device/0"; echo "Enrolling $finger finger."
+while IFS= read -r l; do
+  if [[ "$l" == hang ]]; then sleep 3; continue; fi
+  echo "Enroll result: $l"
+  if [[ "$l" == enroll-completed ]]; then echo "$finger" >> "$T/fingers"; exit 0; fi
+done < "$T/enroll"
+exit 1
+FAKE
+fake fprintd-delete "$rec"'; : > "$T/fingers"; echo "Fingerprints of user $1 deleted on Fake Sensor"'
+fake busctl "$rec"'; case "$*" in *num-enroll-stages*) cat "$T/stages" ;; *scan-type*) echo "s \"$(cat "$T/scan")\"" ;; *) exit 1 ;; esac'
+cat > "$t/bin/sbctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'sbctl %s\n' "$*" >> "$CALLS"
+case "$1" in
+  create-keys) mkdir -p "$TAKUMI_SBCTL_DIR/keys/db"; : > "$TAKUMI_SBCTL_DIR/keys/db/db.key" ;;
+  enroll-keys) [[ -f "$T/enroll-refused" ]] && exit 1; [[ -f "$TAKUMI_SBCTL_DIR/keys/db/db.key" ]] || exit 1 ;;
+  sign) for a in "$@"; do last=$a; done; [[ -f "$last" ]] || exit 1 ;;
+esac
+exit 0
+FAKE
+# python3: gnome-keyring's own D-Bus change, given the code; the two passwords come on stdin and the login keyring
+# ($T/keyring) takes the new one when the old one opens it.
+cat > "$t/bin/python3" <<'FAKE'
+#!/usr/bin/env bash
+printf 'python3 %s %s\n' "$1" "$(printf '%s' "${2:-}" | tr '\n' ' ')" >> "$CALLS"
+IFS= read -r old || true; IFS= read -r new || true
+[[ -f "$T/no-keyring" ]] && exit 3
+[[ "$old" == "$(cat "$T/keyring")" ]] || exit 4
+printf '%s' "$new" > "$T/keyring"
+FAKE
+chmod +x "$t/bin/"*
+
+pw='old pass:1' new='Brand new 7' code=123456-234567-345678-456789-567890-678901
+efivar() {  # <name> <0|1>: four bytes of attributes, then the value
+  if [[ "$2" == 1 ]]; then printf '\007\000\000\000\001'; else printf '\007\000\000\000\000'; fi > "$T/efivars/$1-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+}
+sudo_pam=$(printf '%s\n' '#%PAM-1.0' 'auth		include		system-auth' 'account		include		system-auth' 'session		include		system-auth')
+polkit_pam=$(printf '%s\n' '#%PAM-1.0' '' 'auth       include      system-auth' 'account    include      system-auth' 'password   include      system-auth' 'session    include      system-auth')
+greetd=$(printf '%s\n' '[terminal]' 'vt = 1' '' '[default_session]' 'command = "takumi greeter"' 'user = "greeter"' '' '[initial_session]' 'command = "takumi session start"' 'user = "ana"')
+reset() {
+  rm -rf "${T:?}"/slots "$T"/pam.d "$T"/vendor-pam "$T"/fprint "$T"/lid "$T"/efivars "$T"/sbctl "$T"/usr "$T"/tpm "$T"/esp
+  rm -f "$T"/unencrypted "$T"/nopasswd "$T"/no-sudo "$T"/chpasswd-fails "$T"/no-reader "$T"/busy "$T"/tpm-fails "$T"/no-tpm-libs "$T"/enroll-refused
+  mkdir -p "$T/slots" "$T/pam.d" "$T/vendor-pam" "$T/fprint" "$T/lid/LID0" "$T/efivars" "$T/tpm/tpm0" "$T/esp/loader" "$T/esp/EFI/systemd" "$T/esp/EFI/BOOT" \
+    "$T/esp/takumi/20261108-093000" "$T/esp/takumi/20261101-201512" "$T/usr/lib/systemd/boot/efi" "$T/usr/lib/fwupd/efi"
+  printf '%s' "$pw" > "$T/password"; printf '%s' "$pw" > "$T/slots/0"; printf '%s' "$pw" > "$T/keyring"; rm -f "$T/no-keyring"
+  printf '%s' "$code" > "$T/slots/1"; printf '%s' "${code//-/}" > "$T/slots/2"
+  echo '{"0":{"type":"takumi-recovery","keyslots":["1","2"]}}' > "$T/tokens.json"
+  echo "ana wheel" > "$T/groups"
+  printf '%s\n' "$sudo_pam" > "$T/pam.d/sudo"; printf '%s\n' "$polkit_pam" > "$T/pam.d/polkit-1"; : > "$T/pam.d/takumi-lock-finger"
+  echo "state:      open" > "$T/lid/LID0/state"
+  efivar SecureBoot 1; efivar SetupMode 0
+  echo 2 > "$T/tpm/tpm0/tpm_version_major"
+  echo "rd.luks.name=1111-2222=takumi root=/dev/mapper/takumi rw quiet splash" > "$T/cmdline"
+  printf '%s\n' "$greetd" > "$T/greetd.toml"
+  printf '%s\n' "root:x:0:0::/root:/bin/bash" "ana:x:1000:1000:Ana:/home/ana:/bin/bash" > "$T/passwd"
+  printf '%s\n' "default takumi-20261108-093000.conf" "timeout 0" > "$T/esp/loader/loader.conf"
+  printf '%s\n' "[fwupd]" "DisabledPlugins=test" "" "[redfish]" "IpmiDisableCreateUser=False" > "$T/fwupd.conf"
+  for f in "$T/usr/lib/systemd/boot/efi/systemd-bootx64.efi" "$T/usr/lib/fwupd/efi/fwupdx64.efi" "$T/esp/EFI/systemd/systemd-bootx64.efi" \
+           "$T/esp/EFI/BOOT/BOOTX64.EFI" "$T/esp/takumi/20261108-093000/linux" "$T/esp/takumi/20261101-201512/linux"; do echo program > "$f"; done
+  : > "$CALLS"; : > "$T/fingers"; echo "i 5" > "$T/stages"; echo press > "$T/scan"; : > "$T/enroll"
+}
+check() { if eval "$2"; then :; else echo "security: $1"; status=1; fi; }
+talk() { local answers=$1; shift; printf '%b' "$answers" | TAKUMI_CORE=1 "$@" 2>&1; echo "rc=$?"; }
+said_lines() { tr '\n' '|' <<< "$1"; }
+no_secret() { ! grep -qF -e "$pw" -e "$new" -e "$code" -e "older disk pw" "$CALLS"; }
+rows() { commands/palette/security "$1"; }
+
+# --- takumi password
+reset
+said=$(talk "$pw\n$new\n$new\n" commands/password/main)
+check "the conversation: your password, a new one twice, done ($(said_lines "$said"))" \
+  '[[ "$(said_lines "$said")" == "secret Your password|secret New password|secret Type it again|note Changing your password…|done Your password is changed, for logging in and for the disk|rc=0|" ]]'
+check "the account and key slot 0 both open with the new password" '[[ "$(cat "$T/password")" == "$new" && "$(cat "$T/slots/0")" == "$new" ]]'
+check "the recovery code still opens the disk, with and without dashes, and keeps its token" \
+  '[[ "$(cat "$T/slots/1")" == "$code" && "$(cat "$T/slots/2")" == "${code//-/}" && "$(jq -c ".[\"0\"]" "$T/tokens.json")" == "{\"type\":\"takumi-recovery\",\"keyslots\":[\"1\",\"2\"]}" ]]'
+check "slot 0 is changed in place, the old password from a pipe" 'grep -q "^cryptsetup luksChangeKey --batch-mode --key-slot 0 --key-file=/dev/fd/[0-9]* /dev/vda2 /dev/fd/[0-9]*$" "$CALLS"'
+check "sudo reads the typed password, with the terminal taken away" 'grep -q "^setsid -w sudo -k -S -p  .*/commands/password/main --root change$" "$CALLS"'
+check "no password in any command's arguments" 'no_secret'
+reset
+said=$(talk "wrong one\n$pw\n$new\n$new\n" commands/password/main)
+check "a wrong password shakes and is asked again" '[[ "$(head -n 3 <<< "$said" | tr "\n" "|")" == "secret Your password|wrong That password did not work|secret Your password|" && "$said" == *"rc=0" ]]'
+reset
+said=$(talk 'a\nb\nc\n' commands/password/main)
+check "three wrong passwords: exit 3 and nothing changed" '[[ "$said" == *"rc=3" && "$(cat "$T/password")" == "$pw" && "$(cat "$T/slots/0")" == "$pw" ]] && ! grep -q "^chpasswd" "$CALLS"'
+reset
+said=$(talk "$pw\nshort\n$pw\n$new\nother one\n$new\n$new\n" commands/password/main)
+check "too short, the same one, two that differ: each asked again" \
+  '[[ "$(grep "^wrong" <<< "$said" | tr "\n" "|")" == "wrong At least six characters|wrong That is your password already|wrong The two are not the same|" && "$said" == *"rc=0" && "$(cat "$T/password")" == "$new" ]]'
+reset; touch "$T/unencrypted"
+said=$(talk "$pw\n$new\n$new\n" commands/password/main)
+check "a disk that is not encrypted: the account alone" \
+  '[[ "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "done Your password is changed|rc=0|" && "$(cat "$T/password")" == "$new" ]] && ! grep -q "luksChangeKey" "$CALLS"'
+reset; printf '%s' "older disk pw" > "$T/slots/0"
+said=$(talk "$pw\nno\n$new\n$new\n" commands/password/main)
+check "a disk with an earlier password: asked, and kept when you say no" \
+  '[[ "$said" == *"note The disk still opens with an earlier password"*"confirm Change the disk'"'"'s password to the new one too?"*"done Your password is changed. The disk still opens with its earlier password"*"rc=0" ]] && [[ "$(cat "$T/slots/0")" == "older disk pw" && "$(cat "$T/password")" == "$new" ]]'
+reset; printf '%s' "older disk pw" > "$T/slots/0"
+said=$(talk "$pw\nyes\nolder disk pw\n$new\n$new\n" commands/password/main)
+check "...and changed with its own password when you say yes" '[[ "$said" == *"done Your password is changed, for logging in and for the disk"*"rc=0" && "$(cat "$T/slots/0")" == "$new" ]] && no_secret'
+reset; printf '%s' "older disk pw" > "$T/slots/0"
+said=$(talk "$pw\nyes\nx\ny\nz\n" commands/password/main)
+check "three wrong disk passwords: exit 4, nothing changed" '[[ "$said" == *"wrong That is not the disk'"'"'s password"*"rc=4" && "$(cat "$T/slots/0")" == "older disk pw" && "$(cat "$T/password")" == "$pw" ]]'
+reset; touch "$T/chpasswd-fails"
+said=$(talk "$pw\n$new\n$new\n" commands/password/main)
+check "the account refuses: the disk is put back and it says so" '[[ "$said" == *"Your password did not change."*"rc=1" && "$(cat "$T/slots/0")" == "$pw" && "$(cat "$T/password")" == "$pw" ]]'
+reset; touch "$T/nopasswd"
+said=$(talk "$pw\n$new\n$new\n" commands/password/main)
+check "with a sudo that asks nothing, the answers still line up" '[[ "$said" == *"rc=0" && "$(cat "$T/slots/0")" == "$new" && "$(cat "$T/password")" == "$new" ]]'
+reset; echo ana > "$T/groups"
+said=$(talk "$pw\n" commands/password/main)
+check "an account that is not an administrator: said plainly" '[[ "$said" == *"Changing your password here needs an administrator account."*"rc=1" ]]'
+check "the root part refuses to run as anyone else" '! printf "%s\n" "$pw" | commands/password/main --root check >/dev/null 2>&1'
+
+# --- The login keyring follows the password
+reset
+said=$(talk "$pw\n$new\n$new\n" commands/password/main)
+check "the login keyring takes the new password too, through gnome-keyring's own method, the passwords on stdin" \
+  '[[ "$(cat "$T/keyring")" == "$new" && "$said" == *"rc=0" ]] && grep -q "^python3 .*ChangeWithMasterPassword" "$CALLS" && no_secret'
+reset; printf '%s' "another keyring pw" > "$T/keyring"
+said=$(talk "$pw\n$new\n$new\n" commands/password/main)
+check "a keyring locked with another password keeps it, and the Core says so" \
+  '[[ "$said" == *"note The login keyring still opens with its earlier password"*"done Your password is changed, for logging in and for the disk"*"rc=0" && "$(cat "$T/keyring")" == "another keyring pw" ]]'
+reset; touch "$T/no-keyring"
+said=$(talk "$pw\n$new\n$new\n" commands/password/main)
+check "no login keyring: nothing said about it" '[[ "$said" != *keyring* && "$said" == *"rc=0" ]]'
+reset; touch "$T/chpasswd-fails"
+said=$(talk "$pw\n$new\n$new\n" commands/password/main)
+check "the account refuses: the keyring is not touched" '[[ "$(cat "$T/keyring")" == "$pw" && "$said" == *"rc=1" ]] && ! grep -q "^python3" "$CALLS"'
+
+# --- The login keyring at the login screen, and ten tries (lib/security.sh as 27-security.sh runs it)
+greetd_pam=$(printf '%s\n' '#%PAM-1.0' '' 'auth       required     pam_securetty.so' 'auth       requisite    pam_nologin.so' 'auth       include      system-local-login' 'account    include      system-local-login' 'session    include      system-local-login')
+reset; printf '%s\n' "$greetd_pam" > "$T/pam.d/greetd"
+out=$(. lib/security.sh; security_keyring_pam on)
+check "greetd's file: Takumi's lines at its end, the rest as it was" \
+  '[[ "$(head -n 7 "$T/pam.d/greetd")" == "$greetd_pam" && "$(sed -n 8p "$T/pam.d/greetd")" == "# takumi-keyring: begin"* && "$(sed -n 9p "$T/pam.d/greetd")" == "auth"*"optional"*"pam_gnome_keyring.so" && "$(sed -n 11p "$T/pam.d/greetd")" == "session"*"optional"*"pam_gnome_keyring.so auto_start" && "$(sed -n 12p "$T/pam.d/greetd")" == "# takumi-keyring: end" && "$out" == *"in $T/pam.d/greetd" ]]'
+check "the greeter's own account starts no keyring" '[[ "$(sed -n 10p "$T/pam.d/greetd")" == "session"*"pam_succeed_if.so quiet user = greeter" ]]'
+before=$(cat "$T/pam.d/greetd"); out=$(. lib/security.sh; security_keyring_pam on)
+check "on twice: one set of lines, nothing written" '[[ "$(cat "$T/pam.d/greetd")" == "$before" && -z "$out" ]]'
+check "it knows when it is on" '(. lib/security.sh; security_keyring_pam_is_on)'
+(. lib/security.sh; security_keyring_pam off) >/dev/null
+check "off: greetd's file as it was" '[[ "$(cat "$T/pam.d/greetd")" == "$greetd_pam" ]]'
+reset; printf '%s\n' "$greetd_pam" > "$T/vendor-pam/greetd"
+(. lib/security.sh; security_keyring_pam on) >/dev/null
+check "a greetd file in /usr/lib/pam.d: a copy with the lines in /etc/pam.d" '[[ "$(head -n 7 "$T/pam.d/greetd")" == "$greetd_pam" && "$(cat "$T/vendor-pam/greetd")" == "$greetd_pam" ]] && grep -q "^# takumi-keyring: begin" "$T/pam.d/greetd"'
+(. lib/security.sh; security_keyring_pam off) >/dev/null
+check "...and off takes the copy away" '[[ ! -e "$T/pam.d/greetd" ]]'
+reset
+check "no greetd: nothing written" '(. lib/security.sh; security_keyring_pam on) && [[ ! -e "$T/pam.d/greetd" ]]'
+stock=$(printf '%s\n' '# Configuration for locking the user after multiple failed' '# authentication attempts.' '#' '# The directory where the user files with the failure records are kept.' '# dir = /var/run/faillock' '#' '# Deny access if the number of consecutive authentication failures' '# for this user during the recent interval exceeds n tries.' '# The default is 3.' '# deny = 3' '#' '# The access will be re-enabled after n seconds after the lock out.' '# The default is 600 (10 minutes).' '# unlock_time = 600' '#' '# fail_interval = 900')
+printf '%s\n' "$stock" > "$t/faillock.conf"
+out=$(TAKUMI_FAILLOCK_CONF=$t/faillock.conf bash -c '. lib/security.sh; security_faillock etc/security/faillock.conf')
+check "faillock: ten tries and two minutes in place of pam's commented defaults, every other line kept" \
+  '[[ "$(cat "$t/faillock.conf")" == "$(sed -e "s/^# deny = 3$/deny = 10/" -e "s/^# unlock_time = 600$/unlock_time = 120/" <<< "$stock")" && "$out" == *"ten tries"* ]]'
+out=$(TAKUMI_FAILLOCK_CONF=$t/faillock.conf bash -c '. lib/security.sh; security_faillock etc/security/faillock.conf')
+check "faillock again: nothing changes, nothing said" '[[ -z "$out" && $(grep -c "^deny" "$t/faillock.conf") -eq 1 ]]'
+printf '%s\n' 'deny = 5' 'silent' > "$t/faillock.conf"
+TAKUMI_FAILLOCK_CONF=$t/faillock.conf bash -c '. lib/security.sh; security_faillock etc/security/faillock.conf' >/dev/null
+check "faillock set by hand: Takumi's values replace them, a missing one is added, flags stay" '[[ "$(cat "$t/faillock.conf")" == "$(printf "%s\n" "deny = 10" "silent" "unlock_time = 120")" ]]'
+rm -f "$t/faillock.conf"
+TAKUMI_FAILLOCK_CONF=$t/faillock.conf bash -c '. lib/security.sh; security_faillock etc/security/faillock.conf' >/dev/null
+check "no faillock.conf at all: Takumi's file" '[[ "$(cat "$t/faillock.conf")" == "$(cat etc/security/faillock.conf)" ]]'
+check "Takumi's faillock settings are ten tries and two minutes" '[[ "$(grep -v "^#" etc/security/faillock.conf)" == "$(printf "%s\n" "deny = 10" "unlock_time = 120")" ]]'
+
+# --- takumi security fingerprint and its rows
+reset; touch "$T/no-reader"
+check "no reader: no rows, and the command says so" '[[ -z "$(rows fingerprint)" && "$(commands/security/fingerprint)" == "This computer has no fingerprint reader" ]]'
+said=$(talk "" commands/security/fingerprint on)
+check "no reader: on says so, exit 1" '[[ "$said" == *"This computer has no fingerprint reader."*"rc=1" ]]'
+rm -f "$T/no-reader"
+r=$(rows fingerprint)
+check "a reader and no finger: one row, a conversation that asks first" \
+  '[[ "$(jq -c "[.title, .subtitle, .glyph, .kind, .converse, .risk, .run]" <<< "$r")" == "[\"Unlock with your finger\",\"Touch the sensor instead of typing your password\",\"finger\",\"Security\",true,1,[\"takumi\",\"security\",\"fingerprint\",\"on\"]]" ]]'
+check "unrelated words list nothing and ask nothing" ': > "$CALLS"; [[ -z "$(rows zebra)" ]] && ! grep -q fprintd "$CALLS"'
+check "every word counts: touch id, windows hello" '[[ "$(rows "touch id" | jq -r .id)" == security:finger && "$(rows hello | jq -r .id)" == security:finger ]]'
+printf '%s\n' enroll-stage-passed enroll-retry-scan enroll-stage-passed enroll-stage-passed enroll-finger-not-centered enroll-stage-passed enroll-stage-passed enroll-completed > "$T/enroll"
+said=$(talk "" commands/security/fingerprint on)
+want=$(printf '%s\n' "note Touch the sensor · 1 of 5" "note Touch the sensor · 2 of 5" "note Touch the sensor again, a little longer · 2 of 5" \
+  "note Touch the sensor · 3 of 5" "note Touch the sensor · 4 of 5" "note Center your finger on the sensor · 4 of 5" "note Touch the sensor · 5 of 5" \
+  "note Touch the sensor · 5 of 5" "done Your finger unlocks this computer now" "rc=0")
+check "enrolling: each touch counted in the Core, then done ($(said_lines "$said"))" '[[ "$said" == "$want" ]]'
+check "the first finger is the right index, asked of fprintd for this person" 'grep -q "^fprintd-enroll -f right-index-finger ana$" "$CALLS" && [[ "$(cat "$T/fingers")" == right-index-finger ]]'
+check "approvals by finger: asked for in the Core with a reason" 'grep -q "^why Letting your finger approve changes needs your password$" "$CALLS"'
+check "sudo's file: Takumi's lines right before its system-auth line" \
+  '[[ "$(sed -n 2p "$T/pam.d/sudo")" == "# takumi-fingerprint: begin"* && "$(sed -n 3p "$T/pam.d/sudo")" == *"pam_exec.so quiet /usr/lib/takumi/commands/security/finger-ready" && "$(sed -n 4p "$T/pam.d/sudo")" == *"sufficient"*"pam_fprintd.so timeout=10" && "$(sed -n 6p "$T/pam.d/sudo")" == "auth"*"system-auth" ]]'
+check "polkit's file too, after its blank line" '[[ "$(sed -n 3p "$T/pam.d/polkit-1")" == "# takumi-fingerprint: begin"* && "$(sed -n 7p "$T/pam.d/polkit-1")" == "auth"*"system-auth" ]]'
+check "the lines name a command that exists" '[[ -x commands/security/finger-ready ]]'
+check "without Takumi's lines, both files are exactly as they were" \
+  '[[ "$(. lib/security.sh; security_pam_without "$T/pam.d/sudo")" == "$sudo_pam" && "$(. lib/security.sh; security_pam_without "$T/pam.d/polkit-1")" == "$polkit_pam" ]]'
+before=$(cat "$T/pam.d/sudo")
+FAKE_ROOT=1 commands/security/fingerprint --root on >/dev/null
+check "on twice: one set of lines" '[[ "$(cat "$T/pam.d/sudo")" == "$before" && $(grep -c "^# takumi-fingerprint: begin" "$T/pam.d/sudo") -eq 1 ]]'
+check "the state in words" '[[ "$(commands/security/fingerprint)" == "Fingerprint unlock is on: 1 finger" ]]'
+: > "$CALLS"; echo "i -1" > "$T/stages"; echo swipe > "$T/scan"; printf '%s\n' enroll-stage-passed enroll-swipe-too-short enroll-completed > "$T/enroll"
+said=$(talk "" commands/security/fingerprint on)
+check "a second finger: the next label, a swipe reader, no count when the reader gives none ($(said_lines "$said"))" \
+  '[[ "$(said_lines "$said")" == "note Swipe your finger across the sensor|note Swipe your finger across the sensor|note Swipe more slowly, all the way across|done Another finger unlocks this computer now|rc=0|" ]] && grep -q "^fprintd-enroll -f left-index-finger ana$" "$CALLS"'
+check "approvals already on: no password asked again" '! grep -q "^why " "$CALLS"'
+r=$(rows finger)
+check "with fingers: on, and a row that removes them" \
+  '[[ "$(jq -r ".title + \" · \" + .subtitle + \" · \" + (.risk | tostring)" <<< "$r" | tr "\n" "|")" == "Unlock with your finger · On · 2 fingers · Enter adds another · 1|Stop unlocking with your finger · Removes your fingerprints from this computer · 1|" ]]'
+check "--check: 0 with a finger, the Lock's file and the lid open" 'commands/security/fingerprint --check'
+echo "state:      closed" > "$T/lid/LID0/state"
+check "--check: not with the lid closed" '! commands/security/fingerprint --check'
+check "finger-ready: not with the lid closed" '! PAM_SERVICE=polkit-1 commands/security/finger-ready'
+echo "state:      open" > "$T/lid/LID0/state"
+check "finger-ready: sudo at a terminal asks for a finger" 'PAM_SERVICE=sudo PAM_TTY=/dev/pts/0 commands/security/finger-ready'
+check "finger-ready: sudo without a terminal (the Core) goes to the password" '! PAM_SERVICE=sudo PAM_TTY= commands/security/finger-ready'
+check "finger-ready: polkit asks for a finger without a terminal" 'PAM_SERVICE=polkit-1 PAM_TTY= commands/security/finger-ready'
+mkdir -p "$T/fprint/bob/x/0"; : > "$T/fprint/bob/x/0/7"; : > "$CALLS"
+said=$(talk "" commands/security/fingerprint off)
+check "off: your prints go, and the lines stay while someone else has a finger" \
+  'grep -q "^fprintd-delete ana$" "$CALLS" && grep -q "takumi-fingerprint" "$T/pam.d/sudo" && [[ "$said" == *"done Your fingerprints are removed. Your password unlocks this computer"*"rc=0" ]]'
+rm -rf "$T/fprint/bob"; echo right-index-finger > "$T/fingers"
+said=$(talk "" commands/security/fingerprint off)
+check "off: the last prints go, and both files are back as they were" '[[ "$(cat "$T/pam.d/sudo")" == "$sudo_pam" && "$(cat "$T/pam.d/polkit-1")" == "$polkit_pam" && "$said" == *"rc=0" ]]'
+said=$(talk "" commands/security/fingerprint off)
+check "off again: already off" '[[ "$said" == *"done Fingerprint unlock is already off"* ]]'
+check "--check: not without a finger" '! commands/security/fingerprint --check'
+reset; echo enroll-duplicate > "$T/enroll"
+said=$(talk "" commands/security/fingerprint on)
+check "a finger already known: exit 4, in words" '[[ "$said" == *"That finger is already known. Try another finger."*"rc=4" ]] && ! grep -q takumi-fingerprint "$T/pam.d/sudo"'
+reset; echo hang > "$T/enroll"
+said=$(talk "" commands/security/fingerprint on)
+check "nobody touches the sensor: exit 3, nothing saved" '[[ "$said" == *"Nothing was saved: the sensor was not touched for a while."*"rc=3" && ! -s "$T/fingers" ]]'
+reset; touch "$T/busy"
+said=$(talk "" commands/security/fingerprint on)
+check "another program has the reader: exit 4, in words" '[[ "$said" == *"The sensor is in use by something else. Try again in a moment."*"rc=4" ]]'
+reset; printf '%s\n' '#%PAM-1.0' 'auth required pam_unix.so' > "$T/pam.d/sudo"
+FAKE_ROOT=1 commands/security/fingerprint --root on >/dev/null 2>&1
+check "a PAM file without a system-auth line is left as it is" '[[ "$(cat "$T/pam.d/sudo")" == "$(printf "%s\n" "#%PAM-1.0" "auth required pam_unix.so")" ]] && grep -q takumi-fingerprint "$T/pam.d/polkit-1"'
+
+reset; mv "$T/pam.d/polkit-1" "$T/vendor-pam/polkit-1"
+FAKE_ROOT=1 commands/security/fingerprint --root on >/dev/null
+check "polkit's file kept by its package in /usr/lib/pam.d: a copy with the lines in /etc/pam.d, PAM's first look" \
+  '[[ "$(sed -n 3p "$T/pam.d/polkit-1")" == "# takumi-fingerprint: begin"* && "$(cat "$T/vendor-pam/polkit-1")" == "$polkit_pam" ]]'
+FAKE_ROOT=1 commands/security/fingerprint --root off >/dev/null
+check "...and off takes the copy away again" '[[ ! -e "$T/pam.d/polkit-1" && "$(cat "$T/pam.d/sudo")" == "$sudo_pam" ]]'
+
+# --- takumi security secure-boot and its rows
+reset; rm -rf "$T/efivars"
+said=$(talk "" commands/security/secure-boot)
+check "no UEFI: said plainly, no row" '[[ "$said" == *"This computer starts the old way (BIOS), which has no Secure Boot."*"rc=1" && -z "$(rows "secure boot")" ]]'
+mkdir -p "$T/efivars"
+said=$(talk "" commands/security/secure-boot)
+check "firmware without Secure Boot: said plainly" '[[ "$said" == *"This computer'"'"'s firmware has no Secure Boot."*"rc=1" ]]'
+reset
+said=$(talk "" commands/security/secure-boot)
+check "on: said in words, nothing changed" '[[ "$(said_lines "$said")" == "done Secure Boot is on: this computer starts only what its own keys signed, and Takumi signs every new system|rc=0|" ]] && ! grep -q "^sbctl" "$CALLS"'
+check "on: the row says so and asks nothing" '[[ "$(rows "secure boot" | jq -c "[.title, .glyph, .risk]")" == "[\"Secure Boot is on\",\"shield\",null]" ]]'
+efivar SecureBoot 0; efivar SetupMode 1
+check "ready for keys: the row offers it, and asks first" '[[ "$(rows secure | jq -c "[.title, .subtitle, .risk, .converse]")" == "[\"Turn on Secure Boot\",\"The firmware is ready for this computer'"'"'s own keys\",2,true]" ]]'
+said=$(talk 'no\n' commands/security/secure-boot)
+check "ready for keys, and you say no: nothing changed" '[[ "$said" == *"confirm Make this computer'"'"'s own keys and sign Takumi with them?"*"Nothing changed."*"rc=1" ]] && ! grep -q "^sbctl" "$CALLS"'
+said=$(talk 'yes\nno\n' commands/security/secure-boot)
+check "ready for keys: the conversation ($(said_lines "$said"))" \
+  '[[ "$(said_lines "$said")" == "note The firmware is ready for this computer'"'"'s own keys. Microsoft'"'"'s stay, so graphics cards that need them keep working|confirm Make this computer'"'"'s own keys and sign Takumi with them?|note Making the keys and signing Takumi…|confirm The keys are in place. Restart now?|done The keys are in place. Secure Boot is on from the next start; if the firmware still says it is off, turn it on there.|rc=0|" ]]'
+check "the password is asked in the Core with a reason" 'grep -q "^why Setting up Secure Boot needs your password$" "$CALLS"'
+check "keys made, then systemd-boot and fwupd signed beside themselves and kept in sbctl's list" \
+  'grep -q "^sbctl create-keys$" "$CALLS" && grep -q "^sbctl sign -s -o $T/usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed $T/usr/lib/systemd/boot/efi/systemd-bootx64.efi$" "$CALLS" && grep -q "^sbctl sign -s -o $T/usr/lib/fwupd/efi/fwupdx64.efi.signed $T/usr/lib/fwupd/efi/fwupdx64.efi$" "$CALLS"'
+check "systemd-boot on the boot partition and every room's kernel signed where they are" \
+  'grep -q "^sbctl sign $T/esp/EFI/systemd/systemd-bootx64.efi$" "$CALLS" && grep -q "^sbctl sign $T/esp/EFI/BOOT/BOOTX64.EFI$" "$CALLS" && grep -q "^sbctl sign $T/esp/takumi/20261108-093000/linux$" "$CALLS" && grep -q "^sbctl sign $T/esp/takumi/20261101-201512/linux$" "$CALLS"'
+check "the keys go in last, with Microsoft's" '[[ "$(grep "^sbctl" "$CALLS" | tail -n 1)" == "sbctl enroll-keys --microsoft --ignore-immutable" ]]'
+check "firmware updates start fwupd's signed program, the rest of fwupd.conf kept" \
+  '[[ "$(cat "$T/fwupd.conf")" == "$(printf "%s\n" "[fwupd]" "DisabledPlugins=test" "" "[redfish]" "IpmiDisableCreateUser=False" "" "[uefi_capsule]" "DisableShimForSecureBoot=true")" ]] && grep -q "^systemctl try-restart fwupd.service$" "$CALLS"'
+printf '%s\n' "[uefi_capsule]" "DisableShimForSecureBoot=false" "EnableGrubChainLoad=false" "" "[fwupd]" "X=1" > "$T/fwupd.conf"
+(. lib/security.sh; security_fwupd_own_keys; security_fwupd_own_keys)
+check "a uefi_capsule section already there: changed in place, once" \
+  '[[ "$(cat "$T/fwupd.conf")" == "$(printf "%s\n" "[uefi_capsule]" "DisableShimForSecureBoot=true" "EnableGrubChainLoad=false" "" "[fwupd]" "X=1")" ]]'
+printf 'W\000i\000n\000d\000o\000w\000s\000 \000B\000o\000o\000t\000 \000M\000a\000n\000a\000g\000e\000r\000' > "$T/efivars/Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+said=$(talk 'no\n' commands/security/secure-boot)
+check "beside Windows: BitLocker's recovery key is mentioned first" '[[ "$(head -n 1 <<< "$said")" == "note The firmware is ready for new keys. Windows keeps starting; if it uses BitLocker, it asks for its recovery key once" ]]'
+touch "$T/enroll-refused"; : > "$CALLS"
+said=$(talk 'yes\n' commands/security/secure-boot)
+check "the firmware refuses the keys: said plainly" '[[ "$said" == *"The firmware refused the keys. Takumi is signed, but Secure Boot stays off."*"rc=1" ]]'
+reset; efivar SecureBoot 0
+check "off: the row says how" '[[ "$(rows "secure boot" | jq -c "[.title, .subtitle]")" == "[\"Turn on Secure Boot\",\"Off · Enter shows how\"]" ]]'
+said=$(talk 'yes\n' commands/security/secure-boot)
+check "off: how to reach setup mode, then the firmware's settings" \
+  '[[ "$(said_lines "$said")" == "note In the firmware settings, under Secure Boot, choose Reset to Setup Mode or Clear All Keys, keep Secure Boot on, then come back here|confirm Restart into the firmware settings now?|done Restarting into the firmware settings|rc=0|" ]] && grep -q "^systemctl reboot --firmware-setup$" "$CALLS"'
+: > "$CALLS"
+said=$(talk 'no\n' commands/security/secure-boot)
+check "off, and you say no: nothing changed" '[[ "$said" == *"Nothing changed. Secure Boot is off."*"rc=1" ]] && ! grep -q "^systemctl" "$CALLS"'
+
+# --- takumi disk tpm and its rows
+reset
+check "off: the row offers it" '[[ "$(rows tpm | jq -c "[.title, .glyph, .risk, .run]")" == "[\"Open the disk by itself\",\"chip\",2,[\"takumi\",\"disk\",\"tpm\",\"on\"]]" ]]'
+check "the state in words" '[[ "$(commands/disk/tpm)" == "The disk asks for your password when this computer starts" ]]'
+said=$(talk "$pw\n" commands/disk/tpm on)
+check "on: the conversation ($(said_lines "$said"))" \
+  '[[ "$(said_lines "$said")" == "note The disk opens by itself on this computer unless someone changes how it starts; your password and recovery code still work|secret Your password|note Sealing a key to the chip and getting the start ready…|done The disk opens by itself on this computer now. The login screen asks for your password|rc=0|" ]]'
+check "a key sealed to the chip against Secure Boot (PCR 7), the password from a pipe" \
+  'grep -q "^systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs=7 --unlock-key-file=/dev/fd/[0-9]* /dev/vda2$" "$CALLS" && [[ "$(jq -c "[to_entries[] | select(.value.type == \"systemd-tpm2\") | .value.keyslots]" "$T/tokens.json")" == "[[\"3\"]]" ]]'
+check "the password's slot and the recovery code's stay" '[[ "$(cat "$T/slots/0")" == "$pw" && "$(cat "$T/slots/1")" == "$code" && "$(cat "$T/slots/2")" == "${code//-/}" ]]'
+check "the initramfs asks the chip first, every option kept" '[[ "$(cat "$T/cmdline")" == "rd.luks.name=1111-2222=takumi root=/dev/mapper/takumi rw quiet splash rd.luks.options=1111-2222=tpm2-device=auto" ]]'
+check "the login screen asks: no session opens by itself" '! grep -q initial_session "$T/greetd.toml" && grep -q "^\[default_session\]$" "$T/greetd.toml"'
+check "the boot menu's editor is off" '[[ "$(cat "$T/esp/loader/loader.conf")" == "$(printf "%s\n" "default takumi-20261108-093000.conf" "timeout 0" "editor no")" ]]'
+check "the initramfs and this room's entry are made again" 'grep -q "^mkinitcpio -P$" "$CALLS" && grep -q "^takumi room kernel-sync$" "$CALLS"'
+check "no password in any command's arguments" 'no_secret'
+check "on: the row and the words say so" '[[ "$(rows tpm | jq -c "[.title, .run]")" == "[\"The disk opens by itself\",[\"takumi\",\"disk\",\"tpm\",\"off\"]]" && "$(commands/disk/tpm)" == "The disk opens by itself when this computer starts" ]]'
+said=$(talk "$pw\n" commands/disk/tpm on)
+check "on again: one sealed key, one option" '[[ "$said" == *"rc=0" && "$(jq -c "[to_entries[] | select(.value.type == \"systemd-tpm2\")] | length" "$T/tokens.json")" == 1 && $(grep -o "tpm2-device=auto" "$T/cmdline" | wc -l) -eq 1 && ! -e "$T/slots/3" ]]'
+: > "$CALLS"
+said=$(talk "$pw\n" commands/disk/tpm off)
+check "off: the chip's key and the option go, the one-password start comes back" \
+  '[[ "$said" == *"done The disk asks for your password at every start again"*"rc=0" ]] && [[ "$(jq -c "[to_entries[] | select(.value.type == \"systemd-tpm2\")] | length" "$T/tokens.json")" == 0 && "$(cat "$T/cmdline")" == "rd.luks.name=1111-2222=takumi root=/dev/mapper/takumi rw quiet splash" && "$(cat "$T/greetd.toml")" == "$greetd" ]] && grep -q "^takumi room kernel-sync$" "$CALLS"'
+check "off: the password's slot and the recovery code's stay" '[[ "$(ls "$T/slots" | tr "\n" " ")" == "0 1 2 " && "$(cat "$T/slots/0")" == "$pw" ]] && no_secret'
+reset; efivar SecureBoot 0
+said=$(talk "$pw\n" commands/disk/tpm on)
+check "Secure Boot off: refused, in words, before any password" '[[ "$(said_lines "$said")" == "Turn on Secure Boot first: without it, anyone could start this computer from a USB stick and the chip would open the disk for them.|rc=1|" ]] && ! grep -q "systemd-cryptenroll" "$CALLS"'
+reset; rm -rf "$T/tpm/tpm0"
+said=$(talk "$pw\n" commands/disk/tpm on)
+check "no chip: said plainly, and no row" '[[ "$said" == *"This computer has no security chip (TPM), so the disk asks for your password at every start."*"rc=1" && -z "$(rows tpm)" ]]'
+reset; echo 1 > "$T/tpm/tpm0/tpm_version_major"
+said=$(talk "$pw\n" commands/disk/tpm on)
+check "an old chip (TPM 1.2): said plainly" '[[ "$said" == *"TPM 1.2"*"rc=1" ]]'
+reset; touch "$T/unencrypted"
+said=$(talk "$pw\n" commands/disk/tpm on)
+check "a disk that is not encrypted: said plainly, and no row" '[[ "$said" == *"This computer'"'"'s disk is not encrypted, so there is nothing for the chip to open."*"rc=1" && -z "$(rows tpm)" ]]'
+reset
+said=$(talk 'a\nb\nc\n' commands/disk/tpm on)
+check "three wrong passwords: exit 3, nothing sealed" '[[ "$said" == *"rc=3" ]] && ! grep -q "systemd-cryptenroll" "$CALLS" && [[ "$(cat "$T/greetd.toml")" == "$greetd" ]]'
+reset; printf '%s' "older disk pw" > "$T/slots/0"
+said=$(talk "$pw\n" commands/disk/tpm on)
+check "the disk opens with another password: said, and what to do" '[[ "$said" == *"The disk opens with a different password. Change your password first, then try again."*"rc=3" ]]'
+reset; touch "$T/no-tpm-libs"
+said=$(talk "$pw\n" commands/disk/tpm on)
+check "the chip's software missing: named, and nothing changed" '[[ "$said" == *"(tpm2-tss)"*"rc=1" && "$(cat "$T/greetd.toml")" == "$greetd" ]] && ! grep -q "systemd-cryptenroll" "$CALLS"'
+reset; touch "$T/tpm-fails"
+said=$(talk "$pw\n" commands/disk/tpm on)
+check "the chip refuses: the one-password start comes back" '[[ "$said" == *"The chip could not take a key. The disk still asks for your password."*"rc=1" && "$(cat "$T/greetd.toml")" == "$greetd" && "$(cat "$T/cmdline")" != *tpm2* ]]'
+
+# --- The install step and the Lock's file
+check "the install step puts the Lock's finger file in place and keeps sudo's and polkit's lines current" \
+  'grep -q "install -Dm644 \"\$TAKUMI_PATH/default/pam/takumi-lock-finger\" /etc/pam.d/takumi-lock-finger" install/steps/27-security.sh && grep -q "security_finger_pam on" install/steps/27-security.sh'
+check "the Lock's finger file asks fprintd and nothing else" '[[ "$(grep -v "^#" default/pam/takumi-lock-finger)" == "auth required pam_fprintd.so max-tries=3 timeout=-1" ]]'
+check "the Lock's password file never waits for the sensor" '! grep -q fprintd default/pam/takumi-lock'
+check "the Lock's password also opens the login keyring, after the login checks" '[[ "$(grep -v "^#" default/pam/takumi-lock)" == "$(printf "%s\n" "auth include login" "auth optional pam_gnome_keyring.so")" ]]'
+check "the install step adds the keyring to greetd's file and sets faillock" 'grep -q "security_keyring_pam on" install/steps/27-security.sh && grep -q "security_faillock" install/steps/27-security.sh'
+check "the Lock says how long it waits after ten wrong passwords" 'grep -q "minutes\\? left to unlock" shell/Lock/Lock.qml && grep -q "failText: root.lockout" shell/Lock/Lock.qml && grep -q "face.failText || \"Try again\"" shell/Parts/LockFace.qml'
+
+echo "   $(grep -c '^check ' "$0") security checks against fake sudo, cryptsetup, fprintd and sbctl"
+exit $status

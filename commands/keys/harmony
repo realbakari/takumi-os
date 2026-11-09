@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Turn the universal Command key on or off, or swap Alt and Super on a PC keyboard
+usage: <on|off|show|swap [on|off]>
+example: takumi keys harmony off
+example: takumi keys harmony swap on
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+# Harmony is keyd's file, /etc/keyd/default.conf (docs/harmony-keys.md): off moves it aside, on puts Takumi's
+# back. swap trades the left Alt and the Windows key, for a PC keyboard whose Alt sits where a Mac's Command key
+# does: with Harmony on, Alt becomes the Command key and the Windows key Alt; with it off, the two keys only trade
+# places. The swap is a marked block in the same file (lib/keys.sh), and lasts through Harmony going off and on.
+# Both need your password, asked in the Core. Exit status: 0 done · 2 usage · 3 no password · 4 keyd is missing.
+self=$(readlink -f "$0")
+for l in /usr/share/takumi/lib "$(dirname "$self")/../../lib"; do [[ -f "$l/keys.sh" ]] && { . "$l/core.sh"; . "$l/keys.sh"; break; }; done
+declare -F keys_swap_with >/dev/null && declare -F core_sudo >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+conf=${TAKUMI_KEYD_CONF:-/etc/keyd/default.conf}
+src=${TAKUMI_KEYD_SOURCE:-/usr/share/takumi/default/keyd/default.conf}
+[[ -f "$src" ]] || src="$(dirname "$self")/../../default/keyd/default.conf"
+usage() { echo "usage: takumi keys harmony <on|off|show|swap [on|off]>" >&2; exit 2; }
+harmony_on() { [[ -f "$conf" ]] && grep -qE '^(left|right)meta = (layer|oneshot)\(cmd\)$|^leftalt = layer\(cmd\)$' "$conf"; }
+only_swap="# Made by takumi keys harmony: Harmony is off, so this file holds the Alt and Super swap alone."
+
+# put <text|-> <why>: keyd's file becomes <text> ("-" removes it, keeping Harmony's aside), and keyd reads it.
+put() {
+  local tmp="" rc=0
+  command -v keyd >/dev/null || core_fail 4 "keyd, which makes these keys, is not installed"
+  if [[ "$1" != - ]]; then tmp=$(mktemp); printf '%s\n' "$1" > "$tmp"; fi
+  if [[ -n "${TAKUMI_KEYD_CONF:-}" ]]; then   # the tests: a file of their own, no root
+    if [[ -n "$tmp" ]]; then cp "$tmp" "$conf"; else mv -f "$conf" "$conf.off" 2>/dev/null || true; fi
+    keyd reload >/dev/null 2>&1 || true
+  elif [[ -n "$tmp" ]]; then
+    core_sudo "$2" sh -c 'install -m 644 "$1" "$2" && systemctl restart keyd' _ "$tmp" "$conf" >/dev/null || rc=$?   # /etc/keyd/default.conf
+  else
+    core_sudo "$2" sh -c 'mv -f "$1" "$1.off" 2>/dev/null; systemctl restart keyd' _ "$conf" >/dev/null || rc=$?   # /etc/keyd/default.conf, /etc/keyd/default.conf.off
+  fi
+  rm -f "$tmp"
+  (( rc == 0 )) || core_fail 3 "Nothing changed: the keyboard's settings need your password"
+}
+
+case "${1:-show}" in
+  show)
+    if harmony_on; then echo "Harmony is on"; else echo "Harmony is off"; fi
+    if keys_swapped "$conf"; then echo "Alt and Super are swapped"; fi ;;
+  on)
+    [[ $# -eq 1 ]] || usage
+    text=$(cat "$src")
+    keys_swapped "$conf" && text=$(keys_swap_with <<< "$text")
+    core_note "Turning Harmony on…"
+    put "$text" "Turning Harmony on needs your password"
+    core_done "Harmony on: Super is the Command key" ;;
+  off)
+    [[ $# -eq 1 ]] || usage
+    core_note "Turning Harmony off…"
+    if keys_swapped "$conf"; then put "$(printf '%s\n' "$only_swap" "[ids]" "*" "" "[main]" | keys_swap_with)" "Turning Harmony off needs your password"
+    else put - "Turning Harmony off needs your password"; fi
+    core_done "Harmony off: Super is the Windows key again" ;;
+  swap)
+    [[ $# -le 2 ]] || usage
+    want=${2:-}
+    case "$want" in
+      on | off) ;;
+      "") if keys_swapped "$conf"; then want=off; else want=on; fi ;;
+      *) usage ;;
+    esac
+    if [[ $want == on ]]; then
+      if [[ -f "$conf" ]]; then text=$(keys_swap_with < "$conf")
+      else text=$(printf '%s\n' "$only_swap" "[ids]" "*" "" "[main]" | keys_swap_with); fi
+      core_note "Swapping Alt and Super…"
+      put "$text" "Swapping Alt and Super needs your password"
+      if harmony_on; then core_done "Alt and Super swapped: the key beside the space bar is the Command key"
+      else core_done "Alt and Super swapped"; fi
+    else
+      keys_swapped "$conf" || { core_done "Alt and Super are where they were"; exit 0; }
+      core_note "Putting Alt and Super back…"
+      if [[ "$(head -n 1 "$conf")" == "$only_swap" ]]; then put - "Putting Alt and Super back needs your password"
+      else put "$(keys_swap_without < "$conf")" "Putting Alt and Super back needs your password"; fi
+      core_done "Alt and Super are where they were"
+    fi ;;
+  *) usage ;;
+esac

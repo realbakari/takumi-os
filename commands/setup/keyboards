@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Every keyboard layout and variant, one JSON line each, by name
+risk: 0
+hidden: yes
+ABOUT
+# {"layout":"fr","variant":"","name":"French"}; variants carry their layout's name in theirs.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib/setup.sh "$here/../../lib/setup.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+[[ -r "$TAKUMI_XKB_RULES" ]] || { echo "no keyboard list at $TAKUMI_XKB_RULES" >&2; exit 1; }
+awk '
+  /^! / { sect = $2; next }
+  sect == "layout"  && NF >= 2 { code = $1; $1 = ""; sub(/^ +/, ""); printf "%s\t\t%s\n", code, $0 }
+  sect == "variant" && NF >= 3 { v = $1; l = $2; sub(/:$/, "", l); $1 = ""; $2 = ""; sub(/^ +/, ""); printf "%s\t%s\t%s\n", l, v, $0 }
+' "$TAKUMI_XKB_RULES" | sort -t "$(printf '\t')" -k3,3 -f \
+  | jq -cR 'split("\t") | {layout: .[0], variant: .[1], name: .[2]}'

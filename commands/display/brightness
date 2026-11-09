@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set or step brightness, the built-in screen's and external monitors' (DDC/CI): 5% steps, 1% with --fine
+usage: <0-100|up|down> [--fine]
+example: takumi display brightness 30
+example: takumi display brightness up --fine
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/display.sh" ]] && { . "$l/display.sh"; break; }; done
+declare -F display_ddc_set >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# The brightness keys run this, Alt with them for --fine (docs/display.md).
+want=${1:-}; how=${2:-}
+usage() { echo "usage: takumi display brightness <0-100|up|down> [--fine]" >&2; exit 2; }
+[[ "$want" =~ ^(up|down|[0-9]{1,3})$ ]] || usage
+case "$how" in '') step=5 ;; --fine) [[ "$want" == up || "$want" == down ]] || usage; step=1 ;; *) usage ;; esac
+[[ -z "${3:-}" ]] || usage
+[[ "$want" =~ ^[0-9]+$ ]] && (( want > 100 )) && want=100
+pct=""
+if compgen -G "${TAKUMI_BACKLIGHT:-/sys/class/backlight}/*" >/dev/null && command -v brightnessctl >/dev/null; then
+  case "$want" in up) brightnessctl -q set "$step%+" ;; down) brightnessctl -q set "$step%-" ;; *) brightnessctl -q set "$want%" ;; esac
+  pct=$(( $(brightnessctl get) * 100 / $(brightnessctl max) ))
+fi
+# External monitors (docs/display.md): with a built-in screen they follow it, in the background; without
+# one, the first monitor's own value is the one shown. One change at a time: a held key does not pile up.
+if [[ -n "$(display_ddc_displays)" ]]; then
+  lock="$display_run/ddc.lock"
+  if mkdir "$lock" 2>/dev/null; then
+    if [[ -n "$pct" ]]; then
+      ( trap 'rmdir "$lock"' EXIT; display_ddc_set "$pct" ) >/dev/null 2>&1 &
+    else
+      trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+      display_ddc_set "$want" "$step"; pct=$(display_ddc_get)
+    fi
+  fi
+fi
+[[ -n "$pct" ]] && takumi notice sun Brightness "" "$pct"
+exit 0

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: When the screen locks or the computer sleeps after no use, on battery and on power
+usage: <lock|sleep> [minutes] [battery|power]
+example: takumi power when lock 15
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; . "$l/core.sh"; break; }; done
+declare -F power_save >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+what=${1:-}; mins=${2:-}; src=${3:-$(power_source)}
+case "$what" in lock|sleep) ;; *) echo "usage: takumi power when <lock|sleep> [minutes] [battery|power]" >&2; exit 2 ;; esac
+case "$src" in battery|power) ;; *) echo "usage: takumi power when <lock|sleep> [minutes] [battery|power]" >&2; exit 2 ;; esac
+verb=$([[ $what == lock ]] && echo "Lock the screen" || echo "Sleep")
+where=$([[ $src == battery ]] && echo "on battery" || echo "when plugged in")
+# Without minutes it is a conversation: ask until the answer is a number.
+while ! [[ "$mins" =~ ^[0-9]+$ ]]; do
+  [[ -z "$mins" ]] || core_wrong "That is not a number of minutes"
+  core_ask mins "Minutes $where, 0 for never" || core_fail 3 "Nothing changed"
+done
+power_save "$src.$what" "$mins"
+systemctl --user restart takumi-idle.service >/dev/null 2>&1 || true
+if (( mins == 0 )); then said="$verb: never $where"; else said="$verb after $mins min $where"; fi
+core_done "$said"

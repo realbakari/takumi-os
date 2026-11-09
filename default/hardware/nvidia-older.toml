@@ -1,0 +1,13 @@
+# NVIDIA Kepler and older (before the GTX 750): no NVIDIA driver Arch carries supports them. Nothing to set
+# up; the note says so.
+title = "Older NVIDIA graphics"
+part = "graphics"
+works = "partly"
+says = "open nouveau driver, slow for games"
+
+[match]
+pci = ["10de:0???", "10de:10??", "10de:11??", "10de:12??"]
+pci_class = ["03??"]
+
+[apply]
+note = "NVIDIA no longer makes a driver for this card that Arch carries. The open nouveau driver draws the desktop and plays video; 3D is slow."

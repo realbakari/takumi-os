@@ -1,0 +1,10 @@
+[Unit]
+Description=Takumi: open USB drives and memory cards as they are plugged in, and say so in the Core
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# Follows udisksctl monitor; when udisks restarts, the watch ends and starts again (docs/drives.md).
+ExecStart=/usr/bin/takumi drive watch
+Restart=on-failure
+RestartSec=5

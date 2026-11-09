@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Open OpenCode, an open-source coding agent, in a terminal in ~/Work
+risk: 1
+converse: yes
+title: Open OpenCode
+words: opencode open source coding agent ai assistant terminal programming
+glyph: term
+ABOUT
+set -euo pipefail
+exec takumi agent open opencode "$@"

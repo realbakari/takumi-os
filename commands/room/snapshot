@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Save a restore point: a copy of this system you can start again, named by the date or by you
+usage: [name]
+example: takumi room snapshot
+example: takumi room snapshot "Before trying Docker"
+risk: 1
+sudo: yes
+converse: yes
+title: Save a restore point
+words: restore point snapshot save system backup system checkpoint before changing undo
+glyph: history
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/rooms.sh" ]] && { . "$l/rooms.sh"; . "$l/core.sh"; break; }; done
+declare -F rooms_current >/dev/null && declare -F core_done >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+# Two ways in (docs/atomic-rooms.md):
+#   takumi room snapshot [name]            a person: a restore point, a conversation in the Core. It asks for the
+#                                          password and runs the line below as root.
+#   takumi room snapshot <room> [--point [name]]   root: copy the running room into @rooms/<room>
+#                                          (YYYYMMDD-HHMMSS). takumi update makes the room an update is built
+#                                          in this way (status building); with --point it is a restore point
+#                                          (status good, point=yes, and its name).
+
+if [[ "${1:-}" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
+  [[ $EUID -eq 0 ]] || { echo "run via sudo" >&2; exit 1; }
+  name=$1; shift
+  point=no; label=""
+  if [[ "${1:-}" == --point ]]; then point=yes; shift; label=$(rooms_point_name "$*"); fi
+  rooms_mount_top
+  cur=$(rooms_current); [[ -n "$cur" ]] || { echo "not running in a room" >&2; exit 1; }
+  [[ ! -e "$(rooms_path "$name")" ]] || { echo "room $name already exists" >&2; exit 1; }
+  btrfs subvolume snapshot "$(rooms_path "$cur")" "$(rooms_path "$name")" >/dev/null
+  state_set "$name" parent "$cur"
+  state_set "$name" created "$(date -u +%FT%TZ)"
+  if [[ $point == yes ]]; then
+    # A copy of the room that is running, so it starts as this one does: good from the start. Its boot entry is
+    # written when it is chosen (takumi room use), so a restore point takes no room on the boot partition.
+    state_set "$name" point yes
+    [[ -n "$label" ]] && state_set "$name" name "$label"
+    state_set "$name" status good
+    echo "restore point $name copied from $cur"
+  else
+    state_set "$name" status building
+    echo "room $name copied from $cur"
+  fi
+  exit 0
+fi
+
+# A person's restore point.
+[[ -n "$(rooms_current)" ]] || core_fail 1 "This computer is not using rooms, so a restore point cannot be saved here."
+label=$(rooms_point_name "$*")
+if [[ -z "$label" ]] && { core_in_core || core_at_tty; }; then
+  core_ask label "Name it, or Enter to name it by the date" || label=""
+  label=$(rooms_point_name "$label")
+fi
+room=$(date -u +%Y%m%d-%H%M%S)
+core_note "Saving this system as it is now. Your files are not part of it: they stay as they are whatever you start."
+# Writes the new subvolume @rooms/<room> beside the running room and its state in /var/lib/takumi/state/<room>.
+if ! core_sudo "Saving a restore point needs your password" takumi room snapshot "$room" --point "$label" >/dev/null; then
+  core_fail 1 "The restore point could not be saved; nothing changed."
+fi
+said=$(rooms_label "$room"); said=${said%% (*}; [[ -n "$label" ]] && said=$label
+core_done "Restore point saved: $said · \"Go back to the previous system\" starts it"
+exit 0

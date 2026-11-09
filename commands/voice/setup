@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Get the speech model dictation needs, sized to this computer's memory; your voice never leaves the computer
+usage: [base|small|large-v3-turbo-q5_0]
+example: takumi voice setup
+example: takumi voice setup small
+risk: 1
+sudo: yes
+title: Set up dictation
+words: dictation dictate voice speech typing text transcribe model download setup set up microphone
+glyph: mic
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/voice.sh" ]] && { . "$l/voice.sh"; . "$l/core.sh"; break; }; done
+declare -F voice_pick >/dev/null && declare -F core_confirm >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh, docs/dictation.md). It installs whisper-cpp when the computer lacks it (one question,
+# then the password in the Core), then asks before downloading the speech model chosen by the computer's memory,
+# saying its size, into ~/.local/share/takumi/voice; a download that stops carries on from where it stopped next
+# time. Exit status: 0 ready · 1 it could not be set up · 2 not a model · 3 an answer was needed and none came, or
+# it was no. The last line says it in words.
+name=${1:-$(voice_pick)}
+[[ -n "$(voice_field "$name" 1)" ]] || core_fail 2 "usage: takumi voice setup [$(voice_models | cut -f 1 | paste -s -d '|' -)]"
+command -v curl >/dev/null || core_fail 1 "Setting up dictation needs curl"
+trap 'exit 143' TERM INT
+
+if ! command -v whisper-cli >/dev/null; then
+  pacman -Si whisper-cpp >/dev/null 2>&1 || core_fail 1 "Dictation needs whisper-cpp, which this computer's software sources do not carry"
+  core_confirm "Dictation needs whisper-cpp, which turns speech into text on this computer. Install it?" || core_fail 3 "Nothing changed"
+  core_note "Installing whisper-cpp…"
+  log="$HOME/.local/state/takumi/install.log"; mkdir -p "${log%/*}"
+  # sudo: pacman installs the whisper-cpp package, /usr/bin/whisper-cli and its libraries under /usr/lib
+  core_sudo "Installing whisper-cpp needs your password" pacman -S --needed --noconfirm whisper-cpp >> "$log" 2>&1 ||
+    core_fail 1 "whisper-cpp did not install. What happened is in $log"
+  command -v whisper-cli >/dev/null || core_fail 1 "whisper-cpp did not install. What happened is in $log"
+fi
+
+file="$voice_dir/ggml-$name.bin"
+if [[ ! -s "$file" ]]; then
+  mb=$(voice_mb "$name")
+  core_confirm "Download the speech model, $mb MB? It stays on this computer, and so does your voice." || core_fail 3 "Nothing was downloaded"
+  mkdir -p "$voice_dir"
+  free=$(df -Pk "$voice_dir" 2>/dev/null | awk 'NR == 2 { print $4 }' || true)
+  (( ${free:-0} > mb * 1100 )) || core_fail 1 "There is not enough free space: the model needs $mb MB"
+  part="$file.part"
+  core_note "Downloading the speech model…"
+  curl -q -fsSL --retry 3 -C - -o "$part" "$voice_url/ggml-$name.bin" </dev/null &
+  dl=$!
+  trap 'kill "$dl" 2>/dev/null || true' EXIT
+  total=$(( $(voice_field "$name" 2) * 1048576 )) shown=-1
+  while kill -0 "$dl" 2>/dev/null; do
+    have=0; [[ -f "$part" ]] && have=$(wc -c < "$part" | tr -d ' ')
+    pct=$(( have * 100 / total )); (( pct <= 99 )) || pct=99
+    if (( pct != shown )); then core_note "Downloading the speech model… $pct%"; shown=$pct; fi
+    sleep 1
+  done
+  rc=0; wait "$dl" || rc=$?
+  trap - EXIT
+  # A part already whole (the last try ended at its end) is refused by the server as a range: the sum decides.
+  [[ -s "$part" ]] || core_fail 1 "The download did not start. Is the computer online?"
+  core_note "Checking the download…"
+  if [[ "$(voice_sha1 "$part")" != "$(voice_field "$name" 3)" ]]; then
+    (( rc == 0 )) || core_fail 1 "The download stopped before the end. Try again and it carries on from there"
+    rm -f "$part"
+    core_fail 1 "The download was damaged. Try again"
+  fi
+  mv -f "$part" "$file"
+fi
+voice_save "$name"
+core_done "Dictation is ready: press Super+H, speak, then press it again"

@@ -1,0 +1,14 @@
+// Takumi: allowing a Thunderbolt or USB4 device (bolt's enroll and authorize) asks the password of an administrator
+// at the computer, in the Core (takumi hardware dock, docs/hardware.md). Such a device reaches the computer's
+// memory directly, so no program may allow one silently. Read before bolt's own rules (polkit reads the rules
+// files of /etc and /usr/share in the order of their names), which would let any administrator's program do it
+// without a word. The password is kept for five minutes, so a dock and the screen behind it ask once.
+// https://www.freedesktop.org/software/polkit/docs/latest/polkit.8.html
+polkit.addRule(function (action, subject) {
+    if (action.id == "org.freedesktop.bolt.enroll" || action.id == "org.freedesktop.bolt.authorize") {
+        if (subject.local && subject.active && subject.isInGroup("wheel")) {
+            return polkit.Result.AUTH_ADMIN_KEEP;
+        }
+        return polkit.Result.AUTH_ADMIN;
+    }
+});

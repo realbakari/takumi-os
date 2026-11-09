@@ -1,0 +1,34 @@
+# Nightfox: a fox's night: teal and soft blue
+# Colours after Nightfox by EdenEast (https://github.com/EdenEast/nightfox.nvim); phases by Takumi.
+
+[meta]
+name = "nightfox"
+mode = "dark"
+title = "Nightfox"
+about = "a fox's night: teal and soft blue"
+credit = "Nightfox by EdenEast (https://github.com/EdenEast/nightfox.nvim)"
+
+[palette]
+accent     = "#719cd6"
+background = "#192330"
+surface    = "#212e3f"
+foreground = "#cdcecf"
+muted      = "#738091"
+red        = "#c94f6d"
+yellow     = "#dbc074"
+green      = "#81b29a"
+cyan       = "#63cdcf"
+blue       = "#719cd6"
+magenta    = "#9d79d6"
+
+[phase.dawn]
+accent     = "#f4a261"
+
+[phase.dusk]
+accent     = "#e58565"
+
+[phase.night]
+accent     = "#856ab8"
+background = "#10171f"
+surface    = "#17202c"
+foreground = "#b7b9bc"

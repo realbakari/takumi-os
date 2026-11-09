@@ -1,0 +1,34 @@
+# Rosé Pine: soho vibes: rose and gold on aubergine
+# Colours after Rosé Pine (https://rosepinetheme.com); phases by Takumi.
+
+[meta]
+name = "rose-pine"
+mode = "dark"
+title = "Rosé Pine"
+about = "soho vibes: rose and gold on aubergine"
+credit = "Rosé Pine (https://rosepinetheme.com)"
+
+[palette]
+accent     = "#ebbcba"
+background = "#191724"
+surface    = "#1f1d2e"
+foreground = "#e0def4"
+muted      = "#6e6a86"
+red        = "#eb6f92"
+yellow     = "#f6c177"
+green      = "#31748f"
+cyan       = "#9ccfd8"
+blue       = "#31748f"
+magenta    = "#c4a7e7"
+
+[phase.dawn]
+accent     = "#f6c177"
+
+[phase.dusk]
+accent     = "#eb6f92"
+
+[phase.night]
+accent     = "#a58dc4"
+background = "#100f17"
+surface    = "#161420"
+foreground = "#c8c6db"

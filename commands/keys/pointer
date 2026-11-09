@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Natural scrolling, tap to click, the pointer's speed and how fast a held key repeats
+usage: [show] | natural [on|off] | tap [on|off] | speed <faster|slower> | repeat <faster|slower>
+example: takumi keys pointer natural off
+example: takumi keys pointer speed faster
+risk: 0
+ABOUT
+set -euo pipefail
+# Your choices go in ~/.config/niri/takumi/input.kdl, which Takumi's defaults.kdl includes and only this command
+# writes (lib/keys.sh, docs/laptop-keys.md). niri reads its config again when the file changes; asking it to load
+# the config at once makes the change feel instant. natural and tap without on or off switch over. Speed is
+# the touchpad's and the mouse's together, in eight steps; key repeat is how long a held key waits and how fast it
+# then repeats, in six. Exit status: 0 done · 2 usage · 4 already as fast or as slow as it goes.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/keys.sh" ]] && { . "$l/keys.sh"; break; }; done
+declare -F keys_pointer_load >/dev/null || { echo "takumi: the keyboard library is missing" >&2; exit 1; }
+usage() { echo "usage: takumi keys pointer [show] | natural [on|off] | tap [on|off] | speed <faster|slower> | repeat <faster|slower>" >&2; exit 2; }
+(( $# <= 2 )) || usage
+keys_pointer_load
+
+onoff() {  # <now yes|no> <word>: yes or no
+  case "$2" in on) echo yes ;; off) echo no ;; "") if [[ $1 == yes ]]; then echo no; else echo yes; fi ;; *) usage ;; esac
+}
+say() {  # <title> [detail]
+  takumi notice "${glyph:-pointer}" "$1" "${2:-}" >/dev/null 2>&1 || true
+  echo "$1"
+}
+apply() { keys_pointer_write; niri msg action load-config-file >/dev/null 2>&1 || true; }
+
+case "${1:-show}" in
+  show)
+    (( $# <= 1 )) || usage
+    if [[ $KEYS_NATURAL == yes ]]; then echo "Natural scrolling on"; else echo "Natural scrolling off"; fi
+    if [[ $KEYS_TAP == yes ]]; then echo "Tap to click on"; else echo "Tap to click off"; fi
+    echo "Pointer speed $(keys_place "$keys_speeds" "$KEYS_SPEED")"
+    echo "Key repeat $(keys_place "$keys_repeats" "$KEYS_DELAY/$KEYS_RATE")" ;;
+  natural)
+    KEYS_NATURAL=$(onoff "$KEYS_NATURAL" "${2:-}"); apply; glyph=touchpad
+    if [[ $KEYS_NATURAL == yes ]]; then say "Natural scrolling on" "the page follows your fingers"
+    else say "Natural scrolling off" "two fingers down scroll down the page"; fi ;;
+  tap)
+    KEYS_TAP=$(onoff "$KEYS_TAP" "${2:-}"); apply; glyph=touchpad
+    if [[ $KEYS_TAP == yes ]]; then say "Tap to click on"; else say "Tap to click off" "press the touchpad to click"; fi ;;
+  speed)
+    case "${2:-}" in faster) dir=1 ;; slower) dir=-1 ;; *) usage ;; esac
+    next=$(keys_step "$keys_speeds" "$KEYS_SPEED" "$dir")
+    if [[ -z "$next" ]]; then
+      if (( dir > 0 )); then echo "The pointer is as fast as it goes"; else echo "The pointer is as slow as it goes"; fi
+      exit 4
+    fi
+    KEYS_SPEED=$next; apply
+    say "Pointer speed $(keys_place "$keys_speeds" "$KEYS_SPEED")" "type pointer speed in the Core to change it again" ;;
+  repeat)
+    case "${2:-}" in faster) dir=1 ;; slower) dir=-1 ;; *) usage ;; esac
+    next=$(keys_step "$keys_repeats" "$KEYS_DELAY/$KEYS_RATE" "$dir")
+    if [[ -z "$next" ]]; then
+      if (( dir > 0 )); then echo "Key repeat is as fast as it goes"; else echo "Key repeat is as slow as it goes"; fi
+      exit 4
+    fi
+    KEYS_DELAY=${next%/*}; KEYS_RATE=${next#*/}; apply; glyph=keyboard
+    say "Key repeat $(keys_place "$keys_repeats" "$next")" "waits ${KEYS_DELAY} ms, then ${KEYS_RATE} a second" ;;
+  *) usage ;;
+esac

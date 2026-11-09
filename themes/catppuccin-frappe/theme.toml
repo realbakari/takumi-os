@@ -1,0 +1,34 @@
+# Catppuccin Frappé: muted pastels on slate
+# Colours after Catppuccin (https://catppuccin.com); phases by Takumi.
+
+[meta]
+name = "catppuccin-frappe"
+mode = "dark"
+title = "Catppuccin Frappé"
+about = "muted pastels on slate"
+credit = "Catppuccin (https://catppuccin.com)"
+
+[palette]
+accent     = "#ca9ee6"
+background = "#303446"
+surface    = "#383c51"
+foreground = "#c6d0f5"
+muted      = "#797e98"
+red        = "#e78284"
+yellow     = "#e5c890"
+green      = "#a6d189"
+cyan       = "#81c8be"
+blue       = "#8caaee"
+magenta    = "#f4b8e4"
+
+[phase.dawn]
+accent     = "#ef9f76"
+
+[phase.dusk]
+accent     = "#ea999c"
+
+[phase.night]
+accent     = "#a1a3d2"
+background = "#1f222e"
+surface    = "#272a39"
+foreground = "#b4bde0"

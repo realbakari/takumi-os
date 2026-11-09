@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Type text (an emoji) into the app you are in, and copy it
+usage: <text>
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+text=${1:?usage: takumi clipboard type <text>}
+printf '%s' "$text" | wl-copy
+# wtype reads its argument as text only under a UTF-8 locale, which a bare session may not have.
+if command -v wtype >/dev/null; then sleep 0.3; LC_ALL=C.UTF-8 wtype -- "$text"; else takumi notice edit "Copied $text" "paste it with Super+V" -1; fi

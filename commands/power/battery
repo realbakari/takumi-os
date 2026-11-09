@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Follow the battery: warn when low, sleep or hibernate before empty, change mode when plugged in or out
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# Run every two minutes by takumi-battery.timer. Each warning shows once per fall below its level.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; break; }; done
+declare -F power_battery >/dev/null || exit 0
+state="$power_run/takumi-battery"
+last_src="" last_level=100
+[[ -r "$state" ]] && read -r last_src last_level < "$state" || true
+src=$(power_source)
+if [[ "$src" != "$last_src" ]]; then
+  want=$(power_profile_for "$src")
+  [[ "$(power_profile_now)" == "$want" ]] || powerprofilesctl set "$want" >/dev/null 2>&1 || true
+  [[ -z "$last_src" ]] || systemctl --user restart takumi-idle.service >/dev/null 2>&1 || true
+fi
+level=100
+if line=$(power_battery) && [[ -n "$line" ]]; then
+  read -r cap status _ <<< "$line"
+  if [[ "$status" == discharging ]]; then
+    if (( cap <= 3 )); then
+      level=3; printf '%s %s\n' "$src" "$level" > "$state"
+      # With hibernation on, nothing is lost even when the battery runs out completely.
+      if power_hibernate_ready; then
+        takumi notice bolt "Hibernating" "the battery is empty; everything is kept" -1 5 >/dev/null 2>&1 || true
+        systemctl hibernate || systemctl suspend || true; exit 0
+      fi
+      takumi notice bolt "Going to sleep" "the battery is empty" -1 5 >/dev/null 2>&1 || true
+      systemctl suspend || true; exit 0
+    elif (( cap <= 5 )); then level=5
+      (( last_level > 5 )) && takumi notice bolt "Plug in now" "$cap% left; the computer sleeps at 3%" -1 10 >/dev/null 2>&1 || true
+    elif (( cap <= 15 )); then level=15
+      (( last_level > 15 )) && takumi notice bolt "Battery low" "$cap% left" -1 8 >/dev/null 2>&1 || true
+    fi
+  fi
+fi
+mkdir -p "$power_run"
+printf '%s %s\n' "$src" "$level" > "$state"

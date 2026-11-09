@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for the messages apps sent earlier as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# What apps said, newest first, from ~/.local/state/takumi/notices.jsonl (shell/Sources/Notices.qml writes
+# it). "earlier", "notifications", "messages" or "missed" lists them, more words narrow them; with the field
+# empty, today's last three show under the first week's rows. Enter copies a message (docs/palette.md).
+command -v jq >/dev/null || exit 0
+f="$HOME/.local/state/takumi/notices.jsonl"
+q=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'); rest=""; mode=""
+if [[ -z "$q" ]]; then mode=empty; fi
+for w in earlier notifications notices messages missed; do
+  [[ -n "$mode" ]] && break
+  if [[ "$q" == "$w "* ]]; then mode=topic; rest=${q#"$w "}; elif [[ ${#q} -ge 3 && "$w" == "$q"* ]]; then mode=topic; fi
+done
+[[ -n "$mode" ]] || exit 0
+if [[ ! -s "$f" ]]; then
+  [[ $mode == topic ]] && jq -cn '{id:"earlier:none", title:"Nothing earlier", subtitle:"Messages from apps show here after they leave the Core", glyph:"bell", kind:"Earlier", run:["true"], score:0.9}'
+  exit 0
+fi
+limit=40; [[ $mode == empty ]] && limit=3
+tail -n 200 "$f" | jq -c --arg rest "$rest" --arg mode "$mode" --argjson now "$(date +%s)" -s '
+  def day: strflocaltime("%Y-%m-%d");
+  def when: if (. | day) == ($now | day) then strflocaltime("%H:%M")
+            elif (. | day) == (($now - 86400) | day) then "Yesterday " + strflocaltime("%H:%M")
+            else strflocaltime("%d %b") | sub("^0"; "") end;
+  [ .[] | select(type == "object") ] | reverse
+  | map(select(($mode != "empty") or ((.ts // 0) | day) == ($now | day)))
+  | map(select($rest == "" or (((.app // "") + " " + (.summary // "") + " " + (.body // "")) | ascii_downcase | contains($rest))))
+  | to_entries[]
+  | .key as $i | .value
+  | (.app // "") as $app
+  | ((.body // "") | split("\n")[0] // "" | ltrimstr($app + " · ") | .[0:90]) as $line
+  | {id: ("earlier:" + ((.ts // 0) | tostring) + ":" + ($i | tostring)),
+     title: (if (.summary // "") != "" then .summary else (.app // "A message") end),
+     subtitle: ([$app, ((.ts // 0) | when), $line] | map(select(. != null and . != "")) | join(" · ")),
+     icon: (if (.icon // "") | startswith("/") then "" else (.icon // "") end), glyph: "bell", kind: "Earlier", steady: true,
+     keywords: "earlier notifications messages missed",
+     run: ["sh", "-c", "printf \"%s\" \"$1\" | wl-copy && takumi notice edit \"Copied the message\" \"\" -1", "_", (((.summary // "") + "\n" + (.body // "")) | ltrimstr("\n"))],
+     score: (0.95 - $i * 0.001)}' | head -n "$limit"
+if [[ $mode == topic ]]; then
+  jq -cn '{id:"earlier:clear", title:"Clear earlier messages", subtitle:"Forget what apps said so far", glyph:"cross", kind:"Earlier",
+    keywords:"earlier notifications messages clear", risk:1, run:["sh","-c",": > \"$HOME/.local/state/takumi/notices.jsonl\" && takumi notice check \"Earlier messages cleared\" \"\" -1"], score:0.2}'
+fi
+exit 0

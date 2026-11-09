@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+# Contract checks for the setup disc's commands (commands/setup/*, lib/setup.sh, docs/setup.md) and the
+# recovery code (commands/disk/recovery, lib/disk.sh, docs/encryption.md), against fake tools first in
+# PATH. Runs on bash 3.2 with jq.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+repo=$PWD
+status=0 checks=0
+ok()  { checks=$((checks + 1)); }
+bad() { echo "   FAIL: $*"; status=1; }
+t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
+mkdir -p "$t/bin" "$t/run" "$t/zoneinfo/Europe" "$t/efivars" "$t/power/BAT0" "$t/power/AC"
+export PATH="$t/bin:$repo/bin:$PATH" XDG_RUNTIME_DIR=$t/run CALLS=$t/calls SECRETS=$t/secrets T=$t
+: > "$CALLS"; : > "$SECRETS"
+fake() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$t/bin/$1"; chmod +x "$t/bin/$1"; }
+rec='printf "%s %s\n" "$(basename "$0")" "$*" >> "$CALLS"'
+
+# --- The places setup reads, faked.
+cat > "$t/evdev.lst" <<'L'
+! model
+  pc105           Generic 105-key PC
+! layout
+  us              English (US)
+  fr              French
+  de              German
+  ru              Russian
+! variant
+  intl            us: English (US, intl., with dead keys)
+  azerty          fr: French (AZERTY)
+! option
+  grp:alts_toggle Both Alt together
+L
+cat > "$t/kbd-model-map" <<'L'
+# consolelayout	xlayout	xmodel	xvariant	xoptions
+us	us	pc105+inet	-	terminate:ctrl_alt_bksp
+fr	fr	pc105	-	terminate:ctrl_alt_bksp
+de	de	pc105	-	terminate:ctrl_alt_bksp
+ru	ru	pc105	-	terminate:ctrl_alt_bksp
+L
+printf '# code\tname\nFR\tFrance\nUS\tUnited States\nDE\tGermany\n' > "$t/zoneinfo/iso3166.tab"
+printf '# comment\nFR\t+4852+00220\tEurope/Paris\nUS\t+404251-0740023\tAmerica/New_York\nUS\t+415100-0873900\tAmerica/Chicago\nDE\t+5230+01322\tEurope/Berlin\n' > "$t/zoneinfo/zone.tab"
+: > "$t/zoneinfo/Europe/Paris"
+printf '\007\000\000\000fr-FR\000' > "$t/efivars/PlatformLang-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+echo Battery > "$t/power/BAT0/type"; echo 64 > "$t/power/BAT0/capacity"; echo Discharging > "$t/power/BAT0/status"
+echo Mains > "$t/power/AC/type"
+mkdir -p "$t/i18n"
+printf 'en_US.UTF-8/UTF-8 \\\nfr_FR.UTF-8/UTF-8 \\\nde_DE.UTF-8/UTF-8 \\\nhi_IN/UTF-8 \\\nfr_FR/ISO-8859-1 \\\n' > "$t/i18n/SUPPORTED"
+export TAKUMI_I18N=$t/i18n
+export TAKUMI_XKB_RULES=$t/evdev.lst TAKUMI_KBD_MAP=$t/kbd-model-map TAKUMI_ZONEINFO=$t/zoneinfo TAKUMI_EFIVARS=$t/efivars TAKUMI_POWER_SUPPLY=$t/power
+mkdir -p "$t/share/setup/night" "$t/share/setup/day" "$t/share/setup/dusk" "$t/share/setup/dawn" "$t/share/source/install"
+for p in night day dusk dawn; do echo "phase = \"$p\"" > "$t/share/setup/$p/palette.toml"; done
+echo 0.1.0 > "$t/share/version"
+export TAKUMI_SETUP_SHARE=$t/share
+
+# --- lib/setup.sh
+. lib/setup.sh
+[[ "$(setup_country en-US)" == US && "$(setup_country de)" == DE && "$(setup_country "")" == US ]] && ok || bad "countries from the firmware's language"
+[[ "$(setup_country_layout FR)" == fr && "$(setup_country_layout US)" == us && "$(setup_country_layout NL)" == us && "$(setup_country_layout BR)" == us ]] && ok || bad "a country's keyboard"
+[[ "$(setup_country_zone US)" == America/New_York && "$(setup_country_zone XX)" == UTC ]] && ok || bad "a country's time zone"
+[[ "$(setup_console_keymap de)" == de && "$(setup_console_keymap ru)" == us && "$(setup_console_keymap xx)" == us ]] && ok || bad "console keymaps"
+[[ "$(setup_firmware_lang)" == fr-FR ]] && ok || bad "the firmware's language"
+setup_locale_ok fr_FR.UTF-8 && setup_locale_ok hi_IN && ! setup_locale_ok fr_FR && ! setup_locale_ok 'fr_FR.UTF-8; rm' && ok || bad "the languages glibc can make"
+[[ "$(setup_locale_guess fr-FR FR)" == fr_FR.UTF-8 && "$(setup_locale_guess de DE)" == de_DE.UTF-8 && "$(setup_locale_guess xx XX)" == en_US.UTF-8 && "$(setup_locale_guess "" US)" == en_US.UTF-8 ]] && ok || bad "a language from the firmware's"
+
+# --- keyboards, zones, keyboard, facts
+k=$(takumi setup keyboards)
+[[ "$(echo "$k" | head -n 1 | jq -r .name)" == "English (US)" ]] && ok || bad "keyboards are not by name: $(echo "$k" | head -n 1)"
+[[ "$(echo "$k" | jq -r 'select(.variant == "azerty") | .layout + "/" + .name')" == "fr/French (AZERTY)" ]] && ok || bad "a variant carries its layout"
+[[ "$(echo "$k" | wc -l | tr -d ' ')" == 6 ]] && ok || bad "options or models leaked into the keyboards"
+z=$(takumi setup zones)
+[[ "$(echo "$z" | jq -r 'select(.city == "Paris") | .country + " " + .zone')" == "France Europe/Paris" ]] && ok || bad "Paris"
+[[ "$(echo "$z" | head -n 1 | jq -r .city)" == Berlin && "$(echo "$z" | tail -n 1 | jq -r .zone)" == UTC ]] && ok || bad "zones are not by city, or UTC is missing"
+at=$(takumi setup zones --at Europe/Paris)
+[[ "$(echo "$at" | jq -r .time)" =~ ^[0-9]{2}:[0-9]{2}$ && "$(echo "$at" | jq -r .phase)" =~ ^(dawn|day|dusk|night)$ ]] && ok || bad "the time in a place: $at"
+grep -q '^phase = "' "$t/run/takumi-setup/palette.toml" && ok || bad "the sky did not turn to the place's phase"
+takumi setup zones --at ../../etc/passwd >/dev/null 2>&1 && bad "a path is not a time zone" || ok
+takumi setup keyboard fr azerty
+grep -q 'xkb { layout "fr"; variant "azerty"; options ""; }' "$t/run/takumi-setup/niri.kdl" && ok || bad "the keyboard did not change: $(grep xkb "$t/run/takumi-setup/niri.kdl")"
+grep -q 'spawn-at-startup' "$t/run/takumi-setup/niri.kdl" && bad "niri's config starts a setup screen (a probe niri would leave one behind, holding the keyboard)" || ok
+grep -q 'qs -p /usr/share/takumi/shell/setup.qml' commands/setup/start && ok || bad "setup start does not start the setup screen itself"
+grep -q 'animations { off; }' "$t/run/takumi-setup/niri.kdl" && bad "animations off with a GPU" || ok
+takumi setup keyboard ru
+grep -q 'xkb { layout "us,ru"; variant ","; options "grp:alts_toggle"; }' "$t/run/takumi-setup/niri.kdl" && ok || bad "a layout without Latin letters comes after US English"
+echo software > "$t/run/takumi-setup/drawing"; takumi setup keyboard --again
+grep -q 'animations { off; }' "$t/run/takumi-setup/niri.kdl" && grep -q 'layout "us,ru"' "$t/run/takumi-setup/niri.kdl" && ok || bad "--again in software drawing"
+takumi setup keyboard 'fr; spawn' >/dev/null 2>&1 && bad "a layout name wrote into niri's config" || ok
+rm -f "$t/run/takumi-setup/keyboard" "$t/run/takumi-setup/drawing"
+f=$(takumi setup facts)
+[[ "$(echo "$f" | jq -r '.layout + " " + .zone + " " + .country')" == "fr Europe/Paris FR" ]] && ok || bad "facts guess from the firmware: $f"
+[[ "$(echo "$f" | jq -r '"\(.battery) \(.plugged) \(.software)"')" == "64 false false" ]] && ok || bad "facts: battery and charger: $f"
+[[ "$(echo "$f" | jq -r '.locale + " " + .mode')" == "fr_FR.UTF-8 live" ]] && ok || bad "facts: the language guess: $f"
+[[ "$(takumi setup facts --for de)" == '{"layout":"de","variant":"","zone":"Europe/Berlin"}' ]] && ok || bad "facts for a language's country: $(takumi setup facts --for de)"
+takumi setup facts --for 'x;y' >/dev/null 2>&1 && bad "facts --for took something that is not a country" || ok
+mkdir -p "$t/etc"; ln -sf /usr/share/zoneinfo/America/Chicago "$t/etc/localtime"; echo 'LANG=de_DE.UTF-8' > "$t/etc/locale.conf"
+f=$(TAKUMI_SETUP_MODE=owner TAKUMI_SETUP_ETC=$t/etc takumi setup facts)
+[[ "$(echo "$f" | jq -r '.zone + " " + .locale + " " + .mode')" == "America/Chicago de_DE.UTF-8 owner" ]] && ok || bad "facts at a first start: what the computer was set up with: $f"
+# The place from the network: only through ipinfo.io, and only a zone this computer knows.
+fake curl "$rec"'; echo "${FAKE_IPINFO:-{\"city\":\"Paris\",\"timezone\":\"Europe/Paris\"}}"'
+[[ "$(takumi setup zones --guess)" == '{"zone":"Europe/Paris","city":"Paris"}' ]] && ok || bad "the place from the network: $(takumi setup zones --guess)"
+grep -q 'curl .*--proto =https https://ipinfo.io/json' "$CALLS" && ok || bad "the network's place is not asked of ipinfo.io over HTTPS: $(grep curl "$CALLS")"
+FAKE_IPINFO='{"timezone":"../../etc/passwd"}' takumi setup zones --guess >/dev/null 2>&1 && bad "a path from the network became a time zone" || ok
+rm -f "$t/bin/curl"; : > "$CALLS"
+
+# --- disks
+cat > "$t/lsblk.json" <<'J'
+{"blockdevices":[
+ {"name":"nvme0n1","path":"/dev/nvme0n1","type":"disk","size":512110190592,"tran":"nvme","model":"Samsung SSD 980  ","rm":false,"ro":false,"hotplug":false,"fstype":null,"label":null,"parttypename":null,
+  "children":[{"name":"nvme0n1p1","path":"/dev/nvme0n1p1","type":"part","size":104857600,"start":2048,"fstype":"vfat","label":"SYSTEM","parttypename":"EFI System"},
+              {"name":"nvme0n1p3","path":"/dev/nvme0n1p3","type":"part","size":400000000000,"start":206848,"fstype":"BitLocker","label":null,"parttypename":"Microsoft basic data"}]},
+ {"name":"sda","path":"/dev/sda","type":"disk","size":2000398934016,"tran":"usb","model":null,"rm":true,"ro":false,"hotplug":true,"fstype":null,"label":null,"parttypename":null},
+ {"name":"sdb","path":"/dev/sdb","type":"disk","size":16008609792,"tran":"usb","model":"Cruzer","rm":true,"ro":false,"hotplug":true,"fstype":"vfat","label":"STICK","parttypename":null},
+ {"name":"vda","path":"/dev/vda","type":"disk","size":42949672960,"tran":null,"model":null,"rm":false,"ro":false,"hotplug":false,"fstype":"crypto_LUKS","label":"takumi","parttypename":null},
+ {"name":"zram0","path":"/dev/zram0","type":"disk","size":4294967296,"rm":false,"ro":false,"hotplug":false,"fstype":"swap"},
+ {"name":"sr0","path":"/dev/sr0","type":"rom","size":4000000000,"rm":true,"ro":false,"hotplug":true,"fstype":"iso9660"}]}
+J
+fake lsblk 'if [[ "$*" == "-J -b -o "* ]]; then cat "$T/lsblk.json"; exit 0; fi
+case "$*" in
+  "-ndo TYPE /dev/vda") echo disk ;; "-ndo TYPE /dev/vda2") echo part ;; "-ndo TYPE /dev/mapper/takumi") echo crypt ;;
+  "-bndo SIZE /dev/vda") echo "${FAKE_SIZE:-42949672960}" ;;
+  "-nlo PATH /dev/vda") printf "/dev/vda\n/dev/vda1\n/dev/vda2\n" ;;
+  "-nlo PATH,PARTTYPE /dev/vda") printf "/dev/vda \n/dev/vda1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b\n/dev/vda2 e3c9e316-0b5c-4db8-817d-f92df00215ae\n/dev/vda3 ebd0a0a2-b9e5-4433-87c0-68b6b72699c7\n" ;;
+  "-nlo PATH,START /dev/vda") printf "/dev/vda \n/dev/vda1 2048\n/dev/vda2 534528\n/dev/vda3 567296\n/dev/vda4 21538816\n/dev/vda5 23635968\n" ;;
+  "-ndo TYPE /dev/vda5") echo part ;;
+  *) exit 32 ;;
+esac'
+d=$(takumi setup disks)
+row() { echo "$d" | jq -c --arg p "$1" 'select(.path == $p)'; }
+[[ "$(row /dev/nvme0n1 | jq -r '.name + "|" + .sizeText + "|" + .kind + "|" + .holds + "|" + (.ok|tostring)')" == "Samsung SSD 980|512 GB|internal|Windows|true" ]] && ok || bad "the Windows laptop disk: $(row /dev/nvme0n1)"
+[[ "$(row /dev/nvme0n1 | jq -r '"\(.freeText)|\(.beside)|\(.bitlocker)"')" == "112 GB|true|true" ]] && ok || bad "Windows with free space beside it: $(row /dev/nvme0n1 | jq -c '{free, freeText, beside, bitlocker}')"
+[[ "$(row /dev/sda | jq -r '.name + "|" + .sizeText + "|" + .kind + "|" + .holds')" == "USB drive|2 TB|usb|nothing" ]] && ok || bad "an empty USB disk: $(row /dev/sda)"
+[[ "$(row /dev/sda | jq -r '"\(.beside)|\(.freeText)"')" == "false|2 TB" ]] && ok || bad "an empty disk is not 'beside' anything: $(row /dev/sda | jq -c '{beside, freeText}')"
+[[ "$(row /dev/sdb | jq -r '(.ok|tostring) + "|" + .why + "|" + .holds')" == "false|Too small: Takumi needs 30 GB|files" ]] && ok || bad "a small stick: $(row /dev/sdb)"
+[[ "$(row /dev/vda | jq -r '.name + "|" + .kind + "|" + .holds + "|" + .sizeText')" == "Virtual disk|virtual|Takumi|42 GB" ]] && ok || bad "a virtual disk with Takumi: $(row /dev/vda)"
+[[ -z "$(row /dev/zram0)$(row /dev/sr0)" ]] && ok || bad "memory or the disc offered as a disk"
+
+# --- the install, against fakes that keep what they were told
+for c in wipefs udevadm mkfs.fat mkfs.btrfs swapoff umount mount genfstab-x; do fake "$c" "$rec"; done
+fake mountpoint "$rec; exit 1"
+fake systemd-detect-virt "$rec; exit 1"
+fake id 'if [[ "$1" == -u ]]; then echo 0; else exec /usr/bin/id "$@"; fi'
+fake timeout 'shift; exec "$@"'
+fake sed 'if [[ "$1" == -i ]] && ! /usr/bin/sed --version >/dev/null 2>&1; then shift; exec /usr/bin/sed -i "" "$@"; fi; exec /usr/bin/sed "$@"'
+fake sfdisk "$rec"'
+if [[ "$1" == -F ]]; then printf "Unpartitioned space /dev/vda: 30 GiB\n\n   Start      End  Sectors Size\n21538767 83886046 62347280  30G\n"; exit 0; fi
+cat > "$T/table"'
+fake btrfs "$rec; [[ \"\$1 \$2\" == \"subvolume create\" ]] && mkdir -p \"\$3\"; exit 0"
+fake genfstab 'echo "UUID=b / btrfs rw,subvol=/@rooms/x 0 0"'
+fake pacstrap "$rec"'
+while (( $# )); do case "$1" in -C) shift 2 ;; -*) shift ;; *) root=$1; break ;; esac; done
+mkdir -p "$root/etc/kernel" "$root/etc/sudoers.d" "$root/var/lib/pacman/sync"
+echo "#en_US.UTF-8 UTF-8" > "$root/etc/locale.gen"; echo "root:x:0:0::/root:/bin/bash" > "$root/etc/passwd"
+echo "(1/2) installing base"; echo "(2/2) installing linux"'
+fake arch-chroot "$rec"'
+case "$*" in *chpasswd*) cat > "$T/chpasswd" ;; *" su - "*) printf ":: 00-preflight\n:: 10-packages\n:: 90-done\n" ;; esac; exit 0'
+fake cryptsetup "$rec"'
+n=$(cat "$T/slots" 2>/dev/null || echo 0)
+case "$1" in
+  luksFormat) printf "luksFormat:%s\n" "$(cat)" >> "$SECRETS"; echo 1 > "$T/slots" ;;
+  luksAddKey) for a in "$@"; do case "$a" in --key-file=*) old=$(cat "${a#--key-file=}") ;; esac; done
+              new=$(cat "${!#}"); printf "luksAddKey:%s>%s\n" "$old" "$new" >> "$SECRETS"; echo $((n + 1)) > "$T/slots" ;;
+  luksDump) jq -cn --argjson n "$n" "{keyslots: ([range(0; \$n) | {key: tostring, value: {}}] | from_entries), tokens: {}}" ;;
+  token) cat > "$T/token.json" ;;
+  open) printf "open:%s\n" "$(cat)" >> "$SECRETS" ;;
+  luksUUID) echo 1111-2222 ;;
+esac
+exit 0'
+answers='{"disk":"/dev/vda","layout":"fr","variant":"","zone":"Europe/Paris","locale":"fr_FR.UTF-8","name":"Ana López","user":"ana","host":"ana-takumi","software":true}'
+pw='s3cret pass'
+mkdir -p "$t/media/takumi/repo"; : > "$t/media/takumi/repo/takumi-media.db"
+printf 'base\nlinux\n' > "$t/share/setup/packages"
+export TAKUMI_SETUP_LOG=$t/setup-run/install.log TAKUMI_SETUP_TARGET=$t/target TAKUMI_SETUP_MEDIA=$t/media TAKUMI_SETUP_EFI=$t
+out=$(printf '%s\n%s\n' "$answers" "$pw" | takumi setup install) && rc=0 || rc=$?
+[[ $rc == 0 ]] && ok || { bad "the install failed ($rc): $(echo "$out" | tail -n 3)"; tail -n 15 "$TAKUMI_SETUP_LOG"; }
+steps=$(echo "$out" | sed -n 's/^step //p' | tr '\n' '|')
+[[ "$steps" == "Getting the disk ready|Locking the disk with your password|Making room for Takumi|Copying Takumi|Setting up your account|Setting up the apps|Finishing|" ]] && ok || bad "steps: $steps"
+prog=$(echo "$out" | sed -n 's/^progress //p' | tr '\n' ' ')
+echo "$prog" | awk '{ for (i = 2; i <= NF; i++) if ($i < $(i - 1)) exit 1; if ($NF != 100) exit 1 }' && ok || bad "progress goes back or ends short: $prog"
+code=$(echo "$out" | sed -n 's/^recovery //p')
+[[ "$code" =~ ^[0-9]{6}(-[0-9]{6}){5}$ ]] && ok || bad "the recovery code: $code"
+[[ "$(echo "$out" | tail -n 1)" == done ]] && ok || bad "the install did not say done"
+grep -qF "$pw" "$CALLS" && bad "the password was on a command line" || ok
+grep -qF "$pw" "$TAKUMI_SETUP_LOG" && bad "the password is in the log" || ok
+grep -qF "${code:-none}" "$TAKUMI_SETUP_LOG" "$CALLS" && bad "the recovery code is in the log or on a command line" || ok
+grep -qxF "luksFormat:$pw" "$SECRETS" && ok || bad "the disk was not locked with the password"
+grep -qxF "luksAddKey:$pw>$code" "$SECRETS" && grep -qxF "luksAddKey:$pw>${code//-/}" "$SECRETS" && ok || bad "the code does not open the disk with and without dashes"
+[[ "$(jq -c '{type, keyslots}' "$t/token.json")" == '{"type":"takumi-recovery","keyslots":["1","2"]}' ]] && ok || bad "the recovery token: $(cat "$t/token.json")"
+[[ "$(cat "$t/chpasswd")" == "ana:$pw" ]] && ok || bad "the account's password"
+[[ "$(cat "$t/target/etc/kernel/cmdline")" == "rd.luks.name=1111-2222=takumi root=/dev/mapper/takumi rw" ]] && ok || bad "kernel options: $(cat "$t/target/etc/kernel/cmdline")"
+[[ "$(cat "$t/target/etc/vconsole.conf")" == $'KEYMAP=fr\nXKBLAYOUT=fr\nXKBMODEL=pc105\nXKBVARIANT=' ]] && ok || bad "vconsole.conf: $(cat "$t/target/etc/vconsole.conf")"
+[[ "$(readlink "$t/target/etc/localtime")" == /usr/share/zoneinfo/Europe/Paris && "$(cat "$t/target/etc/hostname")" == ana-takumi ]] && ok || bad "time zone or name"
+[[ -f "$t/target/etc/takumi/vm" ]] && ok || bad "a VM without 3D is not marked"
+[[ "$(cat "$t/target/etc/locale.conf")" == LANG=fr_FR.UTF-8 ]] && ok || bad "the language: $(cat "$t/target/etc/locale.conf")"
+grep -qx 'fr_FR.UTF-8 UTF-8' "$t/target/etc/locale.gen" && grep -qx 'en_US.UTF-8 UTF-8' "$t/target/etc/locale.gen" && ok || bad "the language is not made, or English beside it: $(cat "$t/target/etc/locale.gen")"
+grep -q 'arch-chroot .*locale-gen' "$CALLS" && ok || bad "locale-gen did not run in the new system"
+[[ ! -e "$t/target/var/lib/takumi/first-start" ]] && ok || bad "an install for oneself marked a first start"
+[[ ! -e "$t/target/etc/sudoers.d/99-takumi-setup" && ! -e "$t/target/etc/takumi/setup-pacman.conf" ]] && ok || bad "the install's sudo or package list was left behind"
+[[ "$(cat "$t/target/etc/sudoers.d/10-takumi-wheel" 2>/dev/null)" == "%wheel ALL=(ALL:ALL) ALL" ]] && ok || bad "the new account cannot use sudo (Arch ships wheel's line commented out)"
+[[ "$(grep -n '10-takumi-wheel' commands/setup/install | head -n 1 | cut -d: -f1)" -gt "$(grep -n 'install/run.sh' commands/setup/install | head -n 1 | cut -d: -f1)" ]] && ok || bad "the wheel rule is written before the installer runs: with a rule that asks for a password, its sudo -v asks too (verifypw=all)"
+grep -q '^default takumi-[0-9]\{8\}-[0-9]\{6\}\.conf$' "$t/target/efi/loader/loader.conf" && ok || bad "the first room is not the default"
+grep -q 'useradd -m -G wheel -s /bin/bash -c Ana López ana' "$CALLS" && ok || bad "the account: $(grep useradd "$CALLS")"
+grep -q 'pacstrap -C .* -c -K .*/target base linux' "$CALLS" && ok || bad "pacstrap from the disc: $(grep pacstrap "$CALLS")"
+grep -q '^SigLevel = Never$' "$t/setup-run/pacman.conf" && grep -q "^Server = file://$t/media/takumi/repo$" "$t/setup-run/pacman.conf" && ok || bad "installing reads the disc's packages"
+grep -q 'size=1GiB, type=uefi' "$t/table" && ok || bad "the partition table"
+
+# --- beside Windows: only the free space, Windows' boot partition shared
+rm -rf "$t/target" "$t/slots"; : > "$CALLS"; : > "$SECRETS"
+out=$(printf '%s\n%s\n' "${answers/\"disk\"/\"mode\":\"beside\",\"disk\"}" "$pw" | takumi setup install) && rc=0 || rc=$?
+[[ $rc == 0 ]] && ok || { bad "the install beside Windows failed ($rc): $(echo "$out" | tail -n 2)"; tail -n 12 "$TAKUMI_SETUP_LOG"; }
+grep -q '^wipefs' "$CALLS" && bad "beside Windows, the disk was wiped" || ok
+grep -q 'sfdisk --wipe' "$CALLS" && bad "beside Windows, the partition table was rewritten" || ok
+[[ "$(cat "$t/table")" == $'start=21538816, size=2097152, type=BC13C2FF-59E6-4262-A352-B275FD6F7172, name="Takumi boot"\nstart=23635968, size=60248064, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=takumi' ]] && ok || bad "the two new partitions: $(cat "$t/table")"
+grep -q 'sfdisk --append /dev/vda' "$CALLS" && ok || bad "the partitions were not added to the existing table"
+grep -q 'mkfs.fat -F 32 -n TAKUMIBOOT /dev/vda4' "$CALLS" && ok || bad "Takumi's boot partition: $(grep mkfs.fat "$CALLS")"
+grep -q 'mkfs.fat.* /dev/vda1' "$CALLS" && bad "Windows' boot partition was formatted" || ok
+grep -q "mount /dev/vda1 $t/target/boot/efi" "$CALLS" && ok || bad "Windows' boot partition is not shared at /boot/efi"
+grep -q 'bootctl --esp-path=/boot/efi --boot-path=/efi install' "$CALLS" && ok || bad "systemd-boot is not on Windows' boot partition"
+grep -q '^timeout 3$' "$t/target/boot/efi/loader/loader.conf" && ok || bad "beside Windows the menu must show"
+grep -qxF "luksFormat:$pw" "$SECRETS" && grep -q 'cryptsetup luksFormat .* /dev/vda5' "$CALLS" && ok || bad "the disk part Takumi uses is not encrypted"
+
+# --- for someone else: a password for now, no account and no recovery code; the first start asks the owner
+rm -rf "$t/target" "$t/slots"; : > "$CALLS"; : > "$SECRETS"
+mkdir -p "$t/target/usr/share/takumi/greetd"
+printf '[default_session]\ncommand = "takumi greeter"\n\n[initial_session]\ncommand = "takumi session start"\nuser = "takumi-setup"\n' > "$t/target/usr/share/takumi/greetd/config.toml"
+out=$(printf '%s\n%s\n' "${answers/\"disk\"/\"owner\":\"later\",\"disk\"}" 'temp pass9' | takumi setup install) && rc=0 || rc=$?
+[[ $rc == 0 && "$(echo "$out" | tail -n 1)" == done ]] && ok || { bad "the install for someone else failed ($rc): $(echo "$out" | tail -n 2)"; tail -n 12 "$TAKUMI_SETUP_LOG"; }
+echo "$out" | grep -q '^recovery' && bad "a recovery code was shown to whoever installed it for someone else" || ok
+grep -q '^luksAddKey' "$SECRETS" && bad "the disk got a recovery code before its owner" || ok
+grep -qxF 'luksFormat:temp pass9' "$SECRETS" && ok || bad "the disk is not locked with the password for now"
+echo "$out" | grep -qx 'step Locking the disk with a password for now' && ok || bad "steps for someone else: $(echo "$out" | sed -n 's/^step //p' | tr '\n' '|')"
+grep -q 'useradd -m -G wheel -s /bin/bash -c Takumi setup takumi-setup' "$CALLS" && grep -q 'arch-chroot .* userdel -r takumi-setup' "$CALLS" && ok || bad "the passing account: $(grep -E 'useradd|userdel' "$CALLS")"
+[[ "$(cat "$t/target/var/lib/takumi/first-start" 2>/dev/null)" == 'temp pass9' && "$(ls -l "$t/target/var/lib/takumi/first-start" | cut -c1-10)" == '-rw-------' ]] && ok || bad "the first start's mark: $(ls -l "$t/target/var/lib/takumi/first-start" 2>&1)"
+grep -q initial_session "$t/target/usr/share/takumi/greetd/config.toml" && bad "the login screen opens the passing account's session" || ok
+grep -q 'arch-chroot .* systemctl enable takumi-first-start.service' "$CALLS" && ok || bad "the first start is not turned on"
+[[ "$(cat "$t/target/etc/hostname")" == takumi ]] && ok || bad "the computer is named before its owner: $(cat "$t/target/etc/hostname")"
+grep -qF 'temp pass9' "$CALLS" "$TAKUMI_SETUP_LOG" && bad "the password for now is on a command line or in the log" || ok
+grep -q 'onExited' shell/Setup/SetupState.qml && grep -q 'setup.forOther || setup.firstStart' shell/Setup/SetupState.qml && ok || bad "the screen does not go on without a recovery code"
+
+refused() {   # $1: what it should say; the rest: answers
+  : > "$CALLS"
+  local o; o=$(printf '%s\n%s\n' "$2" "${3-$pw}" | takumi setup install) && { bad "accepted: $1"; return; }
+  [[ "$o" == *"fail $1"* ]] && ok || bad "should say \"$1\", said: $o"
+  grep -q '^wipefs' "$CALLS" && bad "erased the disk after refusing: $1" || ok
+}
+refused "That account name cannot be used" "${answers/\"ana\"/\"Root!\"}"
+refused "That way to install is unknown" "${answers/\"disk\"/\"mode\":\"shrink\",\"disk\"}"
+refused "That computer name cannot be used" "${answers/ana-takumi/-bad-}"
+refused "That time zone is unknown" "${answers/Europe\/Paris/..\/..\/etc\/passwd}"
+refused "That keyboard is unknown" "${answers/\"fr\"/\"fr; rm\"}"
+refused "That language is unknown" "${answers/fr_FR.UTF-8/fr_FR.UTF-8; rm}"
+refused "That disk is gone" "${answers/vda/vdz}"
+refused "Setup sent no password" "$answers" ""
+FAKE_SIZE=1000 refused "That disk is too small" "$answers"
+
+# --- a new recovery code, from the Core
+fake findmnt 'echo /dev/mapper/takumi'
+fake cryptsetup "$rec"'
+case "$1" in
+  status) echo "  device:  /dev/vda2" ;;
+  open) [[ "$(cat)" == right ]] || exit 2 ;;
+  luksDump) jq -cn --argjson n "$(cat "$T/slots")" "{keyslots: ([range(0; \$n) | {key: tostring, value: {}}] | from_entries),
+            tokens: (if \$n >= 3 then {\"0\": {type: \"takumi-recovery\", keyslots: [\"1\", \"2\"]}} else {} end)}" ;;
+  luksAddKey) for a in "$@"; do case "$a" in --key-file=*) [[ "$(cat "${a#--key-file=}")" == right ]] || exit 2 ;; esac; done
+              echo $(( $(cat "$T/slots") + 1 )) > "$T/slots" ;;
+  token) [[ "$2" == import ]] && cat > "$T/token.json" ;;
+esac
+exit 0'
+fake sudo 'IFS= read -r p; [[ "$p" == right ]] || exit 1; while [[ "$1" == -* ]]; do [[ "$1" == -p ]] && shift; shift; done; exec "$@"'
+echo 3 > "$t/slots"; : > "$CALLS"
+talk=$(printf 'wrong\nright\n' | TAKUMI_CORE=1 takumi disk recovery) && rc=0 || rc=$?
+[[ $rc == 0 ]] && ok || bad "the recovery code conversation failed ($rc): $talk"
+[[ "$(echo "$talk" | head -n 3 | tr '\n' '|')" == "secret Your password|wrong That password did not work|secret Your password|" ]] && ok || bad "the conversation: $talk"
+card=$(echo "$talk" | sed -n 's/^card //p')
+[[ "$(echo "$card" | jq -r .secret)" =~ ^[0-9]{6}(-[0-9]{6}){5}$ && "$(echo "$card" | jq -r .title)" == "Your new recovery code" ]] && ok || bad "the card: $card"
+grep -q 'luksKillSlot --batch-mode --key-file=/dev/fd/[0-9]* /dev/vda2 1' "$CALLS" && grep -q 'luksKillSlot .* /dev/vda2 2' "$CALLS" && ok || bad "the old code still opens the disk: $(grep -c luksKillSlot "$CALLS") slots killed"
+grep -q 'luksKillSlot .* 0$' "$CALLS" && bad "the password's own slot was taken away" || ok
+grep -q 'token remove --token-id 0 /dev/vda2' "$CALLS" && ok || bad "the old code's token stays"
+[[ "$(jq -c .keyslots "$t/token.json")" == '["3","4"]' ]] && ok || bad "the new code's token: $(cat "$t/token.json")"
+grep -q 'right\|wrong' "$CALLS" && bad "a password was on a command line" || ok
+echo 3 > "$t/slots"
+printf 'a\nb\nc\n' | TAKUMI_CORE=1 takumi disk recovery >/dev/null 2>&1 && bad "three wrong passwords made a code" || { [[ $? == 3 ]] && ok || bad "three wrong passwords: not exit 3"; }
+fake lsblk 'echo part'
+printf 'right\n' | TAKUMI_CORE=1 takumi disk recovery > "$t/o" 2>&1 && bad "a code for a disk that is not encrypted" || { grep -q "not encrypted" "$t/o" && ok || bad "unencrypted: $(cat "$t/o")"; }
+
+# --- the first start: takumi setup owner prepare (an erase's leftovers) and apply (the owner's account)
+o=$t/owner; mkdir -p "$o/etc" "$o/home/ana" "$o/home/ben" "$o/nm" "$o/bt/AA:BB:CC:DD:EE:FF/11:22:33:44:55:66" "$o/bt/AA:BB:CC:DD:EE:FF/cache" "$o/fprint/ana" "$o/look/day" "$o/pam" "$o/commands/room"
+printf 'root:x:0:0::/root:/bin/bash\ngreeter:x:964:964::/:/usr/bin/nologin\nana:x:1000:1000:Ana:/home/ana:/bin/bash\nben:x:1001:1001:Ben:/home/ben:/bin/bash\nnobody:x:65534:65534::/:/usr/bin/nologin\n' > "$o/etc/passwd"
+: > "$o/nm/Home.nmconnection"; : > "$o/bt/AA:BB:CC:DD:EE:FF/settings"; : > "$o/fprint/ana/right-index-finger"; : > "$o/look/day/palette.toml"
+echo takumi-old > "$o/etc/hostname"; printf 'KEYMAP=us\nXKBLAYOUT=us\n' > "$o/etc/vconsole.conf"; printf '#en_US.UTF-8 UTF-8\n#fr_FR.UTF-8 UTF-8\n' > "$o/etc/locale.gen"
+printf '[default_session]\ncommand = "takumi greeter"\nuser = "greeter"\n' > "$o/greetd.toml"
+printf '#!/usr/bin/env bash\n: <<'"'"'ABOUT'"'"'\nsummary: fake\nrisk: 0\nABOUT\nprintf "kernel-sync\\n" >> "$CALLS"\n' > "$o/commands/room/kernel-sync"; chmod +x "$o/commands/room/kernel-sync"
+export TAKUMI_SETUP_ETC=$o/etc TAKUMI_HOMES=$o/home TAKUMI_NM_CONNECTIONS=$o/nm TAKUMI_BLUETOOTH_DIR=$o/bt TAKUMI_FPRINT_DIR=$o/fprint \
+  TAKUMI_GREETER_LOOK=$o/look TAKUMI_PAM_DIR=$o/pam TAKUMI_GREETD_CONFIG=$o/greetd.toml TAKUMI_FIRST_START=$o/first-start \
+  TAKUMI_ERASE_MARK=$o/erase TAKUMI_FIRST_SUDOERS=$o/sudoers-first TAKUMI_KERNEL_CMDLINE=$o/cmdline TAKUMI_COMMANDS="$o/commands:$repo/commands" ETC=$o/etc
+for c in journalctl bootctl visudo locale-gen mkinitcpio systemctl systemd-run; do fake "$c" "$rec"; done
+fake useradd "$rec"'; echo "${!#}:x:1002:1002::/home/${!#}:/bin/bash" >> "$ETC/passwd"'
+fake userdel "$rec"'; u=${!#}; grep -v "^$u:" "$ETC/passwd" > "$ETC/passwd.new"; mv "$ETC/passwd.new" "$ETC/passwd"'
+fake chpasswd "$rec"'; cat > "$T/chpasswd"'
+fake findmnt 'case "$*" in "-no OPTIONS /") echo "rw,noatime,subvol=/@rooms/${FAKE_ROOM:-}" ;; *) echo /dev/mapper/takumi ;; esac'
+fake lsblk 'case "$*" in "-ndo TYPE /dev/mapper/takumi") echo crypt ;; *) exit 32 ;; esac'
+fake cryptsetup "$rec"'
+key() { for a in "$@"; do case "$a" in --key-file=-) cat ;; --key-file=*) cat "${a#--key-file=}" ;; esac; done; }
+case "$1" in
+  status) echo "  device:  /dev/vda2" ;;
+  open) [[ "$(key "$@")" == "${FAKE_DISK_PW:-right}" ]] || exit 2 ;;
+  luksChangeKey) [[ -z "${FAKE_FAIL:-}" ]] || exit 2; printf "luksChangeKey:%s>%s\n" "$(key "$@")" "$(cat "${!#}")" >> "$SECRETS" ;;
+  luksAddKey) printf "luksAddKey:%s>%s\n" "$(key "$@")" "$(cat "${!#}")" >> "$SECRETS" ;;
+  luksDump) echo "{\"keyslots\": {\"0\": {}, \"1\": {}, \"2\": {}, \"3\": {}}, \"tokens\": {\"0\": {\"type\": \"takumi-recovery\", \"keyslots\": [\"1\", \"2\"]}, \"1\": {\"type\": \"systemd-tpm2\", \"keyslots\": [\"3\"]}}}" ;;
+  luksKillSlot) printf "luksKillSlot:%s %s\n" "$(key "$@")" "${!#}" >> "$SECRETS" ;;
+  luksUUID) echo 1111-2222 ;;
+  token) [[ "$2" == import ]] && cat > "$T/token.json" ;;
+esac
+exit 0'
+
+# prepare, after an erase: the people go, the computer's own accounts stay.
+: > "$CALLS"; echo 'for now' > "$o/first-start"; : > "$o/erase"
+takumi setup owner prepare > "$t/o" 2>&1 && ok || bad "prepare failed: $(cat "$t/o")"
+[[ "$(cut -d: -f1 "$o/etc/passwd" | tr '\n' ' ')" == "root greeter nobody " ]] && ok || bad "the accounts after an erase: $(cut -d: -f1 "$o/etc/passwd" | tr '\n' ' ')"
+grep -q 'userdel -r ana' "$CALLS" && grep -q 'userdel -r ben' "$CALLS" && ok || bad "the accounts did not go with their homes"
+[[ ! -e "$o/home/ana" && ! -e "$o/home/ben" ]] && ok || bad "a home stayed"
+[[ -z "$(ls -A "$o/nm")" && -z "$(ls -A "$o/fprint")" && -z "$(ls -A "$o/look")" ]] && ok || bad "saved Wi-Fi, fingerprints or the login screen's look stayed"
+[[ ! -e "$o/bt/AA:BB:CC:DD:EE:FF/11:22:33:44:55:66" && ! -e "$o/bt/AA:BB:CC:DD:EE:FF/cache" && -e "$o/bt/AA:BB:CC:DD:EE:FF/settings" ]] && ok || bad "Bluetooth: the pairings go, the adapter's settings stay"
+[[ "$(cat "$o/etc/hostname")" == takumi ]] && ok || bad "the old name stayed: $(cat "$o/etc/hostname")"
+grep -q 'journalctl --vacuum-time=1s' "$CALLS" && ok || bad "the logs stayed"
+[[ ! -e "$o/erase" && -e "$o/first-start" ]] && ok || bad "the erase mark stayed, or the first start's went"
+grep -qxF 'greeter ALL=(root) NOPASSWD: /usr/lib/takumi/commands/setup/owner apply, /usr/bin/systemctl reboot, /usr/bin/systemctl poweroff' "$o/sudoers-first" && ok || bad "the screen cannot give the computer to its owner: $(cat "$o/sudoers-first" 2>&1)"
+grep -q 'kernel-sync\|luks' "$CALLS" && bad "prepare touched the disk" || ok
+rm -f "$o/sudoers-first" "$o/first-start"; : > "$CALLS"
+takumi setup owner prepare && [[ ! -e "$o/sudoers-first" && ! -s "$CALLS" ]] && ok || bad "prepare did something on a computer that has its owner"
+grep -q 'ExecStartPre=+/usr/bin/takumi setup owner prepare' default/systemd/system/takumi-first-start.service \
+  && grep -q '^ConditionPathExists=/var/lib/takumi/first-start$' default/systemd/system/takumi-first-start.service \
+  && grep -q '^Before=greetd.service' default/systemd/system/takumi-first-start.service && grep -q '^User=greeter$' default/systemd/system/takumi-first-start.service \
+  && ok || bad "the first start's unit"
+
+# apply: the owner's account, name, keyboard, place and language; their password on the disk, a new code.
+oans='{"name":"Ana López","user":"ana","host":"ana-takumi","layout":"fr","variant":"","zone":"Europe/Paris","locale":"fr_FR.UTF-8"}'
+echo 'for now' > "$o/first-start"; : > "$o/sudoers-first"; : > "$CALLS"; : > "$SECRETS"
+export TAKUMI_SETUP_LOG=$t/owner.log
+out=$(printf '%s\n%s\n' "$oans" 'owner pass' | takumi setup owner apply) && rc=0 || rc=$?
+[[ $rc == 0 && "$(echo "$out" | tail -n 1)" == done ]] && ok || { bad "apply failed ($rc): $out"; tail -n 8 "$TAKUMI_SETUP_LOG"; }
+[[ "$(echo "$out" | sed -n 's/^step //p' | tr '\n' '|')" == "Making your account|Setting up the computer|Teaching the disk's password prompt your keyboard|Locking the disk with your password|Finishing|" ]] && ok || bad "apply's steps: $(echo "$out" | sed -n 's/^step //p' | tr '\n' '|')"
+ocode=$(echo "$out" | sed -n 's/^recovery //p')
+[[ "$ocode" =~ ^[0-9]{6}(-[0-9]{6}){5}$ ]] && ok || bad "the owner's recovery code: $ocode"
+grep -q 'useradd -m -G wheel -s /bin/bash -c Ana López ana' "$CALLS" && [[ "$(cat "$t/chpasswd")" == 'ana:owner pass' ]] && ok || bad "the owner's account"
+[[ "$(cat "$o/etc/hostname")" == ana-takumi && "$(readlink "$o/etc/localtime")" == /usr/share/zoneinfo/Europe/Paris && "$(cat "$o/etc/locale.conf")" == LANG=fr_FR.UTF-8 ]] && ok || bad "name, place or language"
+[[ "$(cat "$o/etc/vconsole.conf")" == $'KEYMAP=fr\nXKBLAYOUT=fr\nXKBMODEL=pc105\nXKBVARIANT=' ]] && grep -q '^mkinitcpio -P' "$CALLS" && ok || bad "the keyboard, and the disk's prompt with it: $(cat "$o/etc/vconsole.conf")"
+grep -qx 'fr_FR.UTF-8 UTF-8' "$o/etc/locale.gen" && grep -q '^locale-gen' "$CALLS" && ok || bad "the language is not made"
+grep -qxF 'luksChangeKey:for now>owner pass' "$SECRETS" && ok || bad "the disk does not open with the owner's password: $(cat "$SECRETS")"
+grep -qxF "luksAddKey:owner pass>$ocode" "$SECRETS" && grep -qxF 'luksKillSlot:owner pass 1' "$SECRETS" && grep -qxF 'luksKillSlot:owner pass 2' "$SECRETS" && ok || bad "the old recovery code still opens the disk, or the new one does not"
+grep -q 'luksKillSlot:.* 0$' "$SECRETS" && bad "the password's own slot was taken away" || ok
+[[ ! -e "$o/first-start" && ! -e "$o/sudoers-first" ]] && ok || bad "the mark or the screen's sudo rule stayed"
+grep -q '^user = "ana"$' "$o/greetd.toml" && ok || bad "the owner's first session does not open by itself: $(cat "$o/greetd.toml")"
+grep -qF 'owner pass' "$CALLS" "$TAKUMI_SETUP_LOG" && bad "the owner's password is on a command line or in the log" || ok
+grep -qF "$ocode" "$CALLS" "$TAKUMI_SETUP_LOG" && bad "the owner's code is on a command line or in the log" || ok
+o2=$(printf '%s\n%s\n' "$oans" 'owner pass' | takumi setup owner apply) && bad "apply ran twice" || { [[ "$o2" == *"fail This computer already has its owner"* ]] && ok || bad "apply without a mark: $o2"; }
+echo 'for now' > "$o/first-start"
+o2=$(printf '%s\n%s\n' "$oans" 'owner pass' | takumi setup owner apply) && bad "apply made an account that exists" || { [[ "$o2" == *"fail That account name is taken by the system"* ]] && ok || bad "a taken name: $o2"; }
+grep -v '^ana:' "$o/etc/passwd" > "$o/p"; mv "$o/p" "$o/etc/passwd"; : > "$CALLS"
+o2=$(printf '%s\n%s\n' "$oans" 'owner pass' | FAKE_FAIL=1 takumi setup owner apply) && bad "apply went on when the disk refused" || { [[ "$o2" == *"fail The disk did not take your password"* ]] && ok || bad "the disk refusing: $o2"; }
+grep -q 'userdel -r ana' "$CALLS" && [[ -e "$o/first-start" ]] && ok || bad "a failed apply left its account behind, or lost the mark"
+o2=$(printf '%s\n%s\n' "${oans/fr_FR.UTF-8/xx_XX.UTF-8}" 'owner pass' | takumi setup owner apply) && bad "an unknown language" || { [[ "$o2" == *"fail That language is unknown"* ]] && ok || bad "an unknown language: $o2"; }
+
+# --- takumi settings erase: a conversation, then the disk and the marks; the rest at the next start
+for c in visudo; do rm -f "$t/bin/$c"; done
+fake unix_chkpwd 'IFS= read -r -d "" p; [[ "$p" == right ]]'
+fake sudo 'IFS= read -r p; [[ "$p" == right ]] || exit 1; while [[ "$1" == -* ]]; do [[ "$1" == -p ]] && shift; shift; done; FAKE_ROOT=1 exec "$@"'
+fake id 'if [[ "$1" == -u ]]; then if [[ -n "${FAKE_ROOT:-}" ]]; then echo 0; else echo 1000; fi; else exec /usr/bin/id "$@"; fi'
+: > "$o/unit"; export TAKUMI_FIRST_START_UNIT=$o/unit
+printf 'rd.luks.name=1111-2222=takumi root=/dev/mapper/takumi rw rd.luks.options=1111-2222=tpm2-device=auto\n' > "$o/cmdline"
+printf '[default_session]\ncommand = "takumi greeter"\n\n[initial_session]\ncommand = "takumi session start"\nuser = "ana"\n' > "$o/greetd.toml"
+rm -f "$o/first-start" "$o/erase"; : > "$CALLS"; : > "$SECRETS"
+talk=$(printf 'yes\nErase\nright\ntempo1\ntempo1\n' | FAKE_ROOM=20261101-090000 TAKUMI_CORE=1 takumi settings erase) && rc=0 || rc=$?
+[[ $rc == 0 ]] && ok || bad "erase failed ($rc): $talk"
+[[ "$(echo "$talk" | cut -d' ' -f1 | tr '\n' ' ')" == "confirm ask secret secret secret note done " ]] && ok || bad "the erase conversation: $talk"
+grep -qxF 'luksChangeKey:right>tempo1' "$SECRETS" && ok || bad "the disk does not open with the password for the next start: $(cat "$SECRETS")"
+[[ "$(cat "$o/first-start")" == tempo1 && -e "$o/erase" ]] && ok || bad "the marks for the next start"
+grep -qxF 'luksKillSlot:tempo1 1' "$SECRETS" && grep -qxF 'luksKillSlot:tempo1 2' "$SECRETS" && grep -qxF 'luksKillSlot:tempo1 3' "$SECRETS" && ok || bad "the recovery code or the chip still opens the disk: $(grep Kill "$SECRETS")"
+grep -q tpm2 "$o/cmdline" && bad "the start still asks the chip: $(cat "$o/cmdline")" || ok
+grep -q '^kernel-sync' "$CALLS" && ok || bad "the room's entry was not written again without the chip"
+grep -q initial_session "$o/greetd.toml" && bad "the old owner's session still opens by itself" || ok
+grep -q 'systemctl enable takumi-first-start.service' "$CALLS" && grep -q 'systemd-run .* systemctl reboot' "$CALLS" && ok || bad "the first start is not on, or no restart"
+grep -q 'userdel' "$CALLS" && bad "erase removed accounts while someone is logged in (that is the next start's)" || ok
+grep -q 'bootctl set-default takumi-20261101-090000.conf' "$CALLS" && grep -q 'bootctl set-oneshot $' "$CALLS" && ok || bad "the next start may be another room: $(grep bootctl "$CALLS")"
+grep -qF 'right' "$CALLS" && bad "a password was on a command line" || ok
+grep -qF 'tempo1' "$CALLS" && bad "the password for the next start was on a command line" || ok
+erase_says() {   # $1: answers; $2: what it should say
+  rm -f "$o/first-start" "$o/erase"; : > "$SECRETS"
+  local o3; o3=$(printf '%b' "$1" | TAKUMI_CORE=1 takumi settings erase 2>&1) && { bad "erased: $2"; return; }
+  [[ "$o3" == *"$2"* && ! -e "$o/first-start" && ! -s "$SECRETS" ]] && ok || bad "should say \"$2\" and erase nothing: $o3"
+}
+erase_says 'no\n' "Nothing was erased."
+erase_says 'yes\ndelete\n' "Nothing was erased: that was not the word erase."
+erase_says 'yes\nerase\nx\ny\nz\n' "Nothing was erased: that password did not work."
+FAKE_DISK_PW=other erase_says 'yes\nerase\nright\ntempo1\ntempo1\n' "Nothing was erased: that password does not open the disk."
+rm -f "$o/unit"; erase_says 'yes\n' "update it first"
+
+echo "   $checks checks"
+exit $status

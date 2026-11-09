@@ -1,0 +1,24 @@
+# NVIDIA graphics from Turing (GTX 16, RTX 20) on: NVIDIA's own driver, the open kernel modules Arch ships as
+# nvidia-open since driver 590. Device ids from 0x1e00 up are Turing and later; the class keeps out the
+# card's sound and USB functions.
+# NVIDIA: https://github.com/NVIDIA/open-gpu-kernel-modules (supported GPUs), and the driver README's chapters
+# "Configuring Power Management Support" (video memory kept across sleep, the nvidia-* sleep services) and
+# "Direct Rendering Manager Kernel Modesetting" (nvidia_drm modeset and fbdev).
+# Arch: https://archlinux.org/news/nvidia-590-driver-drops-pascal-support-main-packages-switch-to-open-kernel-modules/
+title = "NVIDIA graphics"
+part = "graphics"
+says = "NVIDIA's own driver"
+driver = "nvidia"
+
+[match]
+pci = ["10de:1e??", "10de:1f??", "10de:2???", "10de:3???"]
+pci_class = ["03??"]
+arch = ["x86_64"]
+
+[apply]
+packages = ["nvidia-open", "nvidia-utils", "lib32-nvidia-utils", "libva-nvidia-driver"]
+cmdline = ["nvidia_drm.modeset=1", "nvidia_drm.fbdev=1"]
+modprobe = ["options nvidia NVreg_PreserveVideoMemoryAllocations=1 NVreg_TemporaryFilePath=/var/tmp"]
+initramfs_modules = ["nvidia", "nvidia_modeset", "nvidia_uvm", "nvidia_drm"]
+services = ["nvidia-suspend.service", "nvidia-hibernate.service", "nvidia-resume.service"]
+note = "NVIDIA's own driver, the one NVIDIA recommends for this card. Games, video playback and the screen at start-up use it, and what was on the screen is still there after sleep."

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Takumi: a computer that hibernates wakes as the system that hibernated (docs/power.md, "Hibernation and
+# updates"). systemd-sleep runs this as root before and after sleeping, with pre or post and the kind of sleep;
+# SYSTEMD_SLEEP_ACTION says which part of suspend-then-hibernate is under way.
+#
+# An update stages a new room and sets the next start to try it once (takumi room stage). Waking from hibernation is
+# a start too, and the new room cannot wake what this one kept in memory, so before hibernating the next start is
+# pointed at the room in use whenever it would be another. After waking, what was set before is put back: the new
+# room is tried at the next start, as staging left it. Plain sleep is left alone: if the battery runs out asleep,
+# the next start is a fresh one and trying the update then is right.
+set -euo pipefail
+case "${SYSTEMD_SLEEP_ACTION:-${2:-}}" in hibernate | hybrid-sleep | suspend-then-hibernate) ;; *) exit 0 ;; esac
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_current >/dev/null || exit 0
+cur=$(rooms_current)
+[[ -n "$cur" ]] || exit 0
+root=${TAKUMI_POWER_ROOT:-}                     # / on a computer; a folder that pretends to be one in the tests
+mark="$root/run/takumi/hibernating"             # what was displaced, kept in memory, so it lasts until waking
+say() { printf 'takumi-rooms: %s\n' "$*" >&2; }
+
+# waiting: the room an update staged during this start, other than the one running, whose one try at the next start
+# is still to come. A room staged before this start had its try already: it stays staged when it never got far
+# enough to say otherwise, and trying it again would only fail again. Room names sort by when they were made.
+waiting() {
+  local boot since f r
+  boot=$(awk '$1 == "btime" { print $2 }' "$root/proc/stat" 2>/dev/null || true)
+  [[ "$boot" =~ ^[0-9]+$ ]] || return 0
+  since=$(date -u -d "@$boot" +%FT%TZ 2>/dev/null || date -u -r "$boot" +%FT%TZ)
+  for f in "$TAKUMI_STATE"/*; do
+    r=${f##*/}
+    [[ -f "$f" && "$r" != "$cur" && "$(state_get "$r" status)" == staged ]] || continue
+    [[ ! "$(state_get "$r" staged)" < "$since" ]] || continue
+    printf '%s\n' "$r"
+  done | tail -n 1
+}
+
+case "${1:-}" in
+  pre)
+    staged=$(waiting)
+    # Nothing to do when the next start is this room anyway.
+    if [[ -z "$staged" && "$(rooms_default)" == "$cur" ]]; then exit 0; fi
+    if ! esp=$(rooms_esp); then say "no boot partition, so the next start stays as it was"; exit 0; fi
+    entry=no
+    for e in "$root$esp/loader/entries/takumi-$cur.conf" "$root$esp/loader/entries/takumi-$cur+"*.conf; do
+      if [[ -f "$e" ]]; then entry=yes; break; fi
+    done
+    if [[ $entry == no ]]; then say "room $cur has no boot entry, so the next start stays as it was"; exit 0; fi
+    # bootctl writes /sys/firmware/efi/efivars/LoaderEntryOneShot-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+    if ! bootctl set-oneshot "takumi-$cur.conf" >/dev/null 2>&1; then
+      say "the next start could not be pointed at room $cur"; exit 0
+    fi
+    mkdir -p "${mark%/*}"                # /run/takumi
+    printf '%s\n' "$staged" > "$mark"   # /run/takumi/hibernating
+    ;;
+  post)
+    [[ -f "$mark" ]] || exit 0
+    staged=$(cat "$mark"); rm -f "$mark"   # /run/takumi/hibernating
+    if [[ -n "$staged" ]]; then
+      # bootctl writes /sys/firmware/efi/efivars/LoaderEntryOneShot-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+      bootctl set-oneshot "takumi-$staged.conf" >/dev/null 2>&1 || say "room $staged could not be set to be tried at the next start"
+    else
+      # Waking took the one-shot start; after a hybrid sleep that woke from memory it is still set. Either way, gone.
+      bootctl set-oneshot "" >/dev/null 2>&1 || true   # removes /sys/firmware/efi/efivars/LoaderEntryOneShot-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+    fi
+    ;;
+esac
+exit 0

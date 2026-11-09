@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Make text bigger or smaller, in the Core and in your apps
+usage: <bigger|smaller|11|13|15|17|20>
+example: takumi display text bigger
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/display.sh" ]] && { . "$l/display.sh"; . "$l/core.sh"; break; }; done
+declare -F display_screens >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+now=$(display_text_size)
+case "${1:-}" in
+  bigger|smaller) to=$(display_next "$display_text_sizes" "$now" "$1") ;;
+  ''|*[!0-9]*) echo "usage: takumi display text <bigger|smaller|11|13|15|17|20>" >&2; exit 2 ;;
+  *) to=$1 ;;
+esac
+if [[ -z "$to" ]]; then
+  [[ "$1" == bigger ]] && edge=big || edge=small
+  takumi notice edit "Text is as $edge as it goes" >/dev/null 2>&1 || true; echo "Text is as $edge as it goes"; exit 0
+fi
+display_set_text "$to"
+takumi font apply >/dev/null 2>&1 || true   # terminals and apps follow the Core's text size
+takumi notice edit "Text size $to" "the Core and your apps follow" >/dev/null 2>&1 || true
+echo "Text size $to"

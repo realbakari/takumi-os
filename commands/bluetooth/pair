@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Pair with a Bluetooth device, checking the code it shows, then connect it
+usage: <address>
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# A conversation in the Core. bluetoothctl runs with an agent that can show and confirm codes: a phone or a
+# computer shows six digits and the Core asks "Does <name> show 482913?"; a keyboard needs digits typed on
+# it and the Core says which; an old device that wants a PIN gets a field. Then the device is trusted and
+# connected (docs/bluetooth.md).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/bluetooth.sh" ]] && { . "$l/bluetooth.sh"; . "$l/core.sh"; break; }; done
+declare -F bt_valid >/dev/null || { echo "takumi: the Bluetooth library is missing" >&2; exit 1; }
+mac=${1:-}; bt_valid "$mac" || core_fail 2 "usage: takumi bluetooth pair <address>"
+name=$(bt_field "$mac" Name); name=${name:-$mac}
+core_note "Pairing with $name…"
+
+dir=$(mktemp -d "${TMPDIR:-/tmp}/takumi-bt.XXXXXX"); mkfifo "$dir/in" "$dir/out"
+LC_ALL=C bluetoothctl < "$dir/in" > "$dir/out" 2>&1 &
+bt=$!
+exec 7> "$dir/in" 8< "$dir/out"
+cleanup() { printf 'quit\n' >&7 2>/dev/null || true; exec 7>&- 8<&-; kill "$bt" 2>/dev/null || true; rm -rf "$dir"; }
+trap cleanup EXIT
+say() { printf '%s\n' "$*" >&7; }
+
+# bluetoothctl's questions end without a newline, so its output is read a character at a time.
+# heard <seconds>: sets $line to the next line, or to a question as soon as it is asked; 1 on silence.
+buf=""; line=""
+heard() {
+  local ch deadline=$(( $(date +%s) + $1 ))
+  while (( $(date +%s) <= deadline )); do
+    IFS= read -r -n 1 -t 1 ch <&8 || continue
+    if [[ -z "$ch" ]]; then line=$buf; buf=""; strip; return 0; fi
+    buf+=$ch
+    case "$buf" in *"(yes/no): "|*"Enter PIN code: "|*"Enter passkey"*": ") line=$buf; buf=""; strip; return 0 ;; esac
+  done
+  return 1
+}
+strip() { line=$(printf '%s' "$line" | sed -e $'s/\x1b\\[[0-9;]*[A-Za-z]//g' -e $'s/\r//g'); }
+code_in() { printf '%s' "$1" | grep -oE '[0-9]{6}' | head -n 1 || true; }
+
+say "agent KeyboardDisplay"; say "default-agent"; say "pair $mac"
+result=""; end=$(( $(date +%s) + 60 ))
+while (( $(date +%s) < end )); do
+  heard 2 || continue
+  case "$line" in
+    *"Confirm passkey "*)
+      code=$(code_in "$line")
+      if core_confirm "Does $name show ${code:-the same code}?"; then say yes; else say no; result=refused; break; fi ;;
+    *"Enter PIN code"*)
+      if core_ask pin "The PIN for $name (often 0000)"; then say "$pin"; else result=refused; break; fi ;;
+    *"Enter passkey"*)
+      if core_ask pin "The code $name shows"; then say "$pin"; else result=refused; break; fi ;;
+    *"Passkey: "*) core_note "Type $(code_in "$line") on $name, then press its Enter key" ;;
+    *"Authorize service"*) say yes ;;
+    *"Pairing successful"*) result=paired; break ;;
+    *"not available"*) result=gone; break ;;
+    *"Failed to pair"*|*"AuthenticationFailed"*|*"AuthenticationRejected"*|*"AuthenticationCanceled"*|*"ConnectionAttemptFailed"*) result=failed; break ;;
+  esac
+done
+
+case "$result" in
+  paired)
+    say "trust $mac"; core_note "Paired. Connecting…"; say "connect $mac"
+    end=$(( $(date +%s) + 20 ))
+    while (( $(date +%s) < end )); do
+      heard 2 || continue
+      case "$line" in
+        *"Connection successful"*) takumi notice bt "Connected to $name" "" -1; core_done "Paired and connected to $name"; exit 0 ;;
+        *"Failed to connect"*) break ;;
+      esac
+    done
+    core_done "Paired with $name; it connects whenever it is on and nearby"; exit 0 ;;
+  refused) core_fail 1 "Not paired: the codes did not match, or you said no" ;;
+  gone)    core_fail 1 "$name is no longer nearby" ;;
+  *)       core_fail 1 "$name did not pair: put it in pairing mode and try again" ;;
+esac

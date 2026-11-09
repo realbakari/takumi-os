@@ -1,0 +1,14 @@
+# Built-in cameras behind Intel's IPU3 (Skylake and Kaby Lake laptops and tablets, many Surfaces among them):
+# libcamera drives them, and PipeWire hands them to the apps that ask it.
+# libcamera: https://libcamera.org/  Kernel: https://docs.kernel.org/admin-guide/media/ipu3.html
+title = "Intel IPU3 camera"
+part = "camera"
+works = "partly"
+says = "works in apps that use PipeWire"
+
+[match]
+pci = ["8086:9d32"]
+
+[apply]
+packages = ["libcamera", "pipewire-libcamera"]
+note = "This built-in camera works through libcamera, in apps that take the camera through PipeWire, such as web browsers. Apps that open the camera directly see no camera."

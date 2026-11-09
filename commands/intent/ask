@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Ask the assistant to do something; it acts through Takumi's commands and asks once before anything risky
+usage: <request>
+example: takumi intent ask 'turn off bluetooth and dim the screen to 30'
+example: takumi intent ask 'install docker'
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/intent.sh" ]] && { . "$l/intent.sh"; . "$l/core.sh"; break; }; done
+declare -F intent_call >/dev/null && declare -F core_note >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh, docs/intent.md). The model works through tools, one per routed command, for at
+# most eight rounds. Risk 0 calls run at once and the model reads what they print; risk 1 and 2 calls only
+# queue, and after the model is done the person is asked once about all of them. Exit status, for scripts:
+# 0 done · 2 no request · 3 the assistant is not set up · 4 its key or sign-in was refused · 5 its service could
+# not be reached · 6 the model declined · 1 anything else. The last line says it in words.
+request=$*
+[[ -n "${request//[[:space:]]/}" ]] || core_fail 2 "usage: takumi intent ask <request>"
+exec 3<&0   # the conversation's stdin, for commands that ask the person something while the model works
+command -v jq >/dev/null || core_fail 1 "The assistant needs jq."
+engine=$(intent_engine)
+intent_ready "$engine" || core_fail $? "$intent_why"
+intent_begin; trap intent_end EXIT; trap 'exit 143' TERM INT
+printf '%s' "$request" > "$intent_tmp/request"
+model=$(intent_model)
+intent_log "$(jq -cn --rawfile r "$intent_tmp/request" --arg e "$engine" --arg m "$model" '{engine: $e, model: $m, request: $r}')"
+stop() { intent_log "$(jq -cn --arg w "$2" '{stopped: $w}')"; core_fail "$1" "$2"; }
+manifest=$(intent_manifest)
+
+queued=()   # calls waiting for the person's yes, once each
+queue() {
+  local c line
+  line=$(jq -r .line <<< "$1")
+  for c in ${queued[@]+"${queued[@]}"}; do [[ "$(jq -r .line <<< "$c")" == "$line" ]] && return 0; done
+  queued+=("$1")
+}
+
+said=""
+if [[ $engine == claude ]]; then
+  # Claude Code runs the rounds itself, through Takumi's MCP server, which hands each risk 0 command back to us
+  # to run in the Core (intent_follow) and answers risky ones "needs the person's approval", leaving them in the
+  # events file for the question after.
+  core_note "Asking Claude…"
+  intent_agent_prompt > "$intent_tmp/system.txt"
+  intent_claude_mcp
+  intent_claude "$intent_tmp/request" -p --output-format json --tools "" --system-prompt-file "$intent_tmp/system.txt" \
+    --mcp-config "$intent_tmp/mcp.json" --strict-mcp-config --allowedTools 'mcp__takumi__*' --max-turns 8 \
+    --no-session-persistence || stop $? "$intent_why"
+  said=$intent_text
+  [[ "$intent_subtype" != error_max_turns ]] || said="I stopped after eight steps. ${said}"
+  if [[ -f "$intent_tmp/events" ]]; then
+    while IFS= read -r ev; do
+      case "$(jq -r 'if has("asked") then "asked" elif has("ran") then "ran" else "" end' <<< "$ev" 2>/dev/null || true)" in
+        asked) queue "$(jq -c .asked <<< "$ev")" ;;
+        ran) intent_log "$(jq -c '{ran, status}' <<< "$ev")" ;;
+      esac
+    done < "$intent_tmp/events"
+  fi
+else
+  intent_api_start "$engine" "$manifest"
+  round=0 finished=no ran=no
+  while (( round < 8 )); do
+    round=$((round + 1))
+    core_note "Thinking…"
+    intent_api_turn "$engine" medium || stop $? "$intent_why"
+    case "$(jq -r .stop "$intent_tmp/turn.json")" in
+      refusal) if [[ $ran == yes ]]; then stop 6 "$(intent_who "$engine") declined to go on with that request."
+               else stop 6 "$(intent_who "$engine") declined that request. Nothing changed."; fi ;;
+      length) stop 1 "The answer ran too long. Ask for less at once." ;;
+    esac
+    text=$(jq -r .text "$intent_tmp/turn.json"); [[ -z "$text" ]] || said=$text
+    [[ "$(jq '.calls | length' "$intent_tmp/turn.json")" != 0 ]] || { finished=yes; break; }
+    while IFS= read -r tc; do
+      id=$(jq -r '.id // ""' <<< "$tc")
+      call=$(intent_call "$manifest" "$(jq -r '.name // ""' <<< "$tc")" "$(jq -c '.input' <<< "$tc")")
+      why=$(jq -r '.why // ""' <<< "$call")
+      if [[ -n "$why" ]]; then printf '%s' "$why" | intent_result "$id" true; continue; fi
+      line=$(jq -r .line <<< "$call")
+      if [[ "$(jq -r .risk <<< "$call")" != 0 ]]; then
+        queue "$call"
+        printf "needs the person's approval: %s" "$line" | intent_result "$id" false
+        continue
+      fi
+      core_note "$line…"
+      rc=0; intent_run_now "$call" <&3 || rc=$?; ran=yes
+      intent_log "$(jq -cn --arg l "$line" --argjson s "$rc" '{ran: $l, status: $s}')"
+      intent_result_text "$rc" "$(cat "$intent_tmp/out")" | intent_result "$id" "$([[ $rc == 0 ]] && echo false || echo true)"
+    done < <(jq -c '.calls[]' "$intent_tmp/turn.json")
+    intent_api_results "$engine"
+  done
+  [[ $finished == yes ]] || said="I stopped after eight steps. ${said}"
+fi
+said=$(intent_say "$said")
+
+# Everything risky at once: one question that names each exact line, then each runs where the person can
+# answer it, in the order the model asked, stopping at the first that fails.
+if (( ${#queued[@]} )); then
+  lines=$(printf '%s\n' "${queued[@]}" | jq -sr 'map(.line) | if length == 1 then .[0] else (.[:-1] | join(", ")) + ", then " + .[-1] end')
+  [[ -z "$said" ]] || core_in_core || core_note "$said"
+  if core_confirm "Run $lines?"; then
+    intent_log "$(printf '%s\n' "${queued[@]}" | jq -sc '{asked: map(.line), approved: true}')"
+    for c in "${queued[@]}"; do
+      line=$(jq -r .line <<< "$c")
+      core_note "$line…"
+      rc=0; intent_run_for_person "$c" || rc=$?
+      intent_log "$(jq -cn --arg l "$line" --argjson s "$rc" '{ran: $l, status: $s, approved: true}')"
+      words=$(intent_say "$intent_said")
+      (( rc == 0 )) || stop 1 "${said:+$said }$line did not work${words:+: $words}"
+      # What a command that talks said last, or where one that needs a terminal went, is worth repeating.
+      [[ -z "$words" || "$(jq -r '.converse or .interactive' <<< "$c")" != true ]] || said="${said:+$said }$words"
+    done
+  else
+    intent_log "$(printf '%s\n' "${queued[@]}" | jq -sc '{asked: map(.line), approved: false}')"
+    said="${said:+$said }Nothing else changed."
+  fi
+fi
+said=$(intent_say "${said:-Done.}")
+intent_log "$(jq -cn --arg s "$said" '{said: $s}')"
+core_done "$said"

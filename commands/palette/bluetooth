@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for Bluetooth as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "bluetooth" (or "headphones", "airpods", "pair") lists what is connected, then what is paired, then what is
+# nearby, and looks for devices while the rows are on show. A device's name finds it. Enter connects,
+# disconnects or pairs; pairing checks the code in the Core. "forget" lists the paired ones to forget
+# (docs/bluetooth.md).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/bluetooth.sh" ]] && { . "$l/bluetooth.sh"; . "$l/palette.sh"; break; }; done
+declare -F bt_present >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+q=${1:-}; ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
+topic=no
+for w in bluetooth headphones headset earbuds airpods speaker pair pairing; do
+  if [[ ${#ql} -ge 3 && ( "$w" == "$ql"* || "$ql" == "$w"* ) ]]; then topic=yes; fi
+done
+forget=no; case "$ql" in *forget*|*remove*|*unpair*) forget=yes; topic=yes ;; esac
+if [[ $topic == no ]]; then palette_short "$q" && exit 0; fi
+if ! bt_present; then
+  [[ $topic == yes ]] && jq -cn '{id:"bt:none", title:"No Bluetooth here", subtitle:"This computer has no Bluetooth adapter, or its service is off", glyph:"bt", kind:"Bluetooth", run:["true"], score:0.9}'
+  exit 0
+fi
+if ! bt_on; then
+  [[ $topic == yes ]] && jq -cn '{id:"bt:on", title:"Turn Bluetooth on", subtitle:"For headphones, a keyboard or a mouse without wires", glyph:"bt", kind:"Bluetooth", run:["takumi", "switch", "bluetooth"], score:0.95}'
+  exit 0
+fi
+[[ $topic == yes ]] && bt_scan 12
+paired=$(bt_devices Paired); connected=$(bt_devices Connected); shown=0
+rows=$(
+  while IFS=$'\t' read -r mac name; do
+    [[ -n "$mac" ]] || continue
+    state=nearby
+    if grep -q "^$mac" <<< "$paired"; then state=paired; fi
+    if grep -q "^$mac" <<< "$connected"; then state=connected; fi
+    [[ $state == nearby ]] && ! bt_named "$mac" "$name" && continue
+    [[ $forget == yes && $state == nearby ]] && continue
+    kind=$(bt_kind "$mac"); bat=""; [[ $state == connected ]] && bat=$(bt_battery "$mac")
+    MAC=$mac NAME=$name STATE=$state KIND=$kind BAT=$bat FORGET=$forget jq -cn '
+      (if env.KIND == "headphones" then "headphones" else "bt" end) as $g
+      | (env.KIND + " bluetooth " + env.STATE) as $w
+      | if env.FORGET == "yes" then
+          {id: ("bt:forget:" + env.MAC), title: ("Forget " + env.NAME), subtitle: "It will need pairing again", glyph: $g, kind: "Bluetooth",
+           keywords: ($w + " forget remove unpair"), run: ["takumi", "bluetooth", "forget", env.MAC], risk: 1, steady: true, score: 0.9}
+        elif env.STATE == "connected" then
+          {id: ("bt:" + env.MAC), title: env.NAME, kind: "Bluetooth", glyph: $g, keywords: $w, steady: true, refresh: 5,
+           subtitle: ("Connected" + (if env.BAT != "" then " · battery " + env.BAT + "%" else "" end) + " · Enter disconnects"),
+           run: ["takumi", "bluetooth", "disconnect", env.MAC], score: 0.97}
+        elif env.STATE == "paired" then
+          {id: ("bt:" + env.MAC), title: env.NAME, subtitle: "Paired · Enter connects", kind: "Bluetooth", glyph: $g, keywords: $w,
+           steady: true, refresh: 5, converse: true, run: ["takumi", "bluetooth", "connect", env.MAC], score: 0.95}
+        else
+          {id: ("bt:" + env.MAC), title: env.NAME, subtitle: "Nearby · Enter pairs", kind: "Bluetooth", glyph: $g, keywords: $w,
+           steady: true, refresh: 4, converse: true, run: ["takumi", "bluetooth", "pair", env.MAC], score: 0.9}
+        end'
+  done <<< "$(bt_devices)"
+)
+if [[ $topic == yes ]]; then
+  [[ -n "$rows" ]] && printf '%s\n' "$rows"
+  [[ -z "$rows" && $forget == no ]] && jq -cn '{id:"bt:looking", title:"Looking for devices…", subtitle:"Put your headphones or keyboard in pairing mode", glyph:"bt", kind:"Bluetooth", steady:true, refresh:3, run:["true"], score:0.9}'
+  [[ $forget == no ]] && jq -cn '{id:"bt:off", title:"Turn Bluetooth off", subtitle:"Disconnects everything", glyph:"bt", kind:"Bluetooth", keywords:"bluetooth off", run:["takumi", "switch", "bluetooth"], steady:true, score:0.4}'
+  exit 0
+fi
+[[ -n "$rows" ]] && printf '%s\n' "$rows" | palette_filter "$q"
+exit 0

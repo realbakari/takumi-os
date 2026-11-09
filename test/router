@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+status=0
+m=$(bin/takumi --manifest)
+if command -v jq >/dev/null; then
+  echo "$m" | jq -e 'type=="array" and length>0 and all(.[]; has("group") and has("name") and has("summary") and (.risk|type=="number"))' >/dev/null || { echo "manifest is malformed"; status=1; }
+  echo "   $(echo "$m" | jq length) routed commands"
+else
+  python3 -I -c 'import json,sys; d=json.load(sys.stdin); assert d and all("risk" in c for c in d); print("  ", len(d), "routed commands")' <<< "$m"
+fi
+# Every command file must actually route. An ABOUT block the parser misreads drops the command silently.
+for f in commands/*/*; do
+  g=${f#commands/}; g=${g%%/*}; n=${f##*/}
+  words=("$g"); [[ "$n" != main ]] && words+=("$n")
+  bin/takumi "${words[@]}" -h >/dev/null 2>&1 || { echo "does not route: $f (takumi ${words[*]})"; status=1; }
+done
+# A command dir named first in TAKUMI_COMMANDS wins: the tests put their fakes there.
+fake=$(mktemp -d); trap 'rm -rf -- "$fake"' EXIT
+mkdir -p "$fake/notice"; printf '#!/bin/sh\necho fake\n' > "$fake/notice/main"; chmod +x "$fake/notice/main"
+[[ "$(TAKUMI_COMMANDS="$fake:$PWD/commands" bin/takumi notice)" == fake ]] || { echo "TAKUMI_COMMANDS does not put its first dir first"; status=1; }
+[[ "$(TAKUMI_COMMANDS="$fake:$PWD/commands" bin/takumi version)" == "$(cat version)" ]] || { echo "TAKUMI_COMMANDS hides the later dirs"; status=1; }
+# Words are never paths: nothing outside the command dirs runs.
+if bin/takumi .. bin >/dev/null 2>&1; then echo "a path-like group ran"; status=1; fi
+bin/takumi update -h | grep 'Risk tier: 2' >/dev/null || { echo "update is not tier 2"; status=1; }
+if bin/takumi nosuchgroup >/dev/null 2>&1; then echo "unknown group did not fail"; status=1; fi
+exit $status

@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for VPNs, Tailscale and the firewall as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "vpn" lists your VPNs, the connected one first, then Tailscale and "Import a VPN…"; three letters of a VPN's name
+# find it. Enter connects or disconnects, in the Core, asking for a password when one is needed. "tailscale" or
+# "exit" adds Tailscale's exit nodes, "forget" the VPNs to forget. "firewall" says whether the firewall is on and
+# lists the apps it can let in; an app's name finds its row (docs/vpn.md, docs/firewall.md).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do
+  [[ -f "$l/vpn.sh" ]] && { . "$l/vpn.sh"; . "$l/firewall.sh"; . "$l/palette.sh"; break; }
+done
+declare -F vpn_list >/dev/null && declare -F firewall_rows >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+q=${1:-}; ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
+topic() { local w; for w in "$@"; do [[ ${#ql} -ge 3 && ( "$w" == "$ql"* || "$ql" == "$w"* ) ]] && return 0; done; return 1; }
+vpn=no; topic vpn vpns wireguard openvpn && vpn=yes
+ts=no; topic tailscale tailnet exit && ts=yes
+fw=no; topic firewall ufw && fw=yes
+forget=no; case "$ql" in *forget*|*remove*|*delete*) forget=yes ;; esac
+if [[ $vpn == no && $ts == no && $fw == no ]] && palette_short "$q"; then exit 0; fi
+
+{
+  # Your VPNs, the most recently used first. A VPN's own rows answer its name.
+  if command -v nmcli >/dev/null; then
+    i=0
+    while IFS=$'\t' read -r uuid type state name; do
+      [[ -n "$uuid" ]] || continue
+      i=$((i + 1))
+      nl=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
+      [[ $vpn == yes || $forget == yes || ( ${#ql} -ge 3 && "$nl" == *"$ql"* ) ]] || continue
+      kind=wireguard; [[ $type == wireguard ]] || kind=$(vpn_kind "$uuid")
+      if [[ $forget == yes ]]; then
+        N=$name K=$kind jq -cn '{id: ("vpn-forget:" + env.N), title: ("Forget VPN " + env.N), subtitle: "Removes it, its password and its certificates",
+          glyph: "shield", kind: "VPN", keywords: ("vpn forget remove delete " + env.K), risk: 1, run: ["takumi", "vpn", "forget", env.N], score: 0.5}'
+        continue
+      fi
+      N=$name K=$kind S=$state I=$i jq -cn '
+        {id: ("vpn:" + env.N), title: ("VPN " + env.N), kind: "VPN", glyph: "shield", steady: true, refresh: 5, converse: true,
+         keywords: ("vpn " + env.K + " connect disconnect")}
+        + (if env.S == "activated" then {subtitle: "Connected · Enter to disconnect", run: ["takumi", "vpn", "off", env.N], score: 0.97}
+           elif env.S == "activating" then {subtitle: "Connecting · Enter to stop", run: ["takumi", "vpn", "off", env.N], score: 0.96}
+           else {subtitle: "Connect", run: ["takumi", "vpn", "on", env.N], score: (0.9 - (env.I | tonumber) / 1000)} end)'
+    done <<< "$(vpn_list)"
+    if [[ $vpn == yes && $forget == no ]]; then
+      jq -cn '{id: "vpn:import", title: "Import a VPN…", subtitle: "A WireGuard or OpenVPN file from work or your VPN provider", glyph: "folder",
+        kind: "VPN", keywords: "vpn import add new wireguard openvpn file conf ovpn", converse: true, risk: 1, run: ["takumi", "vpn", "import"], score: 0.6}'
+    fi
+  fi
+
+  # Tailscale: setting it up, signing in, connected or not, and with "tailscale" or "exit", the exit nodes.
+  if [[ ( $vpn == yes || $ts == yes ) && $forget == no ]]; then
+    if ! command -v tailscale >/dev/null; then
+      jq -cn '{id: "vpn:tailscale", title: "Set up Tailscale", subtitle: "Links this computer with your other devices, wherever they are",
+        glyph: "shield", kind: "VPN", keywords: "vpn tailscale tailnet install set up", converse: true, risk: 1, run: ["takumi", "vpn", "tailscale"], score: 0.5}'
+    else
+      st=$(vpn_ts_status)
+      if [[ -z "$st" ]]; then
+        jq -cn '{id: "vpn:tailscale", title: "Tailscale", subtitle: "Off · Enter turns it on", glyph: "shield", kind: "VPN", steady: true,
+          keywords: "vpn tailscale tailnet connect", converse: true, risk: 1, run: ["takumi", "vpn", "tailscale"], score: 0.9}'
+      else
+        jq -c "$vpn_ts_label"'
+          (.BackendState // "") as $b | (.Self.HostName // "this computer") as $me
+          | ([.Peer // {} | .[] | select(.ExitNode == true)] | first // null) as $exit
+          | {id: "vpn:tailscale", title: "Tailscale", kind: "VPN", glyph: "shield", steady: true, refresh: 5, converse: true, risk: 1,
+             keywords: "vpn tailscale tailnet connect disconnect sign in"}
+          + (if $b == "Running" then {subtitle: ("Connected" + (if $exit then " · internet through " + ($exit | nodename) else " as " + $me end) + " · Enter to disconnect"),
+                                      run: ["takumi", "vpn", "tailscale", "off"], score: 0.97}
+             elif $b == "Starting" then {subtitle: "Connecting…", run: ["takumi", "vpn", "tailscale"], score: 0.96}
+             elif $b == "Stopped" then {subtitle: "Connect", run: ["takumi", "vpn", "tailscale"], score: 0.9}
+             elif $b == "NeedsMachineAuth" then {subtitle: "Waiting for your tailnet to approve this computer", run: ["true"], score: 0.9}
+             else {subtitle: "Sign in · Enter opens the sign-in page", run: ["takumi", "vpn", "tailscale"], score: 0.9} end)' <<< "$st" 2>/dev/null || true
+        if [[ $ts == yes ]]; then
+          # Exit nodes, the one in use first, then by name; a city with many Mullvad nodes shows once.
+          jq -c "$vpn_ts_label"'
+            select(.BackendState == "Running")
+            | [.Peer // {} | .[] | select(.ExitNode == true or (.ExitNodeOption == true and .Online != false))
+               | . + {where: nodename, ip: (.TailscaleIPs[0] // .HostName)}]
+            | group_by(.where) | map(sort_by([(.ExitNode != true), -(.Location.Priority // 0)]) | .[0])
+            | sort_by([(.ExitNode != true), .where]) | .[0:25] | to_entries[]
+            | .key as $i | .value
+            | {id: ("vpn:exit:" + .where), title: .where, kind: "VPN", glyph: "globe", steady: true, converse: true, risk: 1,
+               keywords: ("vpn tailscale exit node internet " + (.Location.Country // "") + " " + (.Location.City // "") + " " + (.HostName // ""))}
+            + (if .ExitNode == true then {subtitle: "Exit node in use · Enter to stop", run: ["takumi", "vpn", "tailscale", "exit", "off"], score: 0.95}
+               else {subtitle: "Exit node · Enter sends your internet through it", run: ["takumi", "vpn", "tailscale", "exit", .ip],
+                     score: (0.85 - $i / 1000)} end)' <<< "$st" 2>/dev/null || true
+        fi
+      fi
+    fi
+  fi
+
+  # The firewall: everything about it for "firewall", an app's own row for its name.
+  if [[ $fw == yes ]]; then firewall_rows "$ql" yes
+  elif ! palette_short "$q"; then firewall_rows "$ql" no; fi
+} | palette_filter "$q"

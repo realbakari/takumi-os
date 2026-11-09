@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# Contract checks for time (lib/clock.sh, lib/weather.sh, commands/clock/*, remind/*, timer/*, weather/*, the
+# Palette's time rows and the dispatcher script) against fake timedated, systemd, curl, NetworkManager and
+# notification tools: words turned into moments either way round, places by city, country or zone, the time
+# zone set without and then with a password, the time zone by location, world clocks, reminders and timers
+# with their systemd timers and "Again in 10 min", the weather from canned Open-Meteo answers, and the rows.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; time checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-time.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run TAKUMI_ZONEINFO=$t/zoneinfo TAKUMI_TOP=$t/top TAKUMI_STATE=$t/rooms
+export TZ=Europe/Lisbon TAKUMI_NOW=1794218400 LC_ALL=C   # Monday 9 November 2026, 10:00 in Lisbon (UTC+0)
+unset LANG LC_MEASUREMENT
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR" "$t/top/@rooms" "$TAKUMI_STATE" "$t/commands/notice" "$t/commands/migrate"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"   # fake takumi commands go in front of the real ones
+now=$TAKUMI_NOW
+
+# A small zone table, as tzdata lays it out: the cities are those of the zones below.
+zi=$TAKUMI_ZONEINFO; mkdir -p "$zi/Europe" "$zi/Asia" "$zi/America" "$zi/Australia" "$zi/Atlantic"
+printf '%s\n' "PT	Portugal" "JP	Japan" "US	United States" "BR	Brazil" "IN	India" "AU	Australia" "GB	Britain (UK)" "FR	France" > "$zi/iso3166.tab"
+printf '%s\n' "# tzdata" "PT	+3843-00908	Europe/Lisbon	Portugal (mainland)" "PT	+3238-01654	Atlantic/Madeira	Madeira Islands" \
+  "JP	+353916+1394441	Asia/Tokyo" "US	+404251-0740023	America/New_York	Eastern (most areas)" "US	+340308-1181434	America/Los_Angeles	Pacific" \
+  "BR	-2332-04637	America/Sao_Paulo	Brazil (southeast)" "BR	-0308-06001	America/Manaus	Amazonas (east)" "IN	+2232+08822	Asia/Kolkata" \
+  "AU	-3352+15113	Australia/Sydney	New South Wales (most areas)" "GB	+513030-0000731	Europe/London" "FR	+4852+00220	Europe/Paris" > "$zi/zone.tab"
+for z in Europe/Lisbon Atlantic/Madeira Asia/Tokyo America/New_York America/Los_Angeles America/Sao_Paulo America/Manaus Asia/Kolkata \
+         Australia/Sydney Europe/London Europe/Paris UTC; do : > "$zi/$z"; done
+
+cat > "$t/bin/timedatectl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'timedatectl %s\n' "$*" >> "$FAKE/calls"
+case "$*" in
+  "show -p Timezone --value") cat "$FAKE/zone" ;;
+  "--no-ask-password set-timezone "*) [[ -f "$FAKE/polkit-asks" ]] && { echo "Interactive authentication required." >&2; exit 1; }; echo "${@: -1}" > "$FAKE/zone" ;;
+  "set-timezone "*) echo "${@: -1}" > "$FAKE/zone" ;;
+  *) echo "fake timedatectl: unexpected: $*" >&2; exit 99 ;;
+esac
+FAKE
+cat > "$t/bin/sudo" <<'FAKE'
+#!/usr/bin/env bash
+printf 'sudo %s\n' "$*" >> "$FAKE/calls"
+[[ "${1:-}" == -A ]] && shift
+exec "$@"
+FAKE
+cat > "$t/bin/systemd-run" <<'FAKE'
+#!/usr/bin/env bash
+printf 'systemd-run %s\n' "$*" >> "$FAKE/calls"
+[[ ! -f "$FAKE/run-refuses" ]]
+FAKE
+cat > "$t/bin/systemctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "$FAKE/calls"
+case "$*" in
+  "--user is-active --quiet "*) grep -qx "${@: -1}" "$FAKE/active" 2>/dev/null ;;
+  *) exit 0 ;;
+esac
+FAKE
+cat > "$t/bin/curl" <<'FAKE'
+#!/usr/bin/env bash
+url=${*: -1}
+printf '%s\n' "$url" >> "$FAKE/urls"
+[[ -f "$FAKE/offline" ]] && exit 6
+case "$url" in
+  https://ipinfo.io/json) cat "$FAKE/ipinfo" ;;
+  https://geocoding-api.open-meteo.com/v1/search?name=*)
+    n=${url#*name=}; n=${n%%&*}
+    if [[ -f "$FAKE/search-$n" ]]; then cat "$FAKE/search-$n"; else echo '{"generationtime_ms":0.2}'; fi ;;
+  https://api.open-meteo.com/v1/forecast?*) cat "$FAKE/forecast" ;;
+  *) exit 22 ;;
+esac
+FAKE
+cat > "$t/bin/notify-send" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s|' "$@" >> "$FAKE/notify"; echo >> "$FAKE/notify"
+cat "$FAKE/action" 2>/dev/null || true
+FAKE
+cat > "$t/bin/nmcli" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  "-t -f TYPE connection show --active") cat "$FAKE/active-types" 2>/dev/null || true ;;
+  "-t -f STATE,CONNECTIVITY general") echo connected:full ;;
+  *) exit 0 ;;
+esac
+FAKE
+for f in loginctl getent findmnt setsid pw-play; do printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "$FAKE/calls"\n' "$f" > "$t/bin/$f"; done
+printf '#!/usr/bin/env bash\necho rw,relatime,subvol=/@rooms/20261101-000000\n' > "$t/bin/findmnt"
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+printf '#!/bin/sh\nexit 0\n' > "$t/commands/migrate/main"
+chmod +x "$t/bin/"* "$t/commands/notice/main" "$t/commands/migrate/main"
+
+reset() {
+  rm -rf "${FAKE:?}"/* "${HOME:?}"/.config "${HOME:?}"/.cache "${HOME:?}"/.local
+  echo Europe/Lisbon > "$FAKE/zone"; : > "$FAKE/calls"; : > "$FAKE/urls"; : > "$FAKE/notify"; : > "$FAKE/notices"
+}
+n=0
+check() { n=$((n + 1)); if eval "$2"; then :; else echo "time: $1"; status=1; fi; }
+last() { "$@" | tail -n 1; }   # notes come first at a terminal; the last line says how it ended
+lib() { bash -c '. lib/clock.sh; . lib/weather.sh; "$@"' _ "$@"; }
+at() { lib clock_date "$1" '+%a %d %H:%M'; }
+when() { local r; r=$(lib clock_when "$@") || { echo none; return 0; }; printf '%s|%s' "$(at "${r%%$'\t'*}")" "${r#*$'\t'}"; }
+rows() { takumi palette time "$1"; }
+row() { rows "$1" | jq -r --arg id "$2" 'select(.id == $id) | [.title, .subtitle, ((.risk // 0) | tostring), ((.converse // false) | tostring), (.run | join(" "))] | join("|")'; }
+reset
+
+# ---- Words to moments, either way round
+check "in 10 min" '[[ "$(when in 10 min stretch)" == "Mon 09 10:10|stretch" ]]'
+check "a bare hour after at is the next one the clock shows" '[[ "$(when call Ana at 3)" == "Mon 09 15:00|call Ana" ]]'
+check "me, to and pm" '[[ "$(when me to call Ana at 3pm)" == "Mon 09 15:00|call Ana" ]]'
+check "a time first" '[[ "$(when at 15:00 call Ana)" == "Mon 09 15:00|call Ana" && "$(when 15:30 meeting)" == "Mon 09 15:30|meeting" ]]'
+check "tomorrow, with and without a time" '[[ "$(when tomorrow 9:00 dentist)" == "Tue 10 09:00|dentist" && "$(when dentist tomorrow)" == "Tue 10 09:00|dentist" ]]'
+check "tomorrow at 3 is the afternoon" '[[ "$(when tomorrow at 3 call mum)" == "Tue 10 15:00|call mum" ]]'
+check "a weekday, this week or next" '[[ "$(when friday at 18:00 dinner)" == "Fri 13 18:00|dinner" && "$(when on monday water plants)" == "Mon 16 09:00|water plants" ]]'
+check "hours and minutes, half an hour" '[[ "$(when in 1 h 30 tea)" == "Mon 09 11:30|tea" && "$(when in half an hour check oven)" == "Mon 09 10:30|check oven" ]]'
+check "a time that passed today is tomorrow" '[[ "$(when at 8.30am run)" == "Tue 10 08:30|run" && "$(when at 9 call)" == "Mon 09 21:00|call" ]]'
+check "a number that is not a time stays in the words" '[[ "$(when 10 apples at 3)" == "Mon 09 15:00|10 apples" && "$(when in 5 2 eggs)" == "Mon 09 10:05|2 eggs" ]]'
+check "no moment: none" '[[ "$(when in the evening call mom)" == none && "$(when buy milk)" == none ]]'
+dur() { local r; r=$(lib clock_duration "$@") || { echo none; return 0; }; printf '%s|%s' "${r%%$'\t'*}" "${r#*$'\t'}"; }
+check "timer lengths" '[[ "$(dur 10)" == "600|" && "$(dur 25 min tea)" == "1500|tea" && "$(dur tea 25 min)" == "1500|tea" && "$(dur 1h30)" == "5400|" && "$(dur 90 s)" == "90|" && "$(dur eggs)" == none ]]'
+check "12 and 24 hours, differences, lengths" '[[ "$(lib clock_hm "$now" Asia/Tokyo)" == 19:00 && "$(clock_fmt=12h lib clock_hm "$now" Asia/Tokyo)" == "7:00 PM" && "$(lib clock_diff -16200)" == "−4 h 30 min" && "$(lib clock_length 150)" == "2 min 30 s" ]]'
+
+# ---- Places
+find1() { lib clock_find "$1" | cut -f1 | tr '\n' ' '; }
+check "a city, accents and case aside" '[[ "$(find1 "São Paulo")" == "America/Sao_Paulo " && "$(find1 lisbon)" == "Europe/Lisbon " && "$(find1 "new york")" == "America/New_York " ]]'
+check "a country with one zone, a zone by name, UTC" '[[ "$(find1 Japan)" == "Asia/Tokyo " && "$(find1 europe/paris)" == "Europe/Paris " && "$(find1 UTC)" == "UTC " ]]'
+check "a country with several zones gives them all" '[[ "$(find1 Brazil)" == "America/Manaus America/Sao_Paulo " ]]'
+
+# ---- The time zone
+out=$(takumi clock zone Tokyo); rc=$?
+check "set by city, through timedated without a password ($out)" '[[ $rc -eq 0 && "$out" == "Time zone: Tokyo · 19:00" ]] && grep -qx "timedatectl --no-ask-password set-timezone Asia/Tokyo" "$FAKE/calls" && ! grep -q "^sudo" "$FAKE/calls"'
+check "said in the Core when run from elsewhere" 'grep -q "^clock|Time zone: Tokyo|the clock says 19:00|" "$FAKE/notices"'
+reset; touch "$FAKE/polkit-asks"
+takumi clock zone tokyo >/dev/null
+check "when timedated wants a password, sudo asks for it" 'grep -qx "sudo timedatectl set-timezone Asia/Tokyo" "$FAKE/calls" && [[ "$(cat "$FAKE/zone")" == Asia/Tokyo ]]'
+reset
+rc=0; out=$(last takumi clock zone Brazil </dev/null) || rc=$?
+check "a country with several zones: 4, and which cities ($out)" '[[ $rc -eq 4 && "$out" == "Brazil has several time zones: try Manaus or Sao Paulo" ]]'
+printf '%s' '{"results":[{"name":"San Francisco","latitude":37.77,"longitude":-122.42,"country":"United States","country_code":"US","admin1":"California","timezone":"America/Los_Angeles"}]}' > "$FAKE/search-San%20Francisco"
+out=$(last takumi clock zone San Francisco)
+check "a town the table lacks, through Open-Meteo's search ($out)" '[[ "$out" == "Time zone: San Francisco · 02:00" ]] && grep -q "geocoding-api.open-meteo.com/v1/search?name=San%20Francisco&" "$FAKE/urls"'
+reset
+said=$(printf '%s\n' Atlantis Lisbon | TAKUMI_CORE=1 takumi clock zone; echo "rc=$?")
+want=$(printf '%s\n' "ask Which city?" "note Looking for Atlantis on Open-Meteo…" "wrong No time zone found for Atlantis" "ask Which city?" "done The time zone is already Lisbon's: 10:00" "rc=0")
+check "in the Core: asked, asked again, and nothing changed when it is already so" '[[ "$said" == "$want" ]] && ! grep -q set-timezone "$FAKE/calls"'
+rc=0; printf '' | TAKUMI_CORE=1 takumi clock zone >/dev/null || rc=$?
+check "no answer: 3" '[[ $rc -eq 3 ]]'
+
+# ---- The clock's format and clocks for other places
+out=$(takumi clock format 12h)
+check "the 12-hour clock, kept for the shell ($out)" '[[ "$out" == "The 12-hour clock: 10:00 AM" ]] && grep -q "^format = \"12h\"" "$HOME/.config/takumi/clock.toml" && [[ "$(lib clock_hm "$now")" == "10:00 AM" ]]'
+rc=0; takumi clock format 13h >/dev/null 2>&1 || rc=$?
+check "anything else is usage: 2" '[[ $rc -eq 2 ]]'
+takumi clock format 24h >/dev/null
+out=$(takumi clock add Tokyo); again=$(takumi clock add tokyo)
+check "a world clock in Today, once ($out / $again)" '[[ "$out" == "Tokyo · 19:00 · +9 h · in Today" && "$again" == "Tokyo is in Today already" ]] && grep -q "^cities = \[\"Tokyo|Asia/Tokyo\"\]" "$HOME/.config/takumi/clock.toml"'
+takumi clock add New York >/dev/null
+check "the format survives a clock added" 'grep -q "^format = \"24h\"" "$HOME/.config/takumi/clock.toml"'
+today=$(takumi clock today)
+check "Today: the clocks with their offsets and differences" '[[ "$(jq -c "[.zone, .city, .offset, (.clocks | map([.city, .offset, .diff]))]" <<< "$today")" == "[\"Europe/Lisbon\",\"Lisbon\",0,[[\"Tokyo\",32400,\"+9 h\"],[\"New York\",-18000,\"−5 h\"]]]" ]]'
+out=$(takumi clock)
+check "takumi clock: here, the format, the clocks" '[[ "$(sed -n 1p <<< "$out")" == "10:00 · Monday 9 November · Lisbon (Europe/Lisbon)" && "$(sed -n 3p <<< "$out")" == "Tokyo · 19:00 · +9 h" ]]'
+check "takumi clock <place>: the time there" '[[ "$(takumi clock Sydney)" == "Sydney · 21:00 · +11 h" ]]'
+takumi clock remove tokyo >/dev/null; rc=0; takumi clock remove Tokyo >/dev/null || rc=$?
+check "a clock taken out, then 4 for one not there" '[[ $rc -eq 4 && "$(lib clock_cities)" == "New York|America/New_York" ]]'
+
+# ---- The time zone by location
+reset
+echo '{"ip":"192.0.2.1","city":"Porto","region":"Porto","country":"PT","timezone":"Europe/Paris"}' > "$FAKE/ipinfo"
+out=$(last takumi clock auto on)
+check "on: kept, looked once, set and said ($out)" '[[ "$out" == "The time zone follows you now · you'"'"'re in Porto" ]] && grep -q "^auto = true" "$HOME/.config/takumi/clock.toml" && grep -qx "timedatectl --no-ask-password set-timezone Europe/Paris" "$FAKE/calls" && grep -q "^clock|You'"'"'re in Porto|clock set to 11:00|" "$FAKE/notices"'
+check "only ipinfo.io is asked" '[[ "$(cat "$FAKE/urls")" == "https://ipinfo.io/json" ]]'
+: > "$FAKE/urls"; echo '{"city":"Lisbon","timezone":"Europe/Lisbon"}' > "$FAKE/ipinfo"
+takumi clock auto check --network >/dev/null
+check "a new network: looked once, set" '[[ "$(cat "$FAKE/zone")" == Europe/Lisbon && $(grep -c ipinfo "$FAKE/urls") -eq 1 ]]'
+takumi clock auto check --network >/dev/null
+check "again within five minutes: not asked" '[[ $(grep -c ipinfo "$FAKE/urls") -eq 1 ]]'
+rm -f "${XDG_RUNTIME_DIR:?}/takumi-clock-auto"; echo vpn > "$FAKE/active-types"
+takumi clock auto check --network >/dev/null
+check "a VPN on: not asked" '[[ $(grep -c ipinfo "$FAKE/urls") -eq 1 ]]'
+rm -f "${FAKE:?}/active-types"; takumi clock auto off >/dev/null; takumi clock auto check --network >/dev/null
+check "off: never asked" '[[ $(grep -c ipinfo "$FAKE/urls") -eq 1 ]] && grep -q "^auto = false" "$HOME/.config/takumi/clock.toml"'
+touch "$FAKE/offline"; rc=0; out=$(last takumi clock auto check 2>&1) || rc=$?
+check "asked by hand without internet: 1, in words ($out)" '[[ $rc -eq 1 && "$out" == *"ipinfo.io did not answer; the time zone stays" ]]'
+rm -f "${FAKE:?}/offline"
+
+# The dispatcher: a person who turned it on, active at the computer, gets one look in their own session.
+reset
+mkdir -p "$t/alice/.config/takumi"; printf 'auto = true\n' > "$t/alice/.config/takumi/clock.toml"
+printf '#!/usr/bin/env bash\ncase "$*" in "list-users --no-legend") echo "1000 alice no active"; echo "1001 bob no active" ;; "show-user 1000 -p State --value"|"show-user 1001 -p State --value") echo active ;; esac\n' > "$t/bin/loginctl"
+printf '#!/usr/bin/env bash\n[[ "$2" == alice ]] && echo "alice:x:1000:1000::%s:/bin/bash"; [[ "$2" == bob ]] && echo "bob:x:1001:1001::%s:/bin/bash"; exit 0\n' "$t/alice" "$t/bob" > "$t/bin/getent"
+d=default/networkmanager/dispatcher.d/90-takumi-clock
+CONNECTIVITY_STATE=FULL "$d" "" connectivity-change
+check "the dispatcher asks only the session of the one who turned it on" '[[ $(grep -c "^systemd-run" "$FAKE/calls") -eq 1 ]] && grep -q "^systemd-run --machine=alice@.host --user --quiet --collect --no-block --unit=takumi-clock-auto-[0-9]*-1000 /usr/bin/takumi clock auto check --network$" "$FAKE/calls"'
+: > "$FAKE/calls"; CONNECTIVITY_STATE=LIMITED "$d" "" connectivity-change; "$d" wlan0 down
+check "no internet yet, or a network going: nothing" '! grep -q "^systemd-run" "$FAKE/calls"'
+
+# ---- Reminders
+reset
+out=$(takumi remind in 10 min stretch)
+check "in 10 min: said, and a timer in systemd at that moment, in UTC, to the second ($out)" '[[ "$out" == "Reminder in 10 min, at 10:10: stretch" ]] && grep -q "^systemd-run --user --quiet --collect --unit=takumi-remind-1 --description=Takumi remind 1 --on-calendar=2026-11-09 10:10:00 UTC --timer-property=AccuracySec=1s .*takumi remind fire 1$" "$FAKE/calls"'
+check "kept in the list" '[[ "$(cut -f1,2,3,5 "$HOME/.local/state/takumi/reminders.tsv")" == "1	remind	$((now + 600))	stretch" ]]'
+out=$(takumi remind call Ana at 3)
+check "the words first, the time last ($out)" '[[ "$out" == "Reminder at 15:00: call Ana" ]]'
+said=$(printf '%s\n' "water the plants" soonish "tomorrow 9:00" | TAKUMI_CORE=1 takumi remind; echo "rc=$?")
+want=$(printf '%s\n' "ask What should I remind you of?" "ask When? in 10 min, at 15:00, tomorrow 9:00" "wrong That is not a time I know: try in 10 min, at 15:00, tomorrow 9:00" "ask When? in 10 min, at 15:00, tomorrow 9:00" "done Reminder tomorrow at 09:00: water the plants" "rc=0")
+check "in the Core: what, then when, asked again after words that are not a time" '[[ "$said" == "$want" ]]'
+said=$(printf '%s\n' "in an hour" | TAKUMI_CORE=1 takumi remind me to call the bank; echo "rc=$?")
+check "words without a time: only when is asked" '[[ "$said" == *"ask When?"*"done Reminder in 1 h, at 11:00: call the bank"*"rc=0" ]]'
+rc=0; out=$(takumi remind call Ana </dev/null) || rc=$?
+check "no time and no answer: 3" '[[ $rc -eq 3 ]]'
+touch "$FAKE/run-refuses"; rc=0; out=$(takumi remind in 5 min x) || rc=$?; rm -f "${FAKE:?}/run-refuses"
+check "systemd refusing the timer: 1, and nothing kept ($out)" '[[ $rc -eq 1 && "$out" == *"systemd did not take its timer" ]] && ! grep -q "	x$" "$HOME/.local/state/takumi/reminders.tsv"'
+list=$(takumi remind list)
+check "the list, soonest first" '[[ "$(awk "{print \$1}" <<< "$list" | tr "\n" " ")" == "1 4 2 3 " ]] && [[ "$(sed -n 1p <<< "$list")" == *"at 10:10"*"stretch" ]]'
+check "the list as JSON" '[[ "$(takumi remind list --json | jq -sc "map(.id)")" == "[\"1\",\"4\",\"2\",\"3\"]" ]]'
+out=$(takumi remind cancel 2)
+check "cancel: its timer stopped, its line gone ($out)" '[[ "$out" == "Reminder cancelled: call Ana" ]] && grep -qx "systemctl --user stop takumi-remind-2.timer" "$FAKE/calls" && [[ -z "$(lib remind_get 2)" ]]'
+rc=0; takumi remind cancel 99 >/dev/null || rc=$?
+check "cancel a number that is not there: 4" '[[ $rc -eq 4 ]]'
+echo default > "$FAKE/action"; : > "$FAKE/calls"
+takumi remind fire 1
+check "it rings through the notification server, through do not disturb, with one action" 'grep -qxF -e "-a|Reminder|-u|critical|-i|appointment-soon|-A|default=Again in 10 min|stretch|Reminder · press for again in 10 min|" "$FAKE/notify"'
+check "pressed: the same again in ten minutes" '[[ -z "$(lib remind_get 1)" && "$(lib remind_lines | awk -F "\t" "\$5 == \"stretch\" { print \$3 }")" == "$((now + 600))" ]] && grep -q "^bell|Again at 10:10|stretch|" "$FAKE/notices"'
+rm -f "${FAKE:?}/action"; : > "$FAKE/notify"
+id=$(lib remind_lines | awk -F '\t' '$5 == "stretch" { print $1 }'); takumi remind fire "$id"
+check "not pressed: gone" '[[ -z "$(lib remind_lines | awk -F "\t" "\$5 == \"stretch\"")" ]]'
+# At login: one to come put back, one missed this morning rung now, one from last week dropped.
+reset; mkdir -p "$HOME/.local/state/takumi"
+printf '%s\n' "7	remind	$((now + 3600))	$now	later" "8	remind	$((now - 1800))	$((now - 3600))	missed" "9	remind	$((now - 604800))	$((now - 700000))	old" > "$HOME/.local/state/takumi/reminders.tsv"
+takumi remind restore
+for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q missed "$FAKE/notify" && break; sleep 0.2; done
+check "restore: put back, rung late, dropped" 'grep -q "^systemd-run .*--unit=takumi-remind-7 .*--on-calendar=2026-11-09 11:00:00 UTC" "$FAKE/calls" && grep -q "|missed|Reminder for 09:30 · press for again in 10 min|" "$FAKE/notify" && [[ "$(cut -f1 "$HOME/.local/state/takumi/reminders.tsv" | tr "\n" " ")" == "7 " ]]'
+echo takumi-remind-7.timer > "$FAKE/active"; : > "$FAKE/calls"; takumi remind restore
+check "restore leaves a timer that is still there" '! grep -q "^systemd-run" "$FAKE/calls"'
+
+# ---- Timers
+reset
+out=$(takumi timer 25 min tea)
+check "a timer: said, its systemd timer named apart ($out)" '[[ "$out" == "tea: 25 min timer · rings at 10:25" ]] && grep -q "^systemd-run .*--unit=takumi-timer-1 .*--on-calendar=2026-11-09 10:25:00 UTC .*takumi remind fire 1$" "$FAKE/calls"'
+said=$(printf '%s\n' soon 10 | TAKUMI_CORE=1 takumi timer; echo "rc=$?")
+check "in the Core: how long, asked again" '[[ "$said" == *"ask How long? 10, 90 s, 1 h 30"*"wrong That is not a length of time"*"done 10 min timer · rings at 10:10"*"rc=0" ]]'
+check "Today counts it down from when it rings" '[[ "$(takumi clock today | jq -c "[.coming[] | [.kind, .at - .made, .text]]")" == "[[\"timer\",600,\"\"],[\"timer\",1500,\"tea\"]]" ]]'
+: > "$FAKE/notify"; takumi remind fire 1
+check "done: it says so, through do not disturb, without waiting" 'grep -qxF -e "-a|Timer|-u|critical|-i|alarm-clock|tea|25 min timer|" "$FAKE/notify"'
+out=$(takumi timer stop)
+check "stop every timer ($out)" '[[ "$out" == "Timer stopped: 10 min timer" && -z "$(lib remind_lines)" ]] && grep -qx "systemctl --user stop takumi-timer-2.timer" "$FAKE/calls"'
+rc=0; takumi timer soon >/dev/null || rc=$?
+check "not a length: 4" '[[ $rc -eq 4 ]]'
+
+# ---- The weather
+reset
+printf '%s' '{"results":[{"name":"Lisbon","latitude":38.72,"longitude":-9.13,"country":"Portugal","country_code":"PT","timezone":"Europe/Lisbon"},{"name":"Lisbon","latitude":44.03,"longitude":-70.1,"country":"United States","country_code":"US","admin1":"Maine","timezone":"America/New_York"}]}' > "$FAKE/search-Lisbon"
+printf '%s' '{"current":{"temperature_2m":18.6,"weather_code":61,"is_day":1},"hourly":{"temperature_2m":[18.6,19.5,21,23.8,22,20,19],"precipitation_probability":[80,70,40,20,10,5,5]}}' > "$FAKE/forecast"
+out=$(last takumi weather)
+check "the line: place, temperature, words, later ($out)" '[[ "$out" == "Lisbon 19° · light rain · 24° later" ]]'
+check "two questions, both to Open-Meteo, the place the clock is in" '[[ "$(sed "s/?.*//" "$FAKE/urls" | tr "\n" " ")" == "https://geocoding-api.open-meteo.com/v1/search https://api.open-meteo.com/v1/forecast " ]] && grep -q "latitude=38.72&longitude=-9.13&" "$FAKE/urls"'
+: > "$FAKE/urls"; out=$(takumi weather)
+check "kept half an hour: not asked again" '[[ "$out" == "Lisbon 19° · light rain · 24° later" && ! -s "$FAKE/urls" ]]'
+printf '%s' '{"results":[{"name":"Tokyo","latitude":35.69,"longitude":139.69,"country":"Japan","timezone":"Asia/Tokyo"}]}' > "$FAKE/search-Tokyo"
+printf '%s' '{"current":{"temperature_2m":12.2,"weather_code":0,"is_day":0},"hourly":{"temperature_2m":[12,11,10,9,8.5,8,8],"precipitation_probability":[0,10,20,65,70,40,0]}}' > "$FAKE/forecast"
+out=$(last takumi weather Tokyo)
+check "a place by name: asked once, rain on the way, not kept ($out)" '[[ "$out" == "Tokyo 12° · clear · rain later" && "$(jq -r .place "$HOME/.cache/takumi/weather.json")" == Lisbon ]]'
+rc=0; out=$(last takumi weather Atlantis 2>&1) || rc=$?
+check "no such place: 4 ($out)" '[[ $rc -eq 4 && "$out" == *"Open-Meteo knows no place called Atlantis" ]]'
+check "off until it is turned on: Today shows no weather" '[[ "$(takumi clock today | jq -r .weather)" == "" ]]'
+r=$(rows weather)
+check "weather rows when it is off: turn it on (asks first), or once" '[[ "$(jq -r "select(.id == \"weather:on\") | [.title, .subtitle, .risk] | join(\"|\")" <<< "$r")" == "Show the weather in Today|Asks Open-Meteo for Lisbon'"'"'s weather, at most every 30 minutes|1" && "$(jq -r "select(.id == \"weather:once\") | .title" <<< "$r")" == "Weather in Lisbon now" ]]'
+printf '%s' '{"current":{"temperature_2m":18.6,"weather_code":61,"is_day":1},"hourly":{"temperature_2m":[18.6,19.5,21,23.8,22,20,19],"precipitation_probability":[80,70,40,20,10,5,5]}}' > "$FAKE/forecast"
+out=$(last takumi weather on)
+check "on: kept, and the first line said ($out)" '[[ "$out" == "Today shows the weather: Lisbon 19° · light rain · 24° later" ]] && grep -q "^show = true" "$HOME/.config/takumi/weather.toml"'
+check "Today shows the line" '[[ "$(takumi clock today | jq -r .weather)" == "Lisbon 19° · light rain · 24° later" ]]'
+check "the weather row when it is on" '[[ "$(row weather "weather:now")" == "Lisbon 19° · light rain|24° later · Open-Meteo, 0 s ago · Enter for another place|0|true|takumi weather place" ]]'
+TAKUMI_NOW=$((now + 2400)) takumi clock today >/dev/null
+check "older than half an hour: asked again in the background" 'grep -q "^setsid -f takumi weather --refresh" "$FAKE/calls"'
+printf '%s' '{"results":[{"name":"Porto","latitude":41.15,"longitude":-8.61,"country":"Portugal","timezone":"Europe/Lisbon"}]}' > "$FAKE/search-Porto"
+out=$(last takumi weather place porto)
+check "another place for Today, kept with its country ($out)" '[[ "$out" == "Today'"'"'s weather is for Porto: Porto 19° · light rain · 24° later" ]] && grep -q "^place = \"Porto, Portugal\"" "$HOME/.config/takumi/weather.toml"'
+printf 'show = true\nplace = ""\nunits = "fahrenheit"\n' > "$HOME/.config/takumi/weather.toml"; : > "$FAKE/urls"
+takumi weather >/dev/null
+check "fahrenheit when asked for" 'grep -q "&temperature_unit=fahrenheit" "$FAKE/urls"'
+out=$(takumi weather off)
+check "off: forgotten, and not asked again ($out)" '[[ ! -e "$HOME/.cache/takumi/weather.json" ]] && grep -q "^show = false" "$HOME/.config/takumi/weather.toml" && [[ "$(takumi clock today | jq -r .weather)" == "" ]]'
+
+# ---- The rows
+reset
+check "time: the zone (Enter asks which city)" '[[ "$(row time time:zone)" == "Time zone: Lisbon|10:00 · Portugal · Enter to change|0|true|takumi clock zone" ]]'
+check "time: by location says what is sent where, and asks first" '[[ "$(row zone time:auto)" == "Set the time zone by location|Off · on each new network, asks ipinfo.io which time zone your internet address is in|1|true|takumi clock auto on" ]]'
+check "time: the other format, as it would read" '[[ "$(row clock time:format)" == "Use the 12-hour clock|10:00 AM in the Core, the lock and Today|0|false|takumi clock format 12h" ]]'
+check "a city: its time, a press from Today" '[[ "$(row tokyo time:city:Asia/Tokyo)" == "Tokyo 19:00|Japan · +9 h · Enter to add to Today|0|false|takumi clock add Asia/Tokyo" ]] && [[ -z "$(row tokyo time:set:Asia/Tokyo)" ]]'
+check "a city with zone: moving the clock there asks first" '[[ "$(row "time zone tokyo" time:set:Asia/Tokyo)" == "Set the time zone to Tokyo|Japan · the clock would say 19:00|1|true|takumi clock zone Asia/Tokyo" ]]'
+check "a country with one zone finds its city; one with several, none" '[[ -n "$(row japan time:city:Asia/Tokyo)" && -z "$(rows brazil)" ]]'
+check "remind me, said in the Palette, becomes the row that sets it" '[[ "$(row "remind me in 10 min to stretch" remind:new)" == "Remind me in 10 min: stretch|Enter to set it · it rings in the Core|0|true|takumi remind me in 10 min to stretch" ]]'
+check "remind me without a time: Enter asks when" '[[ "$(row "remind me to call the bank" remind:new | cut -d"|" -f1,2)" == "Remind me to call the bank|Enter, then say when: in 10 min, at 15:00, tomorrow 9:00" ]]'
+check "timer 10 tea becomes the row that starts it" '[[ "$(row "timer 10 tea" timer:new | cut -d"|" -f1,2,5)" == "Start a 10 min timer: tea|Counts down in Today · rings at 10:10|takumi timer 10 tea" ]]'
+takumi remind at 15:00 call Ana >/dev/null; takumi timer 5 >/dev/null
+check "reminders: each one, Enter cancels after asking" '[[ "$(row reminders remind:1)" == "call Ana|Reminder at 15:00 · Enter to cancel|1|false|takumi remind cancel 1" ]]'
+check "timers: each one counting down, Enter stops" '[[ "$(rows timer | jq -r "select(.id == \"timer:2\") | [.title, .subtitle, .refresh] | join(\"|\")")" == "Timer: 5 min left|Rings at 10:05 · Enter to stop|15" ]]'
+check "unrelated words, or under three letters: nothing" '[[ -z "$(rows zebra)" && -z "$(rows ti)" ]]'
+check "every row is JSON with an id, a title, a kind and a glyph" '[[ -z "$(for w in time remind timer weather tokyo; do rows $w; done | jq -c "select((.id and .title and .kind and .glyph) | not)")" ]]'
+
+echo "   $n time checks against fake timedated, systemd, curl and NetworkManager"
+exit $status

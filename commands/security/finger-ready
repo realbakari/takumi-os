@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Whether a finger may be asked for now; PAM runs this before pam_fprintd
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# pam_exec runs this, as root, from the lines takumi security fingerprint puts in /etc/pam.d/sudo and
+# /etc/pam.d/polkit-1 (docs/security.md). Exit 0: ask for a finger first. Anything else: straight to the password.
+# Bash alone, no other program, because PAM gives it no PATH.
+# sudo without a terminal is a Takumi command in the Core: its password comes from the Core or from a pipe.
+case "${PAM_SERVICE:-}" in sudo | sudo-i) [[ -n "${PAM_TTY:-}" ]] || exit 1 ;; esac
+# A closed lid covers the sensor.
+for f in "${TAKUMI_LID:-/proc/acpi/button/lid}"/*/state; do
+  [[ -r "$f" ]] || continue
+  s=""; read -r _ s < "$f" || true
+  [[ "$s" == closed ]] && exit 1
+done
+exit 0

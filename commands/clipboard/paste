@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Put an earlier copy back on the clipboard and paste it into the app you are in
+usage: <id>
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+id=${1:?usage: takumi clipboard paste <id>}
+[[ "$id" =~ ^[0-9]+$ ]] || { echo "usage: takumi clipboard paste <id>" >&2; exit 2; }
+printf '%s\t\n' "$id" | cliphist decode | wl-copy
+# The Core closes first and hands the keyboard back; then the paste key (Super+V's own key, so it works in
+# the terminal too: docs/harmony-keys.md).
+if command -v wtype >/dev/null; then sleep 0.3; wtype -k XF86Paste; else takumi notice edit "Copied" "paste it with Super+V" -1; fi

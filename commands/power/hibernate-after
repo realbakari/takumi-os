@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Sleep, then hibernate after some hours asleep, so the battery lasts for days; never keeps sleep as sleep
+usage: <hours|never>
+example: takumi power hibernate-after 2
+example: takumi power hibernate-after never
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; . "$l/core.sh"; break; }; done
+declare -F power_logind_conf >/dev/null && declare -F core_sudo >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# Every way of sleeping does it: the lid, the minutes after no use, the Sleep row. systemd's suspend-then-hibernate
+# with HibernateDelaySec (Takumi's sleep.conf drop-in) and logind's SleepOperation (takumi-lid.conf), which falls
+# back to plain sleep if hibernation stops working. A conversation for the password. Exit status: 0 done · 2 usage
+# · 3 the password was not given · 5 hibernation is off · 1 anything else. See docs/power.md.
+h=${1:-}
+case "$h" in
+  never | 0) h="" ;;
+  *) [[ "$h" =~ ^[0-9]+$ ]] && (( h >= 1 && h <= 168 )) || { echo "usage: takumi power hibernate-after <hours|never>" >&2; exit 2; } ;;
+esac
+if [[ -n "$h" ]] && ! power_hibernate_ready; then core_fail 5 "Hibernation is off. Turn it on first"; fi
+b=$(power_lid_choice battery); c=""
+if power_lid_own_charger; then c=$(power_lid_choice power); fi
+admin() { core_sudo "Changing what sleep does needs your password" "$@"; }
+admin mkdir -p "${power_sleep_conf%/*}" "${power_lid_conf%/*}" >/dev/null 2>&1 || core_fail 3 "Nothing changed: the password was not given"   # /etc/systemd/sleep.conf.d, /etc/systemd/logind.conf.d
+if [[ -n "$h" ]]; then
+  power_sleep_text "$h" | admin tee "$power_sleep_conf" >/dev/null || core_fail 1 "What sleep does could not be changed"   # /etc/systemd/sleep.conf.d/takumi.conf
+else
+  admin rm -f "$power_sleep_conf" || core_fail 1 "What sleep does could not be changed"   # /etc/systemd/sleep.conf.d/takumi.conf
+fi
+power_logind_conf "$b" "$c" "$h" | admin tee "$power_lid_conf" >/dev/null || core_fail 1 "What sleep does could not be changed"   # /etc/systemd/logind.conf.d/takumi-lid.conf
+admin systemctl kill -s HUP systemd-logind.service >/dev/null 2>&1 || true   # logind reads /etc/systemd/logind.conf.d/takumi-lid.conf again
+if [[ -z "$h" ]]; then core_done "Sleep stays sleep: the computer no longer hibernates by itself"
+elif (( h == 1 )); then core_done "Sleep, then hibernate after an hour asleep"
+else core_done "Sleep, then hibernate after $h hours asleep"; fi

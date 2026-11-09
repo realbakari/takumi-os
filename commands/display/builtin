@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Turn the laptop's own screen off and use only the external one, or on again; it goes back unless you keep it
+usage: <off|on|status>
+example: takumi display builtin off
+example: takumi display builtin on
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/display.sh" ]] && { . "$l/display.sh"; . "$l/core.sh"; break; }; done
+declare -F display_builtin >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh), like every change to a screen: the change shows at once, and Enter keeps it,
+# Esc or ten seconds of silence put it back. "off" is refused unless another screen is on, so the screen you
+# read never goes dark with nothing in its place. Kept off, it stays off for this session, never in
+# outputs.kdl: a guard (the --guard job, its marker "<pid> <port>" in $display_builtin_marker) looks every two
+# seconds, turns the built-in screen back on when the last other screen is unplugged and says so, and turns it
+# off again when niri reloads its config (which forgets `niri msg output ... off`). Logging out ends it, so the
+# next session starts with the laptop's screen on. status prints "on", "off" or "none". Exit status: 0 done or
+# kept · 3 went back · 4 no other screen is on · 5 this computer has no built-in screen · 1 niri said no.
+guard_running() { local pid; [[ -r "$display_builtin_marker" ]] && read -r pid _ < "$display_builtin_marker" && [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; }
+guard_stop() {
+  local pid
+  if [[ -r "$display_builtin_marker" ]] && read -r pid _ < "$display_builtin_marker" && [[ -n "$pid" && "$pid" != "$$" ]]; then kill "$pid" 2>/dev/null || true; fi
+  rm -f "$display_builtin_marker"
+}
+others_on() { display_screens 2>/dev/null | awk -F '\t' -v b="$1" '$1 != b' | grep -c . || true; }
+
+# The guard, started when "off" is kept, as: builtin --guard <port>
+if [[ "${1:-}" == --guard ]]; then
+  port=$2
+  trap 'exit 0' TERM INT
+  while :; do
+    sleep "${TAKUMI_BUILTIN_LOOK:-2}" & wait "$!" || true   # wait, unlike sleep, lets "on" end it at once
+    [[ -r "$display_builtin_marker" ]] || exit 0
+    read -r owner _ < "$display_builtin_marker" || exit 0
+    [[ "$owner" == "$$" ]] || exit 0
+    state=$(display_builtin 2>/dev/null | cut -f2) || continue
+    if (( $(others_on "$port") == 0 )); then
+      niri msg output "$port" on >/dev/null 2>&1 || true
+      rm -f "$display_builtin_marker"
+      takumi notice display "The laptop screen is on again" "the other screen went away" -1 >/dev/null 2>&1 || true
+      exit 0
+    fi
+    [[ "$state" == on ]] && { niri msg output "$port" off >/dev/null 2>&1 || true; }
+  done
+fi
+
+want=${1:-}
+case "$want" in off|on|status) ;; *) echo "usage: takumi display builtin <off|on|status>" >&2; exit 2 ;; esac
+line=$(display_builtin 2>/dev/null) || core_fail 1 "The screens could not be read"
+if [[ -z "$line" ]]; then
+  [[ $want == status ]] && { echo none; exit 0; }
+  core_fail 5 "This computer has no built-in screen"
+fi
+IFS=$'\t' read -r port state <<< "$line"
+[[ $want == status ]] && { echo "$state"; exit 0; }
+
+start_guard() {
+  guard_stop
+  mkdir -p "$display_run"
+  if command -v setsid >/dev/null; then setsid "$0" --guard "$port" </dev/null >/dev/null 2>&1 &
+  else "$0" --guard "$port" </dev/null >/dev/null 2>&1 & fi
+  echo "$! $port" > "$display_builtin_marker"
+}
+off() { niri msg output "$port" off; }
+on()  { niri msg output "$port" on; }
+
+if [[ $want == off ]]; then
+  [[ $state == on ]] || { core_done "The laptop screen is already off"; exit 0; }
+  (( $(others_on "$port") > 0 )) || core_fail 4 "The laptop screen is the only one on: plug in another screen first"
+  display_change "Only the external screen is on" off on start_guard
+else
+  if [[ $state == on ]]; then guard_stop; core_done "The laptop screen is already on"; exit 0; fi
+  display_lid_closed && core_fail 1 "The lid is closed: open it to use the laptop screen"
+  stop_guard_and_on() { guard_stop; on; }
+  off_again() { off; start_guard; }
+  display_change "The laptop screen is on again" stop_guard_and_on off_again
+fi

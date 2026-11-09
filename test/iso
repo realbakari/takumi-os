@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Contract checks for the setup disc (install/iso, docs/iso.md) and the encrypted disk's initramfs hooks.
+# Runs anywhere with bash 3.2: nothing here builds an image.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+status=0 checks=0
+ok()  { checks=$((checks + 1)); }
+bad() { echo "   FAIL: $*"; status=1; }
+has()  { [[ " $1 " == *" $2 "* ]] && ok || bad "$3"; }
+hasnt() { [[ " $1 " != *" $2 "* ]] && ok || bad "$3"; }
+
+# What each architecture's disc runs and installs.
+for a in x86_64 aarch64; do
+  out=$(install/iso/build.sh --packages "$a")
+  live=$(sed -n 's/^live: //p' <<< "$out") target=$(sed -n 's/^target: //p' <<< "$out")
+  for p in base mkinitcpio plymouth greetd niri quickshell cryptsetup btrfs-progs arch-install-scripts jq qrencode; do
+    has "$live" "$p" "$a: the disc does not run $p"
+  done
+  for p in $(sed 's/#.*//' install/packages/base.txt install/packages/desktop.txt); do
+    has "$target" "$p" "$a: the disc does not carry $p from the package lists"
+  done
+done
+x=$(install/iso/build.sh --packages x86_64) arm=$(install/iso/build.sh --packages aarch64)
+has "$x" linux "x86_64 has no kernel"; has "$x" linux-firmware "x86_64 has no firmware"; has "$x" intel-ucode "x86_64 has no microcode"
+hasnt "$x" linux-aarch64 "x86_64 carries the ARM kernel"; hasnt "$x" archlinuxarm-keyring "x86_64 carries the ARM keyring"
+has "$arm" linux-aarch64 "aarch64 has no kernel"; has "$arm" archlinuxarm-keyring "aarch64 has no keyring"
+hasnt "$arm" linux-firmware "aarch64 carries x86 firmware"; hasnt "$arm" " linux " "aarch64 carries the x86 kernel"
+
+# The live initramfs hook: finds the disc by the UUID the build wrote, mounts its image as the root.
+t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
+echo 2026-11-09-10-20-30-00 > "$t/live-media"
+modules=$( BUILDROOT=$t/root TAKUMI_LIVE_MEDIA=$t/live-media bash -c '
+  map() { local f=$1; shift; for a in "$@"; do "$f" "$a"; done; }
+  add_module() { echo "module $1"; }
+  add_systemd_unit() { echo "unit $1"; }
+  add_udev_rule() { echo "rule $1"; }
+  . install/iso/root/usr/lib/initcpio/install/takumi-live; build' )
+for m in isofs squashfs loop overlay; do [[ "$modules" == *"module $m"* ]] && ok || bad "the live initramfs lacks $m"; done
+[[ "$modules" == *"unit systemd-volatile-root.service"* ]] && ok || bad "the live initramfs cannot put memory over the image"
+[[ "$modules" == *"rule 60-cdrom_id.rules"* ]] && ok || bad "a CD drive's disc would never get its UUID link (cdrom_id)"
+grep -q 'rsync -a --no-owner --no-group "$here/root/"' install/iso/build.sh && ok || bad "the live system's /etc would belong to whoever owns the checkout"
+grep -qE '^cp -a ' install/iso/build.sh && bad "cp -a carries the checkout's owner onto the disc" || ok
+grep -q 'systemd.firstboot=no' install/iso/build.sh && ok || bad "first start could stop to ask on the console"
+u=$t/root/etc/systemd/system
+grep -q '^What=/dev/disk/by-uuid/2026-11-09-10-20-30-00$' "$u/run-takumi-media.mount" && ok || bad "the disc is not found by its UUID"
+grep -q '^Where=/run/takumi/media$' "$u/run-takumi-media.mount" && ok || bad "the disc's mount unit is not named for its place"
+grep -q '^What=/run/takumi/media/takumi/root.sfs$' "$u/sysroot.mount" && ok || bad "the root is not the disc's image"
+grep -q '^Options=ro,loop$' "$u/sysroot.mount" && ok || bad "the image is not mounted read-only from a loop"
+[[ "$(readlink "$u/initrd-root-fs.target.requires/sysroot.mount")" == ../sysroot.mount ]] && ok || bad "nothing asks for the root"
+
+# The live system's own files.
+grep -q '^HOOKS=(base systemd plymouth .* block takumi-live)$' install/iso/root/etc/mkinitcpio.conf.d/takumi-live.conf && ok || bad "live hooks"
+grep -q '^HOOKS=.*autodetect' install/iso/root/etc/mkinitcpio.conf.d/takumi-live.conf && bad "the live initramfs only fits the computer it was built on" || ok
+grep -q '^command = "takumi setup start"$' install/iso/root/etc/greetd/config.toml && ok || bad "greetd does not start the setup"
+grep -q '^user = "live"$' install/iso/root/etc/greetd/config.toml && ok || bad "the setup does not run as the live user"
+sudoers=$(grep -v '^#' install/iso/root/etc/sudoers.d/takumi-live)
+[[ "$sudoers" == "live ALL=(root) NOPASSWD: /usr/lib/takumi/commands/setup/install, /usr/bin/systemctl reboot, /usr/bin/systemctl poweroff" ]] && ok || bad "the live user may do more than install, restart and turn off: $sudoers"
+for o in systemd.volatile=overlay systemd.gpt_auto=0 rd.systemd.gpt_auto=0 quiet splash; do
+  grep -q "$o" install/iso/build.sh && ok || bad "the disc's kernel options lack $o"
+done
+grep -q 'append_partition 2 C12A7328-F81F-11D2-BA4B-00A0C93EC93B' install/iso/build.sh && ok || bad "a USB stick would not see a boot partition"
+grep -q -- '-e --interval:appended_partition_2:all::' install/iso/build.sh && ok || bad "a CD drive would not see a boot image"
+for f in install/iso/build.sh install/iso/root/usr/lib/initcpio/install/takumi-live; do bash -n "$f" && ok || bad "syntax: $f"; done
+
+# The installed system's hooks on an encrypted disk: sd-encrypt after block, the keyboard before autodetect.
+hooks() { bash -c 'HOOKS=('"$1"'); . etc/mkinitcpio.conf.d/takumi-encrypt.conf; . etc/mkinitcpio.conf.d/takumi-encrypt.conf; echo "${HOOKS[*]}"'; }
+got=$(hooks 'base systemd autodetect microcode modconf kms keyboard sd-vconsole block filesystems fsck')
+[[ "$got" == "base systemd keyboard autodetect microcode modconf kms sd-vconsole block sd-encrypt filesystems fsck" ]] && ok || bad "encrypted hooks: $got"
+got=$(hooks 'base systemd modconf kms keyboard block filesystems fsck')
+[[ "$got" == "base systemd modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck" ]] && ok || bad "encrypted hooks without autodetect: $got"
+got=$(hooks 'base udev autodetect keyboard keymap block encrypt filesystems')
+[[ "$got" == "base udev autodetect keyboard keymap block encrypt filesystems" ]] && ok || bad "a busybox initramfs with its own encrypt hook was changed: $got"
+
+echo "   $checks checks"
+exit $status

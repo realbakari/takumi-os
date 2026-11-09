@@ -1,0 +1,16 @@
+# Built-in cameras behind Intel's IPU6 (Tiger Lake to Meteor Lake and Arrow Lake laptops: Dell XPS 13 9315 and
+# 9320, ThinkPad X1 Carbon Gen 10 to 12, many others). The kernel's IPU6 input driver and libcamera's software
+# image processing make them work where Linux has a driver for the image sensor; the picture is plainer than
+# on Windows. Ids from the kernel's IPU6 driver.
+# Kernel: https://docs.kernel.org/admin-guide/media/ipu6-isys.html  libcamera: https://libcamera.org/
+title = "Intel IPU6 camera"
+part = "camera"
+works = "partly"
+says = "works on some models"
+
+[match]
+pci = ["8086:9a19", "8086:4e19", "8086:465d", "8086:462e", "8086:a75d", "8086:7d19"]
+
+[apply]
+packages = ["libcamera", "pipewire-libcamera"]
+note = "Cameras on Intel's IPU6 work only on some models: those whose image sensor Linux has a driver for, and only in apps that take the camera through PipeWire, such as web browsers, with plainer colours than on Windows. Apps that open the camera directly see no camera. A USB camera works everywhere."

@@ -1,0 +1,34 @@
+# Sakura: cherry blossom on a spring morning
+# A Takumi theme.
+
+[meta]
+name = "sakura"
+mode = "light"
+title = "Sakura"
+about = "cherry blossom on a spring morning"
+
+[palette]
+accent     = "#c94a72"
+background = "#fbf3f4"
+surface    = "#f1e4e6"
+foreground = "#3a2a30"
+muted      = "#9a8188"
+red        = "#c43d4f"
+yellow     = "#b07a23"
+green      = "#4f8a57"
+cyan       = "#2f8a8f"
+blue       = "#4568a8"
+magenta    = "#a24f9a"
+
+[phase.dawn]
+accent     = "#d0703f"
+background = "#fcf2ed"
+
+[phase.dusk]
+accent     = "#c43d4f"
+
+[phase.night]
+accent     = "#ad4062"
+background = "#f1e9ea"
+surface    = "#e6d9db"
+foreground = "#4d3e44"

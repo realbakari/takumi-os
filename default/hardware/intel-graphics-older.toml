@@ -1,0 +1,14 @@
+# Intel graphics older than Broadwell (GMA 4500 to Haswell, Bay Trail and Braswell): Intel's newer video
+# decoder does not support them, the older one (i965) does.
+# Intel: https://github.com/intel/intel-vaapi-driver
+title = "Older Intel graphics"
+part = "graphics"
+
+[match]
+pci = ["8086:2a4?", "8086:2e??", "8086:004?", "8086:01[0-6]?", "8086:0f3?", "8086:04??", "8086:0a??", "8086:0c??", "8086:0d??", "8086:22b?"]
+pci_class = ["03??"]
+arch = ["x86_64"]
+
+[apply]
+packages = ["libva-intel-driver"]
+note = "Graphics this old decode video with Intel's older driver, which this adds."

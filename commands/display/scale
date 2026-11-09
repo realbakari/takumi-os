@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Make everything on a screen bigger or smaller; it goes back unless you keep it
+usage: <bigger|smaller|100|125|150|200> [screen]
+example: takumi display scale bigger
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/display.sh" ]] && { . "$l/display.sh"; . "$l/core.sh"; break; }; done
+declare -F display_screens >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+want=${1:-}; [[ -n "$want" ]] || { echo "usage: takumi display scale <bigger|smaller|100|125|150|200> [screen]" >&2; exit 2; }
+screens=$(display_screens) || core_fail 1 "The screens could not be read"
+line=$(if [[ -n "${2:-}" ]]; then display_pick "$2" <<< "$screens"; else head -n 1 <<< "$screens"; fi)
+[[ -n "$line" ]] || core_fail 1 "There is no screen called ${2:-}"
+IFS=$'\t' read -r name label pct _ <<< "$line"
+case "$want" in
+  bigger|smaller) to=$(display_next "$display_scales" "$pct" "$want") ;;
+  *) [[ "$want" =~ ^[0-9]+$ ]] || { echo "usage: takumi display scale <bigger|smaller|100|125|150|200> [screen]" >&2; exit 2; }; to=$want ;;
+esac
+if [[ -z "$to" ]]; then
+  [[ "$want" == bigger ]] && { core_done "Everything on $label is as big as it goes"; exit 0; }
+  core_done "Everything on $label is as small as it goes"; exit 0
+fi
+[[ "$to" == "$pct" ]] && { core_done "$label is already at $to%"; exit 0; }
+apply() { niri msg output "$name" scale "$(display_factor "$to")"; }
+undo()  { niri msg output "$name" scale "$(display_factor "$pct")"; }
+display_change "Everything on $label at $to%" apply undo

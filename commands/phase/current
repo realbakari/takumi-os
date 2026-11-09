@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print the phase in effect: dawn, day, dusk or night
+risk: 0
+ABOUT
+set -euo pipefail
+cfg=${TAKUMI_PHASE_FILE:-$HOME/.config/takumi/phase.toml}
+get() { sed -n "s/^$1 *= *\"\(.*\)\"/\1/p" "$cfg" 2>/dev/null | head -1; }
+override=$(get phase)
+if [[ -n "$override" && "$override" != auto ]]; then echo "$override"; exit 0; fi
+tmin() { local h=${1%%:*} m=${1##*:}; echo $((10#$h * 60 + 10#$m)); }
+now=$(tmin "$(date +%H:%M)")
+dawn=$(tmin "${TAKUMI_DAWN:-$(get dawn)}"); day=$(tmin "${TAKUMI_DAY:-$(get day)}")
+dusk=$(tmin "${TAKUMI_DUSK:-$(get dusk)}"); night=$(tmin "${TAKUMI_NIGHT:-$(get night)}")
+: "${dawn:=330}" "${day:=480}" "${dusk:=1050}" "${night:=1230}"
+if   (( now >= night || now < dawn )); then echo night
+elif (( now >= dusk )); then echo dusk
+elif (( now >= day ));  then echo day
+else echo dawn; fi

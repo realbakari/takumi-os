@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: The disks Takumi could be installed on, one JSON line each
+risk: 0
+hidden: yes
+ABOUT
+# {"path":"/dev/nvme0n1","name":"Samsung SSD 980","size":1000204886016,"sizeText":"1 TB","kind":"internal",
+#  "holds":"Windows","ok":true,"why":"","free":120034123776,"freeText":"120 GB","beside":true,"bitlocker":false}.
+# kind: internal, usb or virtual. holds: what is on it now, in the words the setup screen uses (Windows, macOS,
+# Linux, Takumi, files, nothing). free: the largest stretch no partition uses; beside: Takumi can go there and
+# leave Windows as it is. The setup disc itself and read-only disks are never listed; a disk under 30 GB is
+# listed with why it cannot be used.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib/setup.sh "$here/../../lib/setup.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+lsblk -J -b -o NAME,PATH,TYPE,SIZE,START,TRAN,MODEL,RM,RO,HOTPLUG,FSTYPE,LABEL,PARTTYPENAME \
+  | jq -c --arg live "$(setup_media_disk)" --argjson min $(( 30 * 1000 * 1000 * 1000 )) '
+  def yes: . == true or . == "1" or . == 1;
+  def bytes: if . >= 1e12 then ((. / 1e11 | floor) / 10 | tostring | sub("\\.0$"; "")) + " TB" else ((. / 1e9 | floor | tostring) + " GB") end;
+  def holds:
+    [.. | objects | select(has("fstype"))] as $all
+    | ($all | map(.fstype // "")) as $fs
+    | if ($fs | any(. == "ntfs" or . == "BitLocker")) or ($all | any((.parttypename // "") | test("Microsoft"))) then "Windows"
+      elif ($fs | any(. == "apfs" or . == "hfsplus")) then "macOS"
+      elif ($all | any((.label // "") == "takumi")) then "Takumi"
+      elif ($fs | any(. == "ext4" or . == "btrfs" or . == "xfs" or . == "f2fs" or . == "crypto_LUKS" or . == "LVM2_member")) then "Linux"
+      elif ($fs | any(. != "")) then "files"
+      else "nothing" end;
+  # The largest gap between partitions, or before the first or after the last, in bytes (START is in
+  # 512-byte sectors; the first MiB and the backup GPT at the end are never free).
+  def free:
+    ((.size / 512) | floor) as $total
+    | ([(.children // [])[] | select(.start != null)
+        | {s: (.start | tonumber), e: ((.start | tonumber) + (((.size | tonumber) / 512) | floor))}] | sort_by(.s)) as $p
+    | ([2048] + ($p | map(.e))) as $ends
+    | (($p | map(.s)) + [$total - 34]) as $starts
+    | ([range(0; $starts | length) | ($starts[.] - $ends[.])] | max) as $gap
+    | if $gap > 0 then $gap * 512 else 0 end;
+  .blockdevices[]
+  | select(.type == "disk" and (.ro | yes | not) and .path != $live and (.name | test("^(zram|loop|ram)") | not))
+  | (.size >= $min) as $ok
+  | { path, size,
+      name: ((.model // "" | gsub("^\\s+|\\s+$"; "")) as $m
+             | if $m != "" then $m elif .tran == "usb" then "USB drive" elif (.name | test("^x?vd")) then "Virtual disk" else .name end),
+      sizeText: (.size | bytes),
+      kind: (if .tran == "usb" or (.rm | yes) or (.hotplug | yes) then "usb" elif (.name | test("^x?vd")) then "virtual" else "internal" end),
+      holds: holds, ok: $ok, why: (if $ok then "" else "Too small: Takumi needs 30 GB" end) }
+    + (free as $f | {free: $f, freeText: ($f | bytes),
+       beside: (holds == "Windows" and $f >= $min),
+       bitlocker: ([.. | objects | .fstype? // empty] | any(. == "BitLocker"))})'

@@ -1,0 +1,33 @@
+# Fuji: wisteria at dusk
+# A Takumi theme.
+
+[meta]
+name = "fuji"
+mode = "dark"
+title = "Fuji"
+about = "wisteria at dusk"
+
+[palette]
+accent     = "#b49cf0"
+background = "#17141f"
+surface    = "#1f1b2a"
+foreground = "#e2dcf0"
+muted      = "#6b6280"
+red        = "#f07a95"
+yellow     = "#e8cc86"
+green      = "#96d3a6"
+cyan       = "#8fd0e0"
+blue       = "#8fa8f5"
+magenta    = "#d79ef0"
+
+[phase.dawn]
+accent     = "#f0a07a"
+
+[phase.dusk]
+accent     = "#f09383"
+
+[phase.night]
+accent     = "#798dce"
+background = "#0f0d14"
+surface    = "#16131d"
+foreground = "#cac4d7"

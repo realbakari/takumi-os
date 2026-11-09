@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Record an area or a screen, with the computer's sound, your microphone and your camera if you like; run it again to stop
+usage: [area|screen|stop] [--sound none|computer|mic|both] [--camera]
+example: takumi screen record --sound both --camera
+example: takumi screen record screen --sound computer
+example: takumi screen record stop
+risk: 0
+title: Record the screen
+words: record recording video screencast capture film sound audio microphone mic voice narrate camera webcam
+glyph: video
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/capture.sh" ]] && { . "$l/capture.sh"; . "$l/core.sh"; break; }; done
+declare -F capture_running >/dev/null && declare -F core_confirm >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# One recording at a time (lib/capture.sh, docs/capture.md). Started from its row in the Core it is a
+# conversation: the Core asks what to take in, the last choice first, and the recording starts once the Core
+# has closed. Started from the key, Quick settings or a terminal, it takes in what was chosen last, or exactly
+# what --sound and --camera say. While it runs the Core shows a red mark with the time; pressing it, the key
+# again, or this command stops it, and the sound is evened out before the Core offers the file. Exit status:
+# 0 recording, or stopped and saved · 1 it could not record, or the recording did not save · 2 usage. The
+# last line says it in words.
+usage() { echo "usage: takumi screen record [area|screen|stop] [--sound none|computer|mic|both] [--camera]" >&2; exit 2; }
+want="" sound="" camera=""
+while (( $# )); do
+  case "$1" in
+    area | screen | stop) [[ -z "$want" ]] || usage; want=$1 ;;
+    --sound) (( $# > 1 )) || usage; sound=$2; shift ;;
+    --sound=*) sound=${1#--sound=} ;;
+    --camera) camera=yes ;;
+    *) usage ;;
+  esac
+  shift
+done
+case "$sound" in "" | none | computer | mic | both) ;; *) usage ;; esac
+
+# The recorder finishes its file, the mix and the camera go, then the sound is evened out in place.
+stop() {
+  local pid since file secs len k v sound=none camera=no mods=""
+  read -r pid since file < "$capture_marker"
+  if [[ -r "$capture_parts" ]]; then
+    while read -r k v; do
+      case "$k" in sound) sound=$v ;; camera) camera=$v ;; module) mods="$mods $v" ;; esac
+    done < "$capture_parts"
+  fi
+  kill -INT "$pid" 2>/dev/null || true
+  for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  if kill -0 "$pid" 2>/dev/null; then kill -TERM "$pid" 2>/dev/null || true; sleep 1; fi
+  # shellcheck disable=SC2086 # one module id per word
+  capture_unload $mods
+  [[ $camera == yes ]] && capture_camera_hide
+  rm -f "$capture_marker" "$capture_parts"
+  secs=$(( $(date +%s) - since )); len=$(printf '%d:%02d' $(( secs / 60 )) $(( secs % 60 )))
+  if [[ ! -s "$file" ]]; then
+    capture_notice warn "The recording did not save" "" -1
+    core_fail 1 "The recording did not save"
+  fi
+  if [[ $sound != none ]]; then
+    core_note "Evening out the sound…"
+    core_in_core || capture_notice video "Saving the recording" "evening out the sound" -1 30
+    capture_loudness "$file" || true
+  fi
+  capture_notice --open "$file" video "Recording saved" "$len · in Videos, Recordings · press to open" -1 6
+  core_in_core || echo "Saved $file ($len)"
+}
+
+# A recording that ended by itself leaves its mix and its camera behind.
+leftovers() {
+  local k v mods=""
+  if [[ -r "$capture_parts" ]]; then
+    while read -r k v; do
+      case "$k:$v" in module:*) mods="$mods $v" ;; camera:yes) capture_camera_hide ;; esac
+    done < "$capture_parts"
+  fi
+  # shellcheck disable=SC2086 # one module id per word
+  capture_unload $mods
+  rm -f "$capture_marker" "$capture_parts"
+}
+
+if capture_running; then
+  [[ -z "$want" || "$want" == stop ]] || core_fail 1 "Already recording: takumi screen record stop"
+  stop
+  exit 0
+fi
+[[ -e "$capture_marker" || -e "$capture_parts" ]] && leftovers
+[[ "$want" == stop ]] && { echo "Nothing is recording"; exit 0; }
+
+# From its row in the Core: what to take in, the last choice first. Each step adds one thing, so the questions
+# stop at the first no.
+choose() {
+  local s c
+  if [[ -f "$capture_config" ]]; then
+    s=$(capture_saved sound); c=$(capture_saved camera)
+    if core_confirm "$(capture_words "$s" "$c"), like last time?"; then sound=$s camera=$c; return 0; fi
+  fi
+  sound=none camera=no
+  core_confirm "Record the computer's sound?" || return 0
+  sound=computer
+  core_confirm "And your microphone?" || return 0
+  sound=both
+  core_confirm "And your camera?" && camera=yes
+  return 0
+}
+if core_in_core && [[ -z "$sound" && -z "$camera" ]]; then
+  choose
+  capture_save "$sound" "$camera"
+  args=("${want:-area}" --sound "$sound"); [[ $camera == yes ]] && args+=(--camera)
+  # The Core closes first: it stays out of the picture, and the area can be drawn anywhere.
+  capture_detach 0.6 takumi screen record "${args[@]}"
+  if [[ "${want:-area}" == area ]]; then core_done "Drag over what to record, or click a screen"; else core_done "Recording the screen"; fi
+  exit 0
+fi
+if [[ -z "$sound" && -z "$camera" ]]; then sound=$(capture_saved sound); camera=$(capture_saved camera)
+else sound=${sound:-none}; camera=${camera:-no}; fi
+
+if ! command -v wf-recorder >/dev/null; then
+  capture_notice warn "Recording needs wf-recorder" "it comes with Takumi's desktop packages" -1
+  echo "Recording needs wf-recorder" >&2; exit 1
+fi
+dir=$(capture_videos); mkdir -p "$dir" "$capture_run"
+stamp=$(date '+%Y-%m-%d %H-%M-%S'); file="$dir/$stamp.mp4"; n=2
+while [[ -e "$file" ]]; do file="$dir/$stamp $n.mp4"; n=$((n + 1)); done
+
+# Where: an area drawn with slurp (a click takes a whole screen), or the screen in front. slurp reads boxes from
+# a stdin that is not a terminal, so it gets none.
+geo="" out=""
+if [[ "${want:-area}" == area ]]; then
+  geo=$(slurp -o -d </dev/null 2>/dev/null) || { capture_notice video "No recording" "nothing was chosen" -1; echo "Nothing was chosen"; exit 0; }
+else
+  IFS=$'\t' read -r out geo <<< "$(capture_focused_output)" || true
+fi
+
+# What is taken in can be less than what was asked: a computer with no microphone records its own sound.
+said="" audio="" mods="" sink="" mic=""
+case "$sound" in computer | both) sink=$(capture_sink) ;; esac
+case "$sound" in mic | both) mic=$(capture_mic) ;; esac
+case "$sound" in
+  both)
+    if [[ -z "$mic" && -n "$sink" ]]; then sound=computer; said="No microphone found, so the computer's sound only"
+    elif [[ -z "$sink" && -n "$mic" ]]; then sound=mic; said="The computer's sound was not found, so your microphone only"
+    elif [[ -z "$sink" ]]; then sound=none; said="No sound was found to record"; fi ;;
+  computer) [[ -n "$sink" ]] || { sound=none; said="The computer's sound was not found, so no sound"; } ;;
+  mic) [[ -n "$mic" ]] || { sound=none; said="No microphone found, so no sound"; } ;;
+esac
+case "$sound" in
+  computer) audio="$sink.monitor" ;;
+  mic) audio=$mic ;;
+  both)
+    capture_unmix_stale
+    if mods=$(capture_mix "$sink" "$mic"); then audio="$capture_mix_sink.monitor"
+    else sound=computer audio="$sink.monitor" mods="" said="Your microphone could not be added, so the computer's sound only"; fi ;;
+esac
+
+# The camera's bubble goes up before the first frame, in a corner of what is recorded.
+if [[ $camera == yes ]]; then
+  if ! capture_camera; then
+    camera=no; said="${said:+$said · }No camera found"
+  elif ! nums=$(capture_numbers "$geo") || ! read -r cx cy cw ch <<< "$nums" || ! capture_camera_show "$cx" "$cy" "$cw" "$ch"; then
+    camera=no; said="${said:+$said · }The camera could not start"
+  else
+    sleep 1   # its first pictures
+  fi
+fi
+
+recorder() {
+  args=(-f "$file")
+  if [[ "${want:-area}" == area ]]; then args+=(-g "$geo"); elif [[ -n "$out" ]]; then args+=(-o "$out"); fi
+  [[ -z "$audio" ]] || args+=("--audio=$audio")
+}
+recorder
+capture_spawn "$capture_log" wf-recorder "${args[@]}"
+started=$(date +%s)
+sleep 0.5
+# A sound source the recorder could not open: once more, for the picture alone.
+if [[ -n "$audio" ]] && ! kill -0 "$capture_pid" 2>/dev/null; then
+  # shellcheck disable=SC2086 # one module id per word
+  capture_unload $mods
+  sound=none audio="" mods="" said="The sound could not be recorded, so the picture only"
+  rm -f "$file"; recorder
+  capture_spawn "$capture_log" wf-recorder "${args[@]}"
+  started=$(date +%s)
+  sleep 0.5
+fi
+if ! kill -0 "$capture_pid" 2>/dev/null; then
+  [[ $camera == yes ]] && capture_camera_hide
+  capture_notice warn "The recording did not start" "" -1
+  echo "The recording did not start; wf-recorder said why in $capture_log" >&2; exit 1
+fi
+printf '%s %s %s\n' "$capture_pid" "$started" "$file" > "$capture_marker"
+{
+  printf 'sound %s\ncamera %s\n' "$sound" "$camera"
+  # shellcheck disable=SC2086 # one module id per word
+  [[ -z "$mods" ]] || printf 'module %s\n' $mods
+} > "$capture_parts"
+if [[ -n "$said" ]]; then capture_notice video "Recording" "$said · press the red mark in the Core to stop" -1 5
+else capture_notice video "Recording" "$(capture_words "$sound" "$camera") · press the red mark in the Core to stop" -1; fi
+echo "Recording to $file"

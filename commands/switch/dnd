@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Hold notices until you are ready
+risk: 0
+title: Do not disturb
+words: dnd quiet focus notifications
+glyph: moon
+ABOUT
+set -euo pipefail
+# The shell's notification server holds messages while the flag exists (shell/Sources/Notices.qml).
+f="$HOME/.local/state/takumi/dnd"
+if [[ -f "$f" ]]; then rm -f "$f"; takumi notice moon "Do not disturb off"; else mkdir -p "${f%/*}"; touch "$f"; takumi notice moon "Do not disturb on" "only urgent messages show"; fi
+command -v qs >/dev/null && qs -c takumi ipc --any-display call notices dnd >/dev/null 2>&1 || true

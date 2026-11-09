@@ -1,0 +1,35 @@
+# Ayu Light: Ayu's orange on clean white
+# Colours after Ayu by dempfi (https://github.com/ayu-theme/ayu-colors); phases by Takumi.
+
+[meta]
+name = "ayu-light"
+mode = "light"
+title = "Ayu Light"
+about = "Ayu's orange on clean white"
+credit = "Ayu by dempfi (https://github.com/ayu-theme/ayu-colors)"
+
+[palette]
+accent     = "#d77935"
+background = "#fcfcfc"
+surface    = "#f3f4f5"
+foreground = "#53575c"
+muted      = "#8f9297"
+red        = "#e66c6c"
+yellow     = "#bd8839"
+green      = "#769e00"
+cyan       = "#40a081"
+blue       = "#3798dd"
+magenta    = "#a37acc"
+
+[phase.dawn]
+accent     = "#d77935"
+background = "#fdf8f2"
+
+[phase.dusk]
+accent     = "#db7446"
+
+[phase.night]
+accent     = "#b9682e"
+background = "#f4f4f4"
+surface    = "#e9ebec"
+foreground = "#505356"

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Eject a USB drive or memory card, so it can be taken out without losing anything
+usage: <name>
+example: takumi drive eject SanDisk
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/drive.sh" ]] && { . "$l/drive.sh"; . "$l/core.sh"; break; }; done
+declare -F drive_volumes >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh). The whole drive goes: every part of it is closed (what was being written is
+# written first), encrypted parts are locked again, then udisks powers the drive off when it can, so its
+# light goes out. Exit status: 0 it can be taken out · 4 something still uses it · 5 no such drive ·
+# 1 anything else. The last line says it in words.
+name=${1:-}
+[[ -n "$name" ]] || { echo "usage: takumi drive eject <name>" >&2; exit 2; }
+command -v udisksctl >/dev/null || core_fail 1 "Drives need udisks (the udisks2 package)"
+found=$(drive_find "$name")
+[[ -n "$found" ]] || core_fail 5 "No drive called $name is plugged in"
+drive_read "$(head -n 1 <<< "$found")"
+whole=$d_whole dname=$d_dname short=$d_short poweroff=$d_poweroff
+all=$(drive_volumes | awk -F "$drive_sep" -v w="$whole" '$10 == w')
+core_note "Ejecting $dname…"
+# Open contents first, then the encrypted parts that hold them.
+while IFS= read -r -u 3 v; do
+  [[ -n "$v" ]] || continue
+  drive_read "$v"
+  [[ $d_state == open ]] || continue
+  if ! out=$(LC_ALL=C udisksctl unmount -b "$d_dev" 2>&1); then
+    case "$out" in
+      *[Bb]usy*) core_fail 4 "Something is still using $dname. Close what is open from it, then eject again" ;;
+      *NotMounted*|*"not mounted"*) ;;
+      *) core_fail 1 "$dname could not be ejected: $(drive_why "$out" "$d_type")" ;;
+    esac
+  fi
+  drive_forget "$d_dev"
+done 3<<< "$all"
+while IFS= read -r -u 3 v; do
+  [[ -n "$v" ]] || continue
+  drive_read "$v"
+  [[ $d_state == unlocked ]] || continue
+  out=$(LC_ALL=C udisksctl lock -b "$d_dev" 2>&1) || core_fail 1 "$dname could not be locked again: $(drive_why "$out" "$d_type")"
+done 3<<< "$all"
+# Powering off is the last step, and a reader that cannot be powered off is safe to pull now anyway.
+if [[ $poweroff == yes ]]; then LC_ALL=C udisksctl power-off -b "$whole" >/dev/null 2>&1 || true; fi
+core_in_core || takumi notice usb "You can take out $short" "" -1 >/dev/null 2>&1 || true
+core_done "You can take out $short"

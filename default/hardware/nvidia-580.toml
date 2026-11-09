@@ -1,0 +1,19 @@
+# NVIDIA Maxwell, Pascal and Volta (GTX 750 to GTX 10, Titan V): NVIDIA's last driver for them is the 580
+# series, which Arch no longer carries (it moved to the AUR with driver 590). Takumi keeps the open nouveau
+# driver, adds its Vulkan driver, and names the AUR packages without installing them.
+# Arch: https://archlinux.org/news/nvidia-590-driver-drops-pascal-support-main-packages-switch-to-open-kernel-modules/
+# Mesa's nouveau Vulkan driver (NVK): https://docs.mesa3d.org/drivers/nvk.html
+title = "NVIDIA graphics, Maxwell to Volta"
+part = "graphics"
+works = "partly"
+says = "open nouveau driver, slow for games"
+
+[match]
+pci = ["10de:13??", "10de:14??", "10de:15??", "10de:16??", "10de:17??", "10de:18??", "10de:19??", "10de:1a??", "10de:1b??", "10de:1c??", "10de:1d??"]
+pci_class = ["03??"]
+arch = ["x86_64"]
+
+[apply]
+packages = ["vulkan-nouveau", "lib32-vulkan-nouveau"]
+aur = ["nvidia-580xx-dkms", "nvidia-580xx-utils", "lib32-nvidia-580xx-utils"]
+note = "NVIDIA's last driver for this card, the 580 series, is no longer in Arch's own repositories. Takumi uses the open nouveau driver: the desktop and video work, games run slowly. NVIDIA's own driver can be installed from the AUR (nvidia-580xx-dkms); Takumi never installs it by itself."

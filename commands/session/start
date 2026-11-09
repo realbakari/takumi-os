@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Start the Takumi session (the login screen runs this)
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+mkdir -p "$HOME/.local/state/takumi"
+# Migrations set a home up and keep it current, before niri reads a line of it: the first one copies the
+# settings Takumi ships, so even a brand-new account's first frame is Takumi's (docs/migrations.md).
+takumi migrate > "$HOME/.local/state/takumi/migrate.log" 2>&1 || true
+# A VM without 3D draws every frame on the CPU. Mesa's driver for QEMU's GPU cannot allocate screen buffers
+# without 3D, so niri gets the software driver that can (kms_swrast) and drives the screen itself: its own
+# scale for the screen's density, its modes, and a hardware pointer that QEMU draws on the host. The
+# override is niri's alone; what niri starts gets Mesa's own choice. The shell drops what moves for long
+# or glows (Style.softwareDrawing) and niri runs without animations, with Alt as its modifier, through a
+# config that includes yours. See docs/vm.md.
+if [[ -f /etc/takumi/vm ]]; then
+  export TAKUMI_DRAWING=software
+  run="${XDG_RUNTIME_DIR:-$HOME/.local/state/takumi}/takumi"; mkdir -p "$run"
+  printf '%s\n' "// Written by takumi session start for a VM without 3D: your config, without animations." \
+    "include \"$HOME/.config/niri/config.kdl\"" "animations { off; }" "environment { MESA_LOADER_DRIVER_OVERRIDE null; }" \
+    "// The Mac keeps Command (Super) and Command+Space for itself: Alt is the modifier here." "input { mod-key \"Alt\"; }" > "$run/niri-vm.kdl"
+  exec env MESA_LOADER_DRIVER_OVERRIDE=kms_swrast niri --config "$run/niri-vm.kdl" > "$HOME/.local/state/takumi/session.log" 2>&1
+fi
+# A real computer whose graphics driver cannot draw (a new GPU before its driver, a driver an update broke):
+# niri then keeps running with no screen at all, a black screen with nothing to do. A watcher asks niri a
+# few seconds in; with no screens it ends that start, and the session starts again drawing on the CPU,
+# as a VM without 3D does but with your own keys, and says so once. The failure is remembered until the
+# kernel or Mesa changes, so later logins go straight to drawing on the CPU and an update tries the
+# driver again. See docs/boot.md.
+state="$HOME/.local/state/takumi"; failed="$state/drawing-failed"
+stack="$(uname -r) $(pacman -Q mesa 2>/dev/null || true)"
+software() {   # start niri drawing on the CPU; $1: "new" when the driver failed just now
+  export TAKUMI_DRAWING=software
+  run="${XDG_RUNTIME_DIR:-$state}/takumi"; mkdir -p "$run"
+  printf '%s\n' "// Written by takumi session start: the graphics driver could not draw, so niri draws on the CPU." \
+    "include \"$HOME/.config/niri/config.kdl\"" "animations { off; }" "environment { MESA_LOADER_DRIVER_OVERRIDE null; }" > "$run/niri-software.kdl"
+  [[ "${1:-}" == new ]] && (sleep 8; takumi notice warn "Graphics are running without their driver" \
+    "Everything works, a little slower. The driver is tried again after the next update" -1 12 >/dev/null 2>&1 || true) &
+  exec env MESA_LOADER_DRIVER_OVERRIDE=kms_swrast niri --config "$run/niri-software.kdl" >> "$state/session.log" 2>&1
+}
+[[ -f "$failed" && "$(cat "$failed")" == "$stack" ]] && software
+rm -f "$failed"
+(
+  sleep "${TAKUMI_DRAWING_CHECK:-6}"
+  sock=""; for s in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"/niri.wayland-*.sock; do [[ -S "$s" ]] && sock=$s; done
+  [[ -n "$sock" ]] || exit 0
+  outputs=$(NIRI_SOCKET=$sock niri msg --json outputs 2>/dev/null || true)
+  if [[ "$outputs" == "{}" ]]; then
+    printf '%s\n' "$stack" > "$failed"
+    NIRI_SOCKET=$sock niri msg action quit --skip-confirmation >/dev/null 2>&1 || true
+  fi
+) &
+niri-session > "$state/session.log" 2>&1 || true
+[[ -f "$failed" ]] && software new

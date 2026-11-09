@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Start the setup screen: on Takumi's setup disc (greetd runs this as the live user), or at a first start
+usage: [--owner]
+risk: 0
+hidden: yes
+ABOUT
+# niri draws the setup screen, so the keyboard can change while it runs (takumi setup keyboard rewrites its
+# config and niri reads it again). A GPU that cannot draw (a virtual machine without 3D) leaves niri running
+# with no screen at all: it says so by listing no outputs, and starts again with Mesa's software driver
+# while the screen drops what moves for long.
+# --owner: the first start of a computer set up for someone else, or erased (takumi-first-start.service runs
+# it as the greeter user before the login screen). The screen asks its owner, and starts again if it stops
+# while the computer still has no owner. See docs/setup.md.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib/setup.sh "$here/../../lib/setup.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+owner=no
+case "${1:-}" in --owner) owner=yes ;; "") ;; *) echo "usage: takumi setup start [--owner]" >&2; exit 2 ;; esac
+run=$(setup_run); mkdir -p "$run"
+exec >>"$run/session.log" 2>&1
+share=${TAKUMI_SETUP_SHARE:-/usr/share/takumi}
+if [[ $owner == yes ]]; then
+  # The greeter's home is /: its caches (compiled QML, the language list) live with the screen.
+  export TAKUMI_SETUP_MODE=owner XDG_CACHE_HOME=$run/cache TAKUMI_SETUP_SKIES=$run/skies
+  theme=$(cat "$share/config/takumi/theme" 2>/dev/null || echo ion)
+  for phase in dawn day dusk night; do
+    HOME=/nonexistent TAKUMI_RENDER_OUT="$TAKUMI_SETUP_SKIES/$phase" TAKUMI_RENDER_PALETTE_ONLY=1 \
+      takumi theme render "$theme" "$phase" >/dev/null || true
+  done
+  # The keyboard the computer was set up with, as the disk's password prompt typed it a moment ago.
+  layout="" variant=""
+  if [[ -r "${TAKUMI_SETUP_ETC:-/etc}/vconsole.conf" ]]; then
+    layout=$(sed -n 's/^XKBLAYOUT=//p' "${TAKUMI_SETUP_ETC:-/etc}/vconsole.conf" | tr -d '"' | tail -n 1)
+    variant=$(sed -n 's/^XKBVARIANT=//p' "${TAKUMI_SETUP_ETC:-/etc}/vconsole.conf" | tr -d '"' | tail -n 1)
+  fi
+  # "us,ru": the second is the person's own; US English is there to type a password.
+  if [[ "$layout" == us,* ]]; then layout=${layout#us,}; variant=${variant#*,}; fi
+  layout=${layout%%,*}; variant=${variant%%,*}
+  if [[ -n "$layout" ]] && takumi setup keyboard "$layout" ${variant:+"$variant"}; then :; else takumi setup keyboard --guess; fi
+else
+  takumi setup keyboard --guess
+fi
+cp "$(setup_skies)/night/palette.toml" "$run/palette.toml" 2>/dev/null || true
+export TAKUMI_SETUP_RUN=$run TAKUMI_THEME_FILE=$run/palette.toml TAKUMI_WALLPAPER=$run/sky
+
+# niri's IPC socket, once it has one: the newest under the runtime folder.
+socket() {
+  sock=""
+  local s
+  for _ in $(seq 1 40); do
+    for s in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"/niri.wayland-*.sock; do [[ -S "$s" ]] && sock=$s; done
+    [[ -n "$sock" ]] && return 0
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.25
+  done
+}
+# The setup screen starts here, once niri is the one that stays: started by a niri that is then replaced, a
+# second screen would come up under the first and keep the keyboard.
+screen() {   # $1: niri's IPC socket, whose name carries its Wayland display
+  local display=${1##*/niri.}; display=${display%%.*}
+  WAYLAND_DISPLAY=$display NIRI_SOCKET=$1 qs -p /usr/share/takumi/shell/setup.qml &
+}
+# One run of niri with the screen in it, until niri ends.
+session() {
+  if [[ ! -f "$run/drawing" ]]; then
+    niri --config "$run/niri.kdl" &
+    pid=$!
+    socket
+    sleep 0.5
+    outputs=$(NIRI_SOCKET=$sock niri msg --json outputs 2>/dev/null || true)
+    if [[ -n "$sock" && -n "$outputs" && "$outputs" != "{}" ]]; then screen "$sock"; wait "$pid"; return $?; fi
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    echo software > "$run/drawing"
+    takumi setup keyboard --again
+  fi
+  export TAKUMI_DRAWING=software
+  MESA_LOADER_DRIVER_OVERRIDE=kms_swrast niri --config "$run/niri.kdl" &
+  pid=$!
+  socket
+  [[ -n "$sock" ]] && screen "$sock"
+  wait "$pid"
+}
+if [[ $owner == no ]]; then session; exit $?; fi
+# The first start: the screen quits niri once the owner is set up. Until then, a screen that stopped comes
+# back, three times at most: then the login screen follows, and the computer starts here again next time.
+for _ in 1 2 3; do
+  session || true
+  [[ -e "$TAKUMI_FIRST_START" ]] || exit 0
+done
+exit 0

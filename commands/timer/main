@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Start a timer that counts down in Today and rings when it is done
+usage: <minutes | 90 s | 1 h 30> [name]
+example: takumi timer 10
+example: takumi timer 25 min tea
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/core.sh"; break; }; done
+declare -F clock_duration >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# A number on its own is minutes. A conversation: with no length the Core asks for one, and asks again when it
+# is not one. A timer is a reminder of its own kind (lib/clock.sh): takumi remind list shows it, takumi timer
+# stop or takumi remind cancel stops it. Exit status: 0 started · 3 no answer came · 4 not a length of time
+# (a day at most) · 1 systemd would not keep the timer.
+hint="10, 90 s, 1 h 30"
+secs="" name=""
+if (( $# )); then
+  if r=$(clock_duration "$@"); then secs=${r%%$'\t'*}; name=${r#*$'\t'}
+  else core_fail 4 "That is not a length of time: try $hint"; fi
+fi
+while [[ -z "$secs" ]]; do
+  core_ask answer "How long? $hint" || core_fail 3 "No timer was started"
+  if r=$(clock_duration "$answer"); then secs=${r%%$'\t'*}; name=${r#*$'\t'}; break; fi
+  core_wrong "That is not a length of time: try $hint"
+  [[ "${TAKUMI_CORE:-}" == 1 ]] || core_fail 4 "That is not a length of time: try $hint"
+done
+at=$(( $(clock_now) + secs ))
+remind_add timer "$at" "$name" >/dev/null || core_fail 1 "The timer could not start: systemd did not take it"
+said="$(clock_length "$secs") timer · rings at $(clock_hm "$at")"
+[[ -n "$name" ]] && said="$name: $said"
+core_in_core || takumi notice clock "${name:-Timer}" "$(clock_length "$secs") · rings at $(clock_hm "$at")" >/dev/null 2>&1 || true
+core_done "$said"

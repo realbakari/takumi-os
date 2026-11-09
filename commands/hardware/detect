@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: The fixes in Takumi's hardware data that match this computer, and what each would set up, as JSON
+usage: [--all] [--data <dir>]
+example: takumi hardware detect | jq '.matches[].title'
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/hardware.sh" ]] && { . "$l/hardware.sh"; break; }; done
+declare -F hw_facts >/dev/null || { echo "takumi: the hardware library is missing" >&2; exit 1; }
+# One JSON object: computer (what it is), devices (its PCI and USB devices), matches (each fix that applies, why,
+# which devices, and its [apply] table) and unreadable (fix files that are not the TOML Takumi reads). Reads
+# lspci -vmm -nn -k, lsusb, /sys/class/dmi/id, /proc/cpuinfo, /proc/device-tree/compatible and, when a fix
+# asks, the kernel's messages; every path can be pointed elsewhere (lib/hardware.sh). --all lists every fix as
+# if it matched, with its [match] table, without looking at the hardware: what a setup disc must carry for each
+# architecture. Exit: 0, 1 no data, 2 usage.
+all=no data=""
+while (( $# )); do
+  case "$1" in
+    --all) all=yes; shift ;;
+    --data) [[ -n "${2:-}" ]] || { echo "usage: takumi hardware detect [--all] [--data <dir>]" >&2; exit 2; }; data=$2; shift 2 ;;
+    *) echo "usage: takumi hardware detect [--all] [--data <dir>]" >&2; exit 2 ;;
+  esac
+done
+command -v jq >/dev/null || { echo "takumi: hardware detection needs jq" >&2; exit 1; }
+dir=$(hw_data_dir "$data") || { echo "takumi: no hardware data${data:+ in $data}" >&2; exit 1; }
+fixes=$(hw_fixes "$dir")
+if [[ $all == yes ]]; then
+  printf '%s\n' "$fixes" | jq -sc '{computer: null, devices: null,
+    matches: [.[] | select(.error == null) | {id, file, title, part, works, says, keep, why: ["--all"], devices: [], match, apply}],
+    unreadable: [.[] | select(.error) | {file, error}]}'
+  exit 0
+fi
+if hw_needs_log "$fixes"; then facts=$(hw_facts log); else facts=$(hw_facts); fi
+matches=$(hw_match "$facts" "$fixes")
+{ printf '%s\n' "$facts"; printf '%s\n' "${matches:-}" | jq -sc .; printf '%s\n' "$fixes" | jq -sc .; } |
+  jq -nc "$hw_jq_common$hw_jq_rows"' input as $F | input as $M | input as $X
+    | {computer: {name: hw_computer($F), vendor: $F.dmi.sys_vendor, product: $F.dmi.product_name, version: $F.dmi.product_version,
+                  laptop: $F.laptop, virtual: $F.virtual, arch: $F.arch, processor: ($F.cpu.name | hw_cpuname), memory: hw_memory($F.memory_kb)},
+       devices: {pci: [$F.pci[] | {slot, class, id: "\(.vendor):\(.device)", subsystem: "\(.svendor):\(.sdevice)", name: hw_devname, driver}],
+                 usb: $F.usb},
+       matches: [$M[] | {id, file, title, part, works, says, keep, why, devices, apply}],
+       unreadable: [$X[] | select(.error) | {file, error}]}'

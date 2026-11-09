@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+# Contract checks for This computer (lib/hardware.sh, default/hardware/*.toml, commands/hardware/*, the Palette's
+# hardware rows) against fake computers: every fix reads and names only keys Takumi knows; the fixes that match a
+# ThinkPad with NVIDIA, a desktop with an old GeForce, three Macs, a Framework, a Surface, an Apple Silicon Mac,
+# a virtual machine, and the models with fixes of their own (ASUS ROG, Dell XPS, Yoga, Panther Lake, Framework 13
+# AMD and 16, Surface Pro 11) and Xbox gear; the rows and cards a person sees; takumi hardware apply into a fake room (packages, kernel
+# options, files, services, the initramfs, the record, and taking back what no longer applies); and what
+# takumi doctor says. Fake tools first in PATH record their arguments. Runs on bash 3.2 with jq.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; hardware checks skipped)"; exit 0; }
+repo=$PWD; status=0; n=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-hw.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR" "$t/commands/room"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"   # fake takumi commands go in front of the real ones
+export TAKUMI_HW_DATA=$repo/default/hardware TAKUMI_HW_RECORD=$t/record.json TAKUMI_HW_ROOM=20261108-090000
+unset TAKUMI_OFFLINE TAKUMI_PACMAN_CONF
+check() { n=$((n + 1)); if ! eval "$2"; then echo "   FAIL: $1"; status=1; fi; }
+lib() { bash -c '. lib/hardware.sh; "$@"' _ "$@"; }
+
+# --- Fake tools: each records its arguments in $FAKE/calls.
+fake() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$t/bin/$1"; chmod +x "$t/bin/$1"; }
+fake pacman 'printf "pacman %s\n" "$*" >> "$FAKE/calls"
+case " $* " in
+  *" -Slq "*) cat "$FAKE/repo" ;;
+  *" -Qq "*) cat "$FAKE/installed" 2>/dev/null || true ;;
+  *" -S "*) [[ -f "$FAKE/pacman-fails" ]] && exit 1; for a in "$@"; do case "$a" in -*|--*) ;; *) echo "$a" >> "$FAKE/installed" ;; esac; done ;;
+esac'
+fake arch-chroot 'printf "arch-chroot %s\n" "$*" >> "$FAKE/calls"; shift; exec "$@"'
+fake systemctl 'printf "systemctl %s\n" "$*" >> "$FAKE/calls"'
+fake mkinitcpio 'printf "mkinitcpio %s\n" "$*" >> "$FAKE/calls"'
+fake id 'if [[ "$1" == -u ]]; then cat "$FAKE/uid"; else exec /usr/bin/id "$@"; fi'
+fake fprintd-list 'cat "$FAKE/fprint"'
+printf '#!/bin/sh\nexit 1\n' > "$t/commands/room/enabled"; chmod +x "$t/commands/room/enabled"
+echo 0 > "$FAKE/uid"; : > "$FAKE/calls"
+
+# --- Fake computers: machine <name> points every hardware path at one.
+mk() {  # <name> <arch> <sys_vendor> <product_name> <product_version> <chassis> <cpu vendor> <family> <model> <model name> [flag]
+  local d=$t/m/$1; mkdir -p "$d/sys/class/dmi/id" "$d/asound" "$d/firmware"
+  : > "$d/lspci"; : > "$d/lsusb"; : > "$d/klog"; : > "$d/dt"; echo "$2" > "$d/arch"
+  echo "$3" > "$d/sys/class/dmi/id/sys_vendor"; echo "$4" > "$d/sys/class/dmi/id/product_name"
+  echo "$5" > "$d/sys/class/dmi/id/product_version"; echo "$6" > "$d/sys/class/dmi/id/chassis_type"
+  printf 'processor\t: 0\nvendor_id\t: %s\ncpu family\t: %s\nmodel\t\t: %s\nmodel name\t: %s\ncpu cores\t: 8\nflags\t\t: fpu sse %s\n' \
+    "$7" "$8" "$9" "${10}" "${11:-}" > "$d/cpuinfo"
+  echo 'MemTotal:       15600000 kB' > "$d/meminfo"
+}
+pci() {  # <machine> <slot> <class> <vendor> <device> <vendor name> <device name> <driver> [subsystem name]
+  { printf 'Slot:\t%s\nClass:\tController [%s]\nVendor:\t%s [%s]\nDevice:\t%s [%s]\nSVendor:\tMaker [1234]\nSDevice:\t%s [5678]\n' \
+      "$2" "$3" "$6" "$4" "$7" "$5" "${9:-Device}"
+    [[ -z "$8" ]] || printf 'Driver:\t%s\n' "$8"
+    printf '\n'; } >> "$t/m/$1/lspci"
+}
+usb() { printf 'Bus 003 Device 004: ID %s %s\n' "$2" "$3" >> "$t/m/$1/lsusb"; }
+machine() {
+  local d=$t/m/$1
+  export TAKUMI_HW_LSPCI=$d/lspci TAKUMI_HW_LSUSB=$d/lsusb TAKUMI_HW_SYS=$d/sys TAKUMI_HW_CPUINFO=$d/cpuinfo TAKUMI_HW_MEMINFO=$d/meminfo
+  export TAKUMI_HW_DT=$d/dt TAKUMI_HW_ASOUND=$d/asound TAKUMI_HW_KERNEL_LOG=$d/klog TAKUMI_HW_FIRMWARE=$d/firmware TAKUMI_HW_ARCH=$(cat "$d/arch")
+}
+matched() { machine "$1"; takumi hardware detect | jq -r '[.matches[].id] | join(" ")'; }
+
+mk thinkpad x86_64 LENOVO 21HMCTO1WW "ThinkPad X1 Carbon Gen 11" 10 GenuineIntel 6 186 "13th Gen Intel(R) Core(TM) i7-1365U"
+pci thinkpad 00:02.0 0300 8086 a7a1 "Intel Corporation" "Raptor Lake-P [Iris Xe Graphics]" i915
+pci thinkpad 00:05.0 0480 8086 a75d "Intel Corporation" "Raptor Lake IPU" intel-ipu6
+pci thinkpad 00:14.3 0280 8086 51f1 "Intel Corporation" "Raptor Lake PCH CNVi WiFi" iwlwifi "Wi-Fi 6E AX211 160MHz"
+pci thinkpad 00:1f.3 0401 8086 51ca "Intel Corporation" "Raptor Lake-P/U/H cAVS" sof-audio-pci-intel-tgl
+pci thinkpad 01:00.0 0302 10de 2820 "NVIDIA Corporation" "AD106M [GeForce RTX 4070 Max-Q / Mobile]" nouveau
+pci thinkpad 01:00.1 0403 10de 22bd "NVIDIA Corporation" "Device" snd_hda_intel
+usb thinkpad 27c6:6a94 "Shenzhen Goodix Technology Co.,Ltd. Goodix USB2.0 MISC"
+usb thinkpad 8087:0033 "Intel Corp. AX211 Bluetooth"
+d=$t/m/thinkpad/sys; mkdir -p "$d/devices/usb3/3-10/3-10:1.0" "$d/class/bluetooth/hci0"
+echo "AX211 Bluetooth" > "$d/devices/usb3/3-10/product"; echo 8087 > "$d/devices/usb3/3-10/idVendor"
+ln -s "$d/devices/usb3/3-10/3-10:1.0" "$d/class/bluetooth/hci0/device"
+mkdir -p "$t/m/thinkpad/asound/card0"; echo "Codec: Realtek ALC287" > "$t/m/thinkpad/asound/card0/codec#0"; echo "Codec: Intel Raptor Lake HDMI" > "$t/m/thinkpad/asound/card0/codec#2"
+cat > "$t/m/thinkpad/klog" <<'LOG'
+psmouse serio1: synaptics: Your touchpad (PNP: LEN0411 PNP0f13) says it can support a different bus. If i2c-hid and hid-rmi are not used, you might want to try setting psmouse.synaptics_intertouch to 1 and report this to linux-input@vger.kernel.org.
+iwlwifi 0000:00:14.3: Direct firmware load for iwlwifi-so-a0-gf-a0-89.ucode failed with error -2
+LOG
+: > "$t/m/thinkpad/firmware/iwlwifi-so-a0-gf-a0-86.ucode.zst"
+mk desktop x86_64 "ASUSTeK COMPUTER INC." "System Product Name" "System Version" 3 AuthenticAMD 23 113 "AMD Ryzen 7 3700X 8-Core Processor"
+echo "PRIME B550-PLUS" > "$t/m/desktop/sys/class/dmi/id/board_name"; echo "ASUSTeK COMPUTER INC." > "$t/m/desktop/sys/class/dmi/id/board_vendor"
+pci desktop 0a:00.0 0300 10de 1c03 "NVIDIA Corporation" "GP106 [GeForce GTX 1060 6GB]" nouveau
+pci desktop 0a:00.1 0403 10de 10f1 "NVIDIA Corporation" "GP106 High Definition Audio Controller" snd_hda_intel
+pci desktop 03:00.0 0200 10ec 8168 "Realtek Semiconductor Co., Ltd." "RTL8111/8168/8211/8411 PCI Express Gigabit Ethernet Controller" r8169
+mk mac2013 x86_64 "Apple Inc." "MacBookPro11,1" "1.0" 10 GenuineIntel 6 69 "Intel(R) Core(TM) i5-4258U CPU @ 2.40GHz"
+pci mac2013 00:02.0 0300 8086 0a2e "Intel Corporation" "Haswell-ULT Integrated Graphics Controller" i915
+pci mac2013 03:00.0 0280 14e4 43a0 "Broadcom Inc. and subsidiaries" "BCM4360 802.11ac Wireless Network Adapter" ""
+pci mac2013 02:00.0 0480 14e4 1570 "Broadcom Inc. and subsidiaries" "720p FaceTime HD Camera" ""
+mk mac2017 x86_64 "Apple Inc." "MacBookPro14,1" "1.0" 9 GenuineIntel 6 142 "Intel(R) Core(TM) i5-7360U CPU @ 2.30GHz"
+pci mac2017 01:00.0 0108 106b 2003 "Apple Inc." "S3X NVMe Controller" nvme
+mk mac2019 x86_64 "Apple Inc." "MacBookPro16,1" "1.0" 9 GenuineIntel 6 158 "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"
+pci mac2019 03:00.0 0880 106b 1801 "Apple Inc." "T2 Bridge Controller" ""
+mk framework x86_64 Framework "Laptop (12th Gen Intel Core)" A6 10 GenuineIntel 6 154 "12th Gen Intel(R) Core(TM) i7-1260P"
+mk surface x86_64 "Microsoft Corporation" "Surface Pro 7" 124I:00036T:000M:0300000D:11B:00F 9 GenuineIntel 6 126 "Intel(R) Core(TM) i5-1035G4 CPU @ 1.10GHz"
+pci surface 01:00.0 0280 11ab 2b38 "Marvell Technology Group Ltd." "88W8897 [AVASTAR] 802.11ac Wireless" mwifiex_pcie
+echo "mwifiex_pcie 0000:01:00.0: Direct firmware load for mrvl/pcie8897_uapsta.bin failed with error -2" > "$t/m/surface/klog"
+mk vm x86_64 QEMU "Standard PC (Q35 + ICH9, 2009)" "pc-q35-9.1" 1 GenuineIntel 6 85 "Intel Xeon Processor (Cascadelake)" hypervisor
+pci vm 00:01.0 0300 1af4 1050 "Red Hat, Inc." "Virtio 1.0 GPU" virtio-pci
+mk m1 aarch64 "" "" "" "" "" "" "" ""
+printf 'apple,j313\0apple,t8103\0apple,arm-platform\0' > "$t/m/m1/dt"
+# Laptops whose models have fixes of their own, and a desktop with Xbox gear.
+mk rog x86_64 "ASUSTeK COMPUTER INC." "ROG Zephyrus G14 GA402RJ" "1.0" 10 AuthenticAMD 25 68 "AMD Ryzen 7 6800HS with Radeon Graphics"
+echo "ROG Zephyrus G14" > "$t/m/rog/sys/class/dmi/id/product_family"
+mk xps x86_64 "Dell Inc." "XPS 15 9530" "" 10 GenuineIntel 6 186 "13th Gen Intel(R) Core(TM) i7-13700H"
+cat > "$t/m/xps/klog" <<'LOG'
+cs35l41-hda spi1-CSC3551:00-cs35l41-hda.0: Direct firmware load for cirrus/cs35l41-dsp1-spk-prot-10280beb-spkid0-l0.bin failed with error -2
+cs35l41-hda spi1-CSC3551:00-cs35l41-hda.0: Direct firmware load for cirrus/cs35l41-dsp1-spk-prot-10280c11.wmfw failed with error -2
+LOG
+mkdir -p "$t/m/xps/firmware/cirrus"; : > "$t/m/xps/firmware/cirrus/cs35l41-dsp1-spk-prot-10280beb.wmfw.zst"
+mk yoga x86_64 LENOVO 83DN "Yoga Pro 9 16IMH9" 10 GenuineIntel 6 170 "Intel(R) Core(TM) Ultra 9 185H"
+mk thinkyoga x86_64 LENOVO 21FQ "ThinkPad X1 Yoga Gen 8" 10 GenuineIntel 6 186 "13th Gen Intel(R) Core(TM) i7-1355U"
+mk ptl x86_64 LENOVO 21XX "ThinkPad X1 Carbon Gen 14" 10 GenuineIntel 6 204 "Intel(R) Core(TM) Ultra 7 365"
+pci ptl 00:02.0 0300 8086 b080 "Intel Corporation" "Panther Lake [Intel Graphics]" i915
+mk fw13amd x86_64 Framework "Laptop 13 (AMD Ryzen 7040Series)" A7 10 AuthenticAMD 25 116 "AMD Ryzen 7 7840U w/ Radeon  780M Graphics"
+mk fw16 x86_64 Framework "Laptop 16 (AMD Ryzen 7040 Series)" A7 10 AuthenticAMD 25 116 "AMD Ryzen 9 7940HS w/ Radeon 780M Graphics"
+mk sp11 aarch64 "Microsoft Corporation" "Microsoft Surface Pro, 11th Edition" "" 9 "" "" "" ""
+printf 'microsoft,denali\0qcom,x1e80100\0' > "$t/m/sp11/dt"
+mk gamer x86_64 "Micro-Star International Co., Ltd." "MS-7D75" "1.0" 3 AuthenticAMD 25 97 "AMD Ryzen 7 7700X 8-Core Processor"
+usb gamer 045e:0b12 "Microsoft Corp. Xbox Wireless Controller (model 1914)"
+usb gamer 045e:02fe "Microsoft Corp. Xbox Wireless Adapter for Windows"
+
+# --- The data: every fix reads, and names only what Takumi knows.
+fixes=$(lib hw_fixes "$repo/default/hardware")
+check "every fix file reads" '[[ -n "$fixes" ]] && [[ -z "$(jq -r "select(.error) | .file" <<< "$fixes")" ]]'
+check "there are at least 30 fixes" '[[ $(jq -s length <<< "$fixes") -ge 30 ]]'
+check "no fix has a key Takumi does not know" '[[ -z "$(jq -r "select((.extra | length) > 0) | .id" <<< "$fixes")" ]]'
+check "parts and works are words Takumi knows" '[[ -z "$(jq -r "select((.part | IN(\"graphics\",\"wifi\",\"wired\",\"bluetooth\",\"camera\",\"sound\",\"fingerprint\",\"touchpad\",\"processor\",\"computer\") | not) or (.works | IN(\"yes\",\"partly\",\"no\") | not)) | .id" <<< "$fixes")" ]]'
+check "match and apply keys are ones Takumi knows" '[[ -z "$(jq -r "select(((.match | keys) - [\"pci\",\"pci_class\",\"usb\",\"arch\",\"laptop\",\"virtual\",\"cpu_vendor\",\"cpu_family\",\"cpu_model\",\"dt_compatible\",\"kernel_log\",\"dmi_vendor\",\"dmi_product\",\"dmi_family\",\"dmi_version\",\"dmi_board\",\"dmi_board_vendor\",\"dmi_chassis\"] | length) > 0 or ((.apply | keys) - [\"packages\",\"aur\",\"cmdline\",\"modprobe\",\"initramfs_modules\",\"udev\",\"services\",\"note\"] | length) > 0) | .id" <<< "$fixes")" ]]'
+check "every fix matches on something and says what it does" '[[ -z "$(jq -r "select((.match | length) == 0 or (.apply.note // \"\") == \"\") | .id" <<< "$fixes")" ]]'
+check "package names are names, and an AUR one is never installed" '[[ -z "$(jq -r "select(any((.apply.packages // [])[], (.apply.aur // [])[]; test(\"^[a-z0-9@._+-]+$\") | not) or ((.apply.packages // []) - ((.apply.packages // []) - (.apply.aur // [])) | length) > 0) | .id" <<< "$fixes")" ]]'
+check "32-bit libraries are never all a fix installs (apply may leave them out)" '[[ -z "$(jq -r "select(((.apply.packages // []) | length) > 0 and all((.apply.packages // [])[]; startswith(\"lib32-\"))) | .id" <<< "$fixes")" ]]'
+check "kernel options are single words, modprobe lines are options or blacklists, udev lines are rules" '[[ -z "$(jq -r "select(any((.apply.cmdline // [])[]; test(\"[[:space:]]\")) or any((.apply.modprobe // [])[]; test(\"^(options|blacklist|softdep) \") | not) or any((.apply.udev // [])[]; contains(\"==\") | not)) | .id" <<< "$fixes")" ]]'
+check "early modules and services are names" '[[ -z "$(jq -r "select(any((.apply.initramfs_modules // [])[]; test(\"^[a-z0-9_]+$\") | not) or any((.apply.services // [])[]; test(\"[.](service|socket|timer)$\") | not)) | .id" <<< "$fixes")" ]]'
+check "what a row says is short" '[[ -z "$(jq -r "select((.says | length) > 40) | .id" <<< "$fixes")" ]]'
+
+# --- The reader: comments, strings with # and quotes, literal strings, arrays over lines; a broken file is named.
+mkdir -p "$t/data"
+cat > "$t/data/odd.toml" <<'TOML'
+# a comment
+title = "A \"quoted\" # not a comment"   # a comment after
+part = "wifi"
+[match]
+pci = [
+  "abcd:12??",  # inside an array
+  'ef01:*',
+]
+cpu_model = [1, 2]
+[apply]
+udev = ['ACTION=="add", ATTR{x}="y"']
+note = "Fine."
+TOML
+printf 'title = "broken\n[match\n' > "$t/data/broken.toml"
+odd=$(lib hw_fixes "$t/data")
+check "a tricky file reads as written" '[[ "$(jq -c "select(.id == \"odd\") | [.title, .match.pci, .match.cpu_model, .apply.udev[0]]" <<< "$odd")" == "[\"A \\\"quoted\\\" # not a comment\",[\"abcd:12??\",\"ef01:*\"],[1,2],\"ACTION==\\\"add\\\", ATTR{x}=\\\"y\\\"\"]" ]]'
+check "a broken file is named, the others still read" '[[ "$(jq -r "select(.error) | .id" <<< "$odd")" == broken && "$(jq -s length <<< "$odd")" == 2 ]]'
+
+# --- What matches which computer.
+check "a ThinkPad with NVIDIA" '[[ "$(matched thinkpad)" == "fingerprint intel-graphics intel-ipu6-camera intel-thermald laptop-sound nvidia-laptop nvidia-open synaptics-intertouch wifi-regulatory" ]]'
+check "a desktop with a GTX 1060: the open driver, no laptop fixes" '[[ "$(matched desktop)" == "nvidia-580" ]]'
+check "a 2013 MacBook Pro: Broadcom wl, the older Intel decoder, no FaceTime driver" '[[ "$(matched mac2013)" == "apple-facetime-hd broadcom-wl intel-graphics intel-graphics-older intel-thermald wifi-regulatory" ]]'
+check "a 2017 MacBook Pro: its keyboard at the disk password, its SSD and sleep" '[[ "$(matched mac2017)" == "apple-nvme-sleep apple-spi-keyboard intel-thermald" ]]'
+check "a Mac with a T2" '[[ "$(matched mac2019)" == "apple-t2 intel-thermald" ]]'
+check "a Framework 13 with 12th Gen Intel, and not the 11th Gen fix" '[[ "$(matched framework)" == "framework-13-12th-gen intel-thermald" ]]'
+check "a Surface Pro 7: Marvell firmware and the keyboard at the disk password" '[[ "$(matched surface)" == "intel-thermald marvell-wifi surface-keyboard wifi-regulatory" ]]'
+check "a virtual machine needs nothing" '[[ -z "$(matched vm)" ]]'
+check "an Apple Silicon Mac, by its device tree" '[[ "$(matched m1)" == "apple-silicon" ]]'
+check "an ASUS ROG laptop: asusctl; an ASUS desktop does not get it" '[[ "$(matched rog)" == "asus-rog" && "$(jq -r "select(.id == \"asus-rog\") | .apply.packages[0]" <<< "$fixes")" == asusctl ]]'
+check "a Dell XPS: its speakers' amplifier firmware" '[[ "$(matched xps)" == "dell-xps-sound intel-thermald" ]]'
+check "a Lenovo Yoga: its speakers; a ThinkPad X1 Yoga is not one" '[[ "$(matched yoga)" == "intel-lpmd intel-thermald lenovo-yoga-sound" && "$(matched thinkyoga)" == "intel-thermald" ]]'
+check "Panther Lake graphics: the xe driver and its firmware, beside Intel's video decoding" '[[ "$(matched ptl)" == "intel-graphics intel-lpmd intel-panther-lake intel-thermald" ]]'
+check "a Framework 13 with AMD, and a Framework 16, each its own" '[[ "$(matched fw13amd)" == "framework-13-amd" && "$(matched fw16)" == "framework-16" ]]'
+check "a Surface Pro 11, by its device tree" '[[ "$(matched sp11)" == "surface-pro-11" ]]'
+check "Xbox gear: the controller works; the adapter's driver is only in the AUR" '[[ "$(matched gamer)" == "xbox-controller xbox-wireless-adapter" ]]'
+machine gamer; rows=$(takumi hardware --json)
+check "the Xbox adapter's row says so plainly, and names xone" '[[ "$(jq -r "select(.id == \"hw:fix:xbox-wireless-adapter\") | .title + \" · \" + .subtitle" <<< "$rows")" == "Xbox Wireless Adapter · its driver is only in the AUR" && "$(jq -r "select(.id == \"hw:fix:xbox-wireless-adapter\") | .detail" <<< "$rows")" == *"xone"* ]]'
+check "nothing waits for an update on a computer whose fixes set nothing up" '[[ -z "$(jq -r "select(.id == \"hw:pending\") | .id" <<< "$rows")" ]]'
+machine ptl; rows=$(takumi hardware --json)
+check "Panther Lake graphics still on i915 would say a restart is needed once set up" '[[ "$(jq -r "select(.id == \"hw:pci:00:02.0\") | .subtitle" <<< "$rows")" == "set up at the next update" ]]'
+machine xps; fw=$(lib hw_firmware_missing)
+check "speaker amplifiers: a model's own tuning beside the general one is not missing; a model with none is, as the speakers" '[[ "$fw" == "cirrus/cs35l41-dsp1-spk-prot-10280c11.wmfw		The speakers" ]]'
+machine thinkpad
+det=$(takumi hardware detect)
+check "detect says what the computer is" '[[ "$(jq -c "[.computer.name, .computer.laptop, .computer.processor, .computer.memory]" <<< "$det")" == "[\"Lenovo ThinkPad X1 Carbon Gen 11\",true,\"13th Gen Intel Core i7-1365U\",\"16 GB\"]" ]]'
+check "detect says why and on which device" '[[ "$(jq -c ".matches[] | select(.id == \"nvidia-open\") | [.why, .devices, .apply.cmdline]" <<< "$det")" == "[[\"pci 10de:2820\"],[\"pci:01:00.0\"],[\"nvidia_drm.modeset=1\",\"nvidia_drm.fbdev=1\"]]" ]]'
+check "detect --all lists every fix without looking" '[[ "$(takumi hardware detect --all | jq ".matches | length")" == "$(jq -s length <<< "$fixes")" ]]'
+takumi hardware detect --nope >/dev/null 2>&1 && rc1=0 || rc1=$?; takumi hardware detect --data "$t/none" >/dev/null 2>&1 && rc2=0 || rc2=$?
+check "detect: usage is 2, missing data is 1" '[[ $rc1 -eq 2 && $rc2 -eq 1 ]]'
+
+# --- What a person sees, before anything is set up.
+rows=$(takumi hardware --json)
+says() { jq -r --arg id "$1" 'select(.id == $id) | .title + " · " + .subtitle' <<< "$rows"; }
+check "the computer, its processor and memory" '[[ "$(says hw:computer)" == "This computer: Lenovo ThinkPad X1 Carbon Gen 11 · 13th Gen Intel Core i7-1365U · 16 GB memory" ]]'
+check "a part whose fix is not set up says so" '[[ "$(says hw:pci:01:00.0)" == "Graphics: NVIDIA GeForce RTX 4070 Max-Q / Mobile · set up at the next update" ]]'
+check "Bluetooth works, named with its maker" '[[ "$(says hw:bt:hci0)" == "Bluetooth: Intel AX211 Bluetooth · works" ]]'
+check "the sound chip by its own name" '[[ "$(says hw:pci:00:1f.3)" == "Sound: Realtek ALC287 · set up at the next update" ]]'
+check "the GPU's own sound is not a row" '[[ -z "$(says hw:pci:01:00.1)" ]]'
+check "one row offers the update, in the Core, asking first" '[[ "$(jq -c "select(.id == \"hw:pending\") | [.run, .packages[0:2]]" <<< "$rows")" == "[[\"takumi\",\"update\"],[\"nvidia-open\",\"nvidia-utils\"]]" ]]'
+check "at a terminal: one line per part, and what is not set up" '[[ "$(takumi hardware | head -n 1)" == "This computer: Lenovo ThinkPad X1 Carbon Gen 11 · 13th Gen Intel Core i7-1365U · 16 GB memory" && "$(takumi hardware | tail -n 1)" == "Not set up yet: NVIDIA graphics, Fingerprint reader and 7 more. takumi update sets them up, in a new system." ]]'
+
+# --- Apply into a fake room being built, a copy of the running room 20261108-090000.
+newroom() {  # <name>: a fresh root that looks like an installed system
+  local r=$t/top/@rooms/$1
+  rm -rf "$r"; mkdir -p "$r/etc/kernel" "$r/usr/lib/systemd/system" "$r/usr/bin"
+  echo "rd.luks.name=1111=takumi root=/dev/mapper/takumi rw quiet splash" > "$r/etc/kernel/cmdline"
+  printf '[options]\nArchitecture = auto\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n' > "$r/etc/pacman.conf"
+  for u in thermald.service nvidia-suspend.service nvidia-resume.service; do : > "$r/usr/lib/systemd/system/$u"; done
+  printf '#!/bin/sh\n' > "$r/usr/bin/mkinitcpio"; chmod +x "$r/usr/bin/mkinitcpio"
+  printf '%s' "$r"
+}
+everything=$(jq -r '.apply.packages // [] | .[]' <<< "$fixes" | sort -u)
+reset() { : > "$FAKE/calls"; printf '%s\n' "$everything" > "$FAKE/repo"; printf 'base\nlinux\n' > "$FAKE/installed"; rm -f "$FAKE/pacman-fails"; }
+reset; rm -f "$TAKUMI_HW_RECORD"
+r=$(newroom 20261109-101500)
+out=$(takumi hardware apply --root "$r" 2>&1) && rc=0 || rc=$?
+check "apply into a room: done ($rc)" '[[ $rc -eq 0 ]]'
+check "one pacman call in the room, without 32-bit libraries when multilib is off" '[[ $(grep -c "^pacman.*-S --needed --noconfirm" "$FAKE/calls") -eq 1 ]] && grep -q "^arch-chroot $r pacman -S --needed --noconfirm .*nvidia-open" "$FAKE/calls" && ! grep -q "lib32-" "$FAKE/installed"'
+check "kernel options added once, after the ones already there" '[[ "$(cat "$r/etc/kernel/cmdline")" == "rd.luks.name=1111=takumi root=/dev/mapper/takumi rw quiet splash nvidia_drm.modeset=1 nvidia_drm.fbdev=1" ]]'
+check "modprobe options, each fix named" 'grep -qx "# NVIDIA graphics (nvidia-open.toml)" "$r/etc/modprobe.d/takumi-hardware.conf" && grep -qx "options nvidia NVreg_PreserveVideoMemoryAllocations=1 NVreg_TemporaryFilePath=/var/tmp" "$r/etc/modprobe.d/takumi-hardware.conf" && grep -qx "options psmouse synaptics_intertouch=1" "$r/etc/modprobe.d/takumi-hardware.conf"'
+check "NVIDIA's udev rules" '[[ $(grep -c "ATTR{vendor}==\"0x10de\"" "$r/etc/udev/rules.d/90-takumi-hardware.rules") -eq 4 ]]'
+check "early drivers, each one allowed to be absent" 'grep -qx "MODULES+=(nvidia? nvidia_modeset? nvidia_uvm? nvidia_drm?)" "$r/etc/mkinitcpio.conf.d/takumi-hardware.conf"'
+check "services turned on in the room; one the room lacks is said" 'grep -q "^systemctl --root=$r enable thermald.service" "$FAKE/calls" && grep -q "^systemctl --root=$r enable nvidia-suspend.service" "$FAKE/calls" && grep -q "nvidia-hibernate.service is not in this system" <<< "$out"'
+check "the initramfs is made again inside the room" 'grep -q "^arch-chroot $r mkinitcpio -P" "$FAKE/calls"'
+rec=$(jq -c '.rooms["20261109-101500"]' "$TAKUMI_HW_RECORD")
+check "recorded under the room: every fix set up, 32-bit libraries left out and why" '[[ "$(jq -r "[.fixes[].status] | unique | join(\" \")" <<< "$rec")" == applied && "$(jq -r ".fixes[] | select(.id == \"nvidia-open\") | .skipped[0] | .package + \": \" + .why" <<< "$rec")" == "lib32-nvidia-utils: multilib is off" ]]'
+check "recorded: the options and services it added, the initramfs" '[[ "$(jq -c "[.cmdline_added, (.services_enabled | length), .initramfs]" <<< "$rec")" == "[[\"nvidia_drm.modeset=1\",\"nvidia_drm.fbdev=1\"],3,\"rebuilt\"]" ]]'
+: > "$FAKE/calls"; out=$(takumi hardware apply --root "$r" 2>&1)
+check "again on the same room: nothing doubled, nothing installed twice, the record still knows its options" '[[ "$(cat "$r/etc/kernel/cmdline")" == "rd.luks.name=1111=takumi root=/dev/mapper/takumi rw quiet splash nvidia_drm.modeset=1 nvidia_drm.fbdev=1" ]] && ! grep -q -- "-S --needed" "$FAKE/calls" && [[ "$(jq -c ".rooms[\"20261109-101500\"].cmdline_added" "$TAKUMI_HW_RECORD")" == "[\"nvidia_drm.modeset=1\",\"nvidia_drm.fbdev=1\"]" ]]'
+check "files that did not change are left alone" '! grep -q "wrote" <<< "$out"'
+
+# The rows, now that the running room is the one set up.
+export TAKUMI_HW_ROOM=20261109-101500
+rows=$(takumi hardware --json)
+check "set up, but the old driver still runs: after a restart" '[[ "$(says hw:pci:01:00.0)" == "Graphics: NVIDIA GeForce RTX 4070 Max-Q / Mobile · set up; in use after a restart" ]]'
+tab=$(printf '\t'); sed -i.bak "s/^Driver:${tab}nouveau\$/Driver:${tab}nvidia/" "$TAKUMI_HW_LSPCI"
+echo "found 1 devices" > "$FAKE/fprint"
+rows=$(takumi hardware --json)
+check "NVIDIA's own driver in use" '[[ "$(says hw:pci:01:00.0)" == "Graphics: NVIDIA GeForce RTX 4070 Max-Q / Mobile · NVIDIA'"'"'s own driver · rests when no app uses it" ]]'
+check "Wi-Fi works" '[[ "$(says hw:pci:00:14.3)" == "Wi-Fi: Intel Wi-Fi 6E AX211 · works" ]]'
+check "the IPU6 camera says plainly how far it works" '[[ "$(says hw:fix:intel-ipu6-camera)" == "Camera: Intel IPU6 · works on some models" ]]'
+check "the fingerprint reader, as fprintd sees it" '[[ "$(says hw:fix:fingerprint)" == "Fingerprint reader: Goodix · works" ]]'
+echo "No devices available" > "$FAKE/fprint"; rows=$(takumi hardware --json)
+check "a reader fprintd cannot drive" '[[ "$(says hw:fix:fingerprint)" == "Fingerprint reader: Goodix · not supported yet" ]]'
+check "the processor's fixes, and the count on the computer" '[[ "$(says hw:cpu)" == "Processor: 13th Gen Intel Core i7-1365U · kept cool by thermald" && "$(says hw:computer)" == *" · 9 fixes in use" ]]'
+check "nothing left to set up: no update row" '[[ -z "$(jq -r "select(.id == \"hw:pending\") | .id" <<< "$rows")" ]]'
+card=$(takumi hardware --card hw:fix:intel-ipu6-camera)
+check "Enter on a part: a card that says it in sentences" '[[ "$(jq -r .kicker <<< "$card")" == "This computer" && "$(jq -r .title <<< "$card")" == "Camera: Intel IPU6" && "$(jq -r .detail <<< "$card")" == "Cameras on Intel"*"A USB camera works everywhere." ]]'
+takumi hardware --card hw:nope >/dev/null 2>&1 && rc=0 || rc=$?
+check "a card for a part that is gone: exit 3" '[[ $rc -eq 3 ]]'
+
+# --- The Palette's rows.
+p() { takumi palette hardware "$1"; }
+check "\"computer\" lists every part, nearest the field the computer itself" '[[ $(p computer | wc -l) -ge 9 && "$(p computer | jq -sr "sort_by(-.score) | .[0].title")" == "This computer: Lenovo ThinkPad X1 Carbon Gen 11" ]]'
+check "a part's row opens its card" '[[ "$(p camera | jq -c "[.kind, .card, .run]")" == "[\"Hardware\",true,[\"takumi\",\"hardware\",\"--card\",\"hw:fix:intel-ipu6-camera\"]]" ]]'
+check "\"nvidia\" finds the graphics" '[[ "$(p nvidia | jq -r .title)" == "Graphics: NVIDIA GeForce RTX 4070 Max-Q / Mobile" ]]'
+check "\"wifi\" alone stays with the networks; \"wifi card\" finds the chip" '[[ -z "$(p wifi)" && "$(p "wifi card" | jq -r .title)" == "Wi-Fi: Intel Wi-Fi 6E AX211" ]]'
+check "other searches and short ones leave it quiet" '[[ -z "$(p firefox)" && -z "$(p gr)" ]]'
+
+# --- A computer that changed: a new room copied from the one set up, on a machine without NVIDIA and whose
+# touchpad message is gone (its fix is kept).
+awk 'BEGIN { RS = ""; ORS = "\n\n" } !/NVIDIA/' "$TAKUMI_HW_LSPCI.bak" > "$TAKUMI_HW_LSPCI"
+: > "$TAKUMI_HW_KERNEL_LOG"
+r2=$t/top/@rooms/20261110-080000; rm -rf "$r2"; cp -R "$r" "$r2"
+reset; out=$(takumi hardware apply --root "$r2" 2>&1) && rc=0 || rc=$?
+check "the options a gone fix added are taken back, the others stay ($rc)" '[[ $rc -eq 0 && "$(cat "$r2/etc/kernel/cmdline")" == "rd.luks.name=1111=takumi root=/dev/mapper/takumi rw quiet splash" ]]'
+check "the services it turned on are turned off" 'grep -q "^systemctl --root=$r2 disable nvidia-suspend.service" "$FAKE/calls" && ! grep -q "disable thermald.service" "$FAKE/calls"'
+check "files no fix needs are removed, the kept touchpad fix stays" '[[ ! -e "$r2/etc/udev/rules.d/90-takumi-hardware.rules" && ! -e "$r2/etc/mkinitcpio.conf.d/takumi-hardware.conf" ]] && grep -qx "options psmouse synaptics_intertouch=1" "$r2/etc/modprobe.d/takumi-hardware.conf" && ! grep -q nvidia "$r2/etc/modprobe.d/takumi-hardware.conf"'
+check "the initramfs is made again for the changed options" 'grep -q "^arch-chroot $r2 mkinitcpio -P" "$FAKE/calls"'
+check "the kept fix is recorded as kept and set up" '[[ "$(jq -r ".rooms[\"20261110-080000\"].fixes[] | select(.id == \"synaptics-intertouch\") | .status" "$TAKUMI_HW_RECORD")" == applied ]]'
+
+# --- Packages the root's repositories lack, on the setup disc and online; pacman failing; multilib on.
+machine mac2013
+reset; grep -vx "broadcom-wl-dkms" "$FAKE/repo" > "$FAKE/repo.new"; mv "$FAKE/repo.new" "$FAKE/repo"
+r3=$(newroom 20261111-090000)
+out=$(TAKUMI_OFFLINE=1 TAKUMI_PACMAN_CONF=/etc/takumi/setup-pacman.conf takumi hardware apply --root "$r3" 2>&1) && rc=0 || rc=$?
+check "on the setup disc, a fix whose package the disc lacks waits for the first update ($rc)" '[[ $rc -eq 0 ]] && grep -q "Broadcom Wi-Fi: not set up, broadcom-wl-dkms is not on the setup disc" <<< "$out" && [[ "$(jq -r ".rooms[\"20261111-090000\"].fixes[] | select(.id == \"broadcom-wl\") | .status" "$TAKUMI_HW_RECORD")" == waiting ]]'
+check "a fix is set up whole or not at all: its headers are not installed alone" '! grep -qx linux-headers "$FAKE/installed"'
+check "the setup disc's packages come through its own pacman.conf" 'grep -q "^arch-chroot $r3 pacman --config /etc/takumi/setup-pacman.conf -S --needed --noconfirm" "$FAKE/calls"'
+reset; grep -vx "broadcom-wl-dkms" "$FAKE/repo" > "$FAKE/repo.new"; mv "$FAKE/repo.new" "$FAKE/repo"
+takumi hardware apply --root "$r3" >/dev/null 2>&1 || true
+check "online, a package the repositories do not carry: unavailable, not waiting" '[[ "$(jq -r ".rooms[\"20261111-090000\"].fixes[] | select(.id == \"broadcom-wl\") | .status" "$TAKUMI_HW_RECORD")" == unavailable ]]'
+reset; touch "$FAKE/pacman-fails"; printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >> "$r3/etc/pacman.conf"
+takumi hardware apply --root "$r3" >/dev/null 2>&1 && rc=0 || rc=$?
+check "pacman failing: exit 1, and the fixes that needed it wait for the next update" '[[ $rc -eq 1 && "$(jq -r ".rooms[\"20261111-090000\"].fixes[] | select(.id == \"intel-graphics\") | .status" "$TAKUMI_HW_RECORD")" == failed ]]'
+check "with multilib on, 32-bit libraries are asked for" 'grep -q "lib32-vulkan-intel" "$FAKE/calls"'
+echo 1000 > "$FAKE/uid"; takumi hardware apply --root "$r3" >/dev/null 2>&1 && rc=0 || rc=$?; echo 0 > "$FAKE/uid"
+check "not as root: exit 1" '[[ $rc -eq 1 ]]'
+takumi hardware apply --root >/dev/null 2>&1 && rc=0 || rc=$?
+check "usage: exit 2" '[[ $rc -eq 2 ]]'
+out=$(takumi hardware apply --root "$r3" --data "$t/none" 2>&1) && rc=0 || rc=$?
+check "no data: exit 1, said, nothing changed" '[[ $rc -eq 1 && "$out" == *"no hardware data in $t/none"* ]]'
+
+# --- A Framework 16: Framework's tool, and its input modules' rules in the room.
+machine fw16; reset
+r4=$(newroom 20261113-090000)
+takumi hardware apply --root "$r4" >/dev/null 2>&1 && rc=0 || rc=$?
+check "a Framework 16: framework-system, and its keyboard modules and LED matrix yours at the computer ($rc)" '[[ $rc -eq 0 ]] && grep -qx framework-system "$FAKE/installed" && grep -q "ATTRS{idVendor}==\"32ac\", ATTRS{idProduct}==\"0012|0013|0014|0018|0019\", MODE=\"0660\", TAG+=\"uaccess\"" "$r4/etc/udev/rules.d/90-takumi-hardware.rules" && grep -q "ATTRS{idProduct}==\"0020\"" "$r4/etc/udev/rules.d/90-takumi-hardware.rules"'
+
+# --- What takumi doctor says.
+machine surface; export TAKUMI_HW_ROOM=20261112-000000
+doc=$(lib hw_doctor)
+check "the doctor names fixes this system lacks" 'grep -q "^needs	Takumi has fixes for this computer that are not in this system yet (" <<< "$doc"'
+check "missing firmware, with the package an update adds" 'grep -qx "needs	The Wi-Fi is missing firmware (mrvl/pcie8897_uapsta.bin, in linux-firmware-marvell): \"update\" adds it" <<< "$doc"'
+machine thinkpad
+printf '%s\n' "Bluetooth: hci0: BCM: firmware Patch file not found, tried: 'brcm/BCM20702A1-0a5c-21e6.hcd'" "platform regulatory.0: Direct firmware load for regulatory.db failed with error -2" >> "$TAKUMI_HW_KERNEL_LOG"
+fw=$(lib hw_firmware_missing)
+check "a newer Wi-Fi firmware tried before an older one that loaded is not missing" '! grep -q iwlwifi <<< "$fw"'
+check "Broadcom Bluetooth firmware is only in the AUR; the radio rules are wireless-regdb" 'grep -qx "brcm/BCM20702A1-0a5c-21e6.hcd	aur:broadcom-bt-firmware	Bluetooth" <<< "$fw" && grep -qx "regulatory.db	wireless-regdb	The Wi-Fi" <<< "$fw"'
+: > "$TAKUMI_HW_KERNEL_LOG"; export TAKUMI_HW_ROOM=20261110-080000
+check "all in place: one ok line" '[[ "$(lib hw_doctor)" == "ok	Takumi'"'"'s fixes for this computer are in place, and no firmware is missing" ]]'
+
+# --- The two hooks: the setup disc's install and the room an update builds.
+check "the setup disc applies the fixes after its packages are reachable in the target, before the installer" '[[ $(grep -n "takumi hardware apply --root \"\$target\"" commands/setup/install | cut -d: -f1) -gt $(grep -n "setup-pacman.conf\"$" commands/setup/install | head -n 1 | cut -d: -f1) && $(grep -n "takumi hardware apply" commands/setup/install | cut -d: -f1) -lt $(grep -n "install/run.sh" commands/setup/install | cut -d: -f1) ]]'
+check "an update applies them inside the room it builds, and a failure never stops it" 'grep -q "^takumi hardware apply --root \"\$r\" || " commands/room/upgrade'
+
+echo "   $n hardware checks against fake computers"
+exit $status

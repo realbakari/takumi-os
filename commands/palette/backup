@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for backups as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "backup", "restore", "time machine", "file history" (docs/backup.md). Before setup: one row per USB disk that can
+# hold backups and one per cloud, each a conversation that sets backups up there (or goes on with backups already
+# there, which is how a new computer gets the old one's files back). After: how the last backup went,
+# back up now, restore by date, what is skipped, a new key, and turning backups off. Nothing here runs restic.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/backup.sh" ]] && { . "$l/backup.sh"; . "$l/palette.sh"; break; }; done
+declare -F backup_status_json >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+q=${1:-}; ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
+topic=no
+for w in backup backups "back up" restore recover "time machine" "file history" snapshot snapshots; do
+  if [[ ${#ql} -ge 3 && ( "$w" == "$ql"* || "$ql" == *"$w"* ) ]]; then topic=yes; fi
+done
+[[ $topic == yes ]] || exit 0
+words="backup backups back up time machine file history"
+{
+  st=$(backup_status_json)
+  if [[ "$(jq -r .setup <<< "$st")" != true ]]; then
+    jq -cn --arg w "$words" '{id: "backup:setup", title: "Set up backups", subtitle: "Every hour, encrypted, to a USB disk or a cloud",
+      glyph: "drive", kind: "Backup", keywords: ($w + " usb disk cloud restore recover"), converse: true, run: ["takumi", "backup", "setup"], score: 0.95}'
+    backup_disks | jq -c --arg w "$words" '
+      if .ok then {id: ("backup:disk:" + .uuid), title: ("Back up to " + .name), kind: "Backup", glyph: "usb", steady: true,
+                   subtitle: ((if .model != "" and .model != .name then .model + " · " else "" end) + .sizeText
+                              + (if .freeText != "" then ", " + .freeText + " free" else "" end) + " · Enter sets it up"),
+                   keywords: ($w + " usb disk drive external restore recover"), converse: true, run: ["takumi", "backup", "setup", ("disk:" + .uuid)], score: 0.93}
+      else {id: ("backup:disk:" + .uuid), title: (.name + " cannot hold backups"), subtitle: .why, kind: "Backup", glyph: "usb",
+            keywords: ($w + " usb disk drive external"), run: ["true"], score: 0.7} end'
+    backup_clouds | while IFS='|' read -r id rtype name extra; do
+      jq -cn --arg id "$id" --arg name "$name" --arg w "$words" '{id: ("backup:cloud:" + $id), title: ("Back up to " + $name), kind: "Backup",
+        subtitle: "Signs in through your browser; encrypted before it leaves this computer", glyph: "globe", steady: true,
+        keywords: ($w + " cloud online restore recover " + ($name | ascii_downcase)), converse: true, run: ["takumi", "backup", "setup", $id], score: 0.85}'
+    done
+    if command -v rclone >/dev/null; then
+      # Remotes set up with rclone by hand (a NAS, S3, Backblaze): each one is a place too.
+      rclone listremotes --long 2>/dev/null | awk '{ t = $NF; n = $0; sub(/:[ \t]*[^ \t]*[ \t]*$/, "", n); if (n != "takumi-backup") print n "\t" t }' |
+        while IFS=$'\t' read -r name rtype; do
+          jq -cn --arg n "$name" --arg t "$rtype" --arg w "$words" '{id: ("backup:remote:" + $n), title: ("Back up to " + $n), kind: "Backup",
+            subtitle: ("Set up with rclone (" + $t + "); encrypted before it leaves this computer"), glyph: "globe", steady: true,
+            keywords: ($w + " cloud rclone remote restore recover"), converse: true, run: ["takumi", "backup", "setup", ("remote:" + $n)], score: 0.8}'
+        done || true
+    fi
+  else
+    toml="$HOME/.config/takumi/backup.toml"
+    ST=$st W=$words TOML=$toml jq -cn '(env.ST | fromjson) as $s | env.W as $w
+      | {id: "backup:status", title: $s.line, subtitle: $s.detail, kind: "Backup", steady: true, run: ["true"], keywords: ($w + " status last"),
+         glyph: (if $s.present == false then "usb" elif $s.problem != "" and $s.state != "running" then "warn" else "drive" end),
+         score: 0.97} + (if $s.state == "running" then {refresh: 3} else {} end),
+        (if $s.state != "running" then {id: "backup:now", title: "Back up now", kind: "Backup", glyph: "drive", keywords: ($w + " now"),
+           subtitle: ("Your home folder, to " + $s.place), run: ["takumi", "backup", "now"], score: 0.9} else empty end),
+        (if $s.open then {id: "backup:close", title: "Close your backups", subtitle: "They are open in Files", kind: "Backup", glyph: "history",
+           keywords: ($w + " restore close"), converse: true, run: ["takumi", "backup", "restore", "--close"], score: 0.88}
+         else {id: "backup:restore", title: "Restore files from a backup", subtitle: "Every backup by date, in Files", kind: "Backup", glyph: "history",
+           keywords: ($w + " restore recover lost deleted earlier version snapshot"), converse: true, run: ["takumi", "backup", "restore"], score: 0.88} end),
+        {id: "backup:skip", title: "Choose what is backed up", subtitle: "Your home folder, except caches, the Trash and games · Enter opens the list",
+         kind: "Backup", glyph: "folder", keywords: ($w + " skip exclude folders what"), run: ["gio", "open", env.TOML], score: 0.75},
+        {id: "backup:key", title: "New backup key", subtitle: "For a lost key card; the old key stops opening your backups", kind: "Backup",
+         glyph: "key", keywords: ($w + " key password lost card"), converse: true, risk: 1, run: ["takumi", "backup", "key"], score: 0.7},
+        {id: "backup:off", title: "Turn backups off", subtitle: ("The backups made so far stay on " + $s.place), kind: "Backup", glyph: "drive",
+         keywords: ($w + " off stop disable"), risk: 1, run: ["takumi", "backup", "off"], score: 0.6}'
+  fi
+} | palette_filter "$q"

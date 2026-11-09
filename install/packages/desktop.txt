@@ -1,0 +1,91 @@
+# The Strip, the shell (Sky, Core, Lock) and the apps the manual promises.
+niri
+quickshell
+greetd             # the login screen runs in it (shell/greeter.qml)
+plymouth           # the boot splash (default/plymouth/takumi, docs/boot.md)
+cage               # and draws through this tiny compositor
+xwayland-satellite
+xdg-desktop-portal-gnome
+xdg-desktop-portal-gtk
+foot
+firefox
+nautilus
+gnome-keyring
+wlsunset
+swayidle
+swaylock          # fallback lock when the shell is not answering
+grim
+slurp
+wl-clipboard
+cliphist
+wf-recorder        # takumi screen record
+tesseract          # takumi screen text: the words in an area of the screen
+tesseract-data-eng
+zbar               # takumi screen code: QR codes and barcodes on the screen
+wtype              # emoji and clipboard rows type what you choose into the app
+libqalculate
+neovim
+# Everyday files open in an app that follows the theme (GTK4/libadwaita where there is one).
+loupe              # images, including iPhone photos with libheif
+libheif
+papers             # PDFs
+celluloid          # video and music
+gnome-text-editor  # plain text
+libreoffice-fresh  # documents, spreadsheets, slides
+sushi              # Space to preview in Files
+gvfs-mtp           # phones
+gvfs-smb           # network drives
+xdg-terminal-exec  # terminal apps (btop, ...) open from the Palette
+# Fonts that keep shared documents laid out, and every script.
+ttf-liberation
+ttf-carlito
+ttf-caladea
+noto-fonts-cjk
+# Printing, power and media keys.
+cups
+cups-pk-helper
+avahi
+nss-mdns
+power-profiles-daemon
+upower
+playerctl
+libnotify          # notify-send, for scripts that want to tell you something
+flatpak            # the Shelf: apps by name, installed just for you
+qrencode           # Wi-Fi a phone joins by camera (takumi wifi share)
+fwupd              # firmware updates from the Core (takumi firmware)
+bolt               # Thunderbolt and USB4 docks allowed once, remembered (takumi hardware dock)
+ddcutil            # external monitors' brightness over DDC/CI (takumi display brightness)
+ttf-jetbrains-mono
+inter-font
+noto-fonts
+noto-fonts-emoji
+papirus-icon-theme
+libsecret            # secret-tool: the assistant's keys in the login keyring (takumi intent setup)
+python-gobject     # the login keyring's password follows yours (takumi password, docs/security.md)
+swh-plugins        # the speaker tuning's limiter (takumi audio tuning)
+fprintd            # unlock with your finger (takumi security fingerprint)
+satty              # mark up a screenshot: arrows, boxes, words, blur (takumi screen markup)
+ffmpeg             # a recording's loudness, evened out after Stop
+qt6-multimedia     # your camera in a bubble while recording (shell/Core/CameraBubble.qml)
+qt6-multimedia-ffmpeg
+whisper-cpp        # dictation on this computer (takumi voice); x86_64 only, skipped where a repo lacks it
+sound-theme-freedesktop   # the sound a timer or a reminder rings with
+orca               # the screen reader (takumi switch reader)
+speech-dispatcher
+espeak-ng
+xdg-utils          # default apps: browser, mail, files (takumi app default)
+zenity             # the file chooser a VPN file is picked with
+restic             # backups: encrypted, every hour (takumi backup)
+rclone             # backups to a cloud you sign in to
+fuse2              # opening a backup in Files
+udisks2            # a backup disk opened and closed without a password
+sane               # scanning (takumi scan)
+sane-airscan       # network scanners without a driver
+img2pdf            # a scan saved as a PDF
+ipp-usb            # USB printers that print without a driver
+exfatprogs         # USB drives and cards for Mac, Windows and Linux (takumi drive format)
+dosfstools
+e2fsprogs
+wl-mirror          # the built-in screen on a projector (takumi display mirror)
+baobab             # what fills the disk
+imagemagick        # a theme from a picture (takumi theme from)

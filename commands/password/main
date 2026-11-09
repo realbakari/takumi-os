@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: A new password for logging in, the lock screen, the login keyring and the encrypted disk, all at once
+risk: 2
+sudo: yes
+converse: yes
+title: Change your password
+words: password passcode passphrase change new login account disk encryption security
+glyph: key
+ABOUT
+#
+# A conversation (lib/core.sh): your password, then a new one twice. Then, as root, the new one for your account
+# (chpasswd) and for the disk under / (key slot 0, cryptsetup luksChangeKey): the disk first, put back if the
+# account refuses. The recovery code's slots stay. When the disk still opens with an earlier password, it asks
+# whether to change that too. A disk that is not encrypted: the account alone. Then, as you, the login keyring's
+# password follows (security_keyring_rekey, lib/security.sh), so the keyring keeps opening when you sign in; when
+# it was locked with another password it keeps that one, and says so (docs/security.md). Exit codes: 0 changed, 1 cancelled or not possible here, 3 your password did not
+# work three times, 4 the disk's password did not work three times.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do
+  [[ -f "$l/disk.sh" ]] && { . "$l/core.sh"; . "$l/rooms.sh"; . "$l/disk.sh"; . "$l/security.sh"; break; }
+done
+declare -F disk_change_password >/dev/null && declare -F security_password_is >/dev/null && declare -F core_secret >/dev/null \
+  || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# As root, through sudo (below). stdin's last lines are this mode's answers, whether or not sudo read its own
+# password from the first one: check <password> · check-disk <password> <the disk's password> ·
+# change <password> <new> <the disk's password, empty when it is the same> · change-account <password> <new>.
+# Prints what it found or did.
+if [[ "${1:-}" == --root ]]; then
+  [[ "$(id -u)" == 0 ]] || exit 1
+  user=${SUDO_USER:-}
+  [[ -n "$user" && "$user" != root ]] || exit 1
+  case "${2:-}" in check) need=1 ;; check-disk|change-account) need=2 ;; change) need=3 ;; *) exit 1 ;; esac
+  lines=()
+  while IFS= read -r l; do lines+=("$l"); done
+  n=${#lines[@]}
+  (( n >= need )) || exit 1
+  current=${lines[$((n - need))]}
+  security_password_is "$user" "$current" || exit 3
+  dev=""
+  if rooms_encrypted; then dev=$(disk_luks_device); [[ -n "$dev" ]] || exit 1; fi
+  case "$2" in
+    check)
+      if [[ -z "$dev" ]]; then echo none
+      elif disk_opens_with "$dev" "$current" 0; then echo same
+      else echo other; fi ;;
+    check-disk)
+      [[ -n "$dev" ]] || exit 1
+      disk_opens_with "$dev" "${lines[$((n - 1))]}" 0 || exit 4
+      echo ok ;;
+    change)
+      new=${lines[$((n - 2))]} old=${lines[$((n - 1))]}
+      [[ -n "$old" ]] || old=$current
+      if [[ -n "$dev" ]]; then disk_change_password "$dev" "$old" "$new" >/dev/null 2>&1 || exit 1; fi
+      if ! printf '%s:%s\n' "$user" "$new" | chpasswd >/dev/null 2>&1; then
+        if [[ -n "$dev" ]]; then disk_change_password "$dev" "$new" "$old" >/dev/null 2>&1 || true; fi   # the disk as it was
+        exit 1
+      fi
+      if [[ -n "$dev" ]]; then echo disk; else echo account; fi ;;
+    change-account)
+      printf '%s:%s\n' "$user" "${lines[$((n - 1))]}" | chpasswd >/dev/null 2>&1 || exit 1
+      echo account ;;
+  esac
+  exit 0
+fi
+
+[[ "$(id -u)" != 0 ]] || core_fail 1 "Change your own password as yourself, not as root."
+command -v unix_chkpwd >/dev/null || core_fail 1 "This computer cannot check passwords (unix_chkpwd is missing)."
+[[ " $(id -nG) " == *" wheel "* ]] || core_fail 1 "Changing your password here needs an administrator account."
+user=$(id -un)
+self=$(readlink -f "$0")
+current="" new="" again="" diskpw=""
+# This command as root, for /etc/shadow (chpasswd) and key slot 0 of the disk under / (cryptsetup), with your
+# password as sudo's.
+as_root() {   # <mode> <answers...>
+  local mode=$1
+  shift
+  printf '%s\n' "$@" | security_sudo_stdin "$current" "$self" --root "$mode"   # /etc/shadow, the disk's key slot 0
+}
+
+core_secret current "Your password" || core_fail 1 "Nothing changed."
+for try in 1 2 3; do
+  security_password_is "$user" "$current" && break
+  current=""
+  (( try < 3 )) || core_fail 3 "That password did not work."
+  core_wrong "That password did not work"
+  core_secret current "Your password" || core_fail 1 "Nothing changed."
+done
+
+disk=none
+if rooms_encrypted; then
+  rc=0; disk=$(as_root check "$current") || rc=$?
+  (( rc == 0 )) || core_fail 1 "Your password could not be checked against the disk. Nothing changed."
+fi
+if [[ "$disk" == other ]]; then
+  core_note "The disk still opens with an earlier password"
+  if core_confirm "Change the disk's password to the new one too?"; then
+    core_secret diskpw "The disk's password, the one it asks for when the computer starts" || core_fail 1 "Nothing changed."
+    for try in 1 2 3; do
+      rc=0; as_root check-disk "$current" "$diskpw" >/dev/null || rc=$?
+      (( rc == 0 )) && break
+      diskpw=""
+      (( rc == 4 )) || core_fail 1 "The disk could not be checked. Nothing changed."
+      (( try < 3 )) || core_fail 4 "That is not the disk's password."
+      core_wrong "That is not the disk's password"
+      core_secret diskpw "The disk's password" || core_fail 1 "Nothing changed."
+    done
+  else
+    disk=keep
+  fi
+fi
+
+while :; do
+  core_secret new "New password" || core_fail 1 "Nothing changed."
+  if (( ${#new} < 6 )); then core_wrong "At least six characters"; continue; fi
+  if [[ "$new" == "$current" ]]; then core_wrong "That is your password already"; continue; fi
+  core_secret again "Type it again" || core_fail 1 "Nothing changed."
+  [[ "$again" == "$new" ]] && break
+  core_wrong "The two are not the same"
+done
+
+core_note "Changing your password…"
+rc=0
+if [[ "$disk" == keep ]]; then did=$(as_root change-account "$current" "$new") || rc=$?
+else did=$(as_root change "$current" "$new" "$diskpw") || rc=$?; fi
+# The login keyring follows, as you, in your session: the two passwords go to it on stdin.
+keyring=2
+if (( rc == 0 )); then keyring=0; printf '%s\n%s\n' "$current" "$new" | security_keyring_rekey || keyring=$?; fi
+current="" new="" again="" diskpw=""
+(( rc != 3 )) || core_fail 3 "That password did not work."
+(( rc == 0 )) || core_fail 1 "Your password did not change."
+(( keyring != 4 )) || core_note "The login keyring still opens with its earlier password"
+case "$did" in
+  disk) core_done "Your password is changed, for logging in and for the disk" ;;
+  account)
+    if [[ "$disk" == keep ]]; then core_done "Your password is changed. The disk still opens with its earlier password"
+    else core_done "Your password is changed"; fi ;;
+  *) core_fail 1 "Your password did not change." ;;
+esac

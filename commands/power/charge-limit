@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Keep the battery at 80% so it lasts more years, or let it charge to 100% again
+usage: <80|100>
+example: takumi power charge-limit 80
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+self=$(readlink -f "$0")
+for l in /usr/share/takumi/lib "$(dirname "$self")/../../lib"; do [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; . "$l/core.sh"; break; }; done
+declare -F power_charge_batteries >/dev/null && declare -F core_sudo >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# Through the kernel's charge_control_end_threshold, where the laptop offers one (docs/power.md). A conversation for
+# the password. Exit status: 0 done · 2 usage · 3 the password was not given · 5 this computer cannot hold its
+# battery below full · 1 anything else.
+
+# hold <percent>: every battery stops charging there. Where a battery also has a start threshold, charging starts
+# again below 5 points under it rather than at every percent lost.
+hold() {
+  local want=$1 b
+  while IFS= read -r b; do
+    [[ -n "$b" ]] || continue
+    if (( want < 100 )) && [[ -w "$b/charge_control_start_threshold" ]]; then
+      printf '%s\n' $(( want - 5 )) > "$b/charge_control_start_threshold" 2>/dev/null || return 1
+    fi
+    printf '%s\n' "$want" > "$b/charge_control_end_threshold" 2>/dev/null || return 1
+    [[ "$(cat "$b/charge_control_end_threshold")" == "$want" ]] || return 1
+  done <<< "$(power_charge_batteries)"
+}
+
+# --- As root. --root <80|100>: hold the batteries there now and keep the choice in /var/lib/takumi/charge-limit,
+# with each start threshold as it was, to put back at 100. --apply: hold them at the kept choice again; run by
+# takumi-charge-limit.service at each start and after waking. Exit 6 with the reason as the last line.
+case "${1:-}" in
+  --apply)
+    [[ -r "$power_charge_file" ]] || exit 0
+    want=$(sed -n 's/^limit=\([0-9][0-9]*\)$/\1/p' "$power_charge_file" | tail -n 1)
+    [[ -n "$want" ]] && (( want >= 50 && want <= 100 )) || exit 0
+    hold "$want" || { echo "The battery could not be held at $want%"; exit 1; }
+    exit 0 ;;
+  --root)
+    want=${2:-}
+    case "$want" in 80 | 100) ;; *) exit 2 ;; esac
+    if (( want < 100 )); then
+      kept=""
+      if [[ -r "$power_charge_file" ]]; then kept=$(grep '^start ' "$power_charge_file" || true)
+      else
+        while IFS= read -r b; do
+          if [[ -n "$b" && -r "$b/charge_control_start_threshold" ]]; then kept+="start ${b##*/} $(cat "$b/charge_control_start_threshold")"$'\n'; fi
+        done <<< "$(power_charge_batteries)"
+      fi
+      hold "$want" || { echo "This laptop would not hold its battery at $want%"; exit 6; }
+      mkdir -p "${power_charge_file%/*}"
+      { printf '%s\n' "# Takumi: the battery stops charging here (takumi power charge-limit, docs/power.md)." "limit=$want"
+        [[ -z "$kept" ]] || printf '%s\n' "${kept%$'\n'}"; } > "$power_charge_file"   # /var/lib/takumi/charge-limit
+      systemctl enable takumi-charge-limit.service >/dev/null 2>&1 || true   # its links in /etc/systemd/system
+    else
+      hold 100 || { echo "The battery could not be let charge to 100%"; exit 6; }
+      if [[ -r "$power_charge_file" ]]; then
+        while read -r _ name value; do
+          if [[ -n "$name" && -w "$power_supply/$name/charge_control_start_threshold" ]]; then
+            printf '%s\n' "$value" > "$power_supply/$name/charge_control_start_threshold" 2>/dev/null || true
+          fi
+        done <<< "$(grep '^start ' "$power_charge_file" || true)"
+      fi
+      # The service stays on: without the file it does nothing, and every system made from this one agrees.
+      rm -f "$power_charge_file"                                              # /var/lib/takumi/charge-limit
+    fi
+    exit 0 ;;
+esac
+
+want=${1:-}
+case "$want" in 80 | 100) ;; *) echo "usage: takumi power charge-limit <80|100>" >&2; exit 2 ;; esac
+if [[ -z "$(power_charge_batteries)" ]]; then
+  if [[ -n "$(power_battery)" ]]; then core_fail 5 "This laptop does not let the system hold its battery below full"; fi
+  core_fail 5 "This computer has no battery"
+fi
+if [[ "$(power_charge_limit_now)" == "$want" ]] && { (( want == 100 )) || [[ -f "$power_charge_file" ]]; }; then
+  if (( want == 100 )); then core_done "The battery already charges to 100%"; else core_done "The battery already stops at $want%"; fi
+  exit 0
+fi
+if (( want == 100 )); then why="Letting the battery charge to 100% needs your password"; else why="Keeping the battery at $want% needs your password"; fi
+rc=0
+# The root part writes each battery's charge_control_*_threshold and /var/lib/takumi/charge-limit, and turns
+# on takumi-charge-limit.service (its links in /etc/systemd/system).
+out=$(core_sudo "$why" "$self" --root "$want" 2>&1) || rc=$?   # charge_control_*_threshold, /var/lib/takumi/charge-limit
+if (( rc == 6 )); then core_fail 1 "$(tail -n 1 <<< "$out")"; fi
+if (( rc != 0 )); then core_fail 3 "Nothing changed: the password was not given"; fi
+if (( want == 100 )); then core_done "The battery charges to 100% again"; else core_done "The battery stops charging at $want%, so it lasts more years"; fi

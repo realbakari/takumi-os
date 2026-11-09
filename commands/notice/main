@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Show a notice in the Core: icon, title, detail, 0-100 or -1, seconds to hold
+usage: [--open <file or link>] <icon> <title> [detail] [value] [seconds]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# The Core widens, says one thing, and settles back. Silent when the shell is not running. With --open,
+# pressing the notice opens that file or link (a recording, a scanned link). An icon written as a colour
+# ("#5ad7ff") shows that colour.
+command -v qs >/dev/null || exit 0
+if [[ "${1:-}" == --open ]]; then
+  open=${2:?usage: takumi notice --open <file or link> <icon> <title> [detail] [value] [seconds]}; shift 2
+  qs -c takumi ipc --any-display call core offer "${1:-cmd}" "${2:-}" "${3:-}" "$open" "${5:-5}" >/dev/null 2>&1 || true
+  exit 0
+fi
+if [[ -n "${5:-}" ]]; then
+  qs -c takumi ipc --any-display call core announce "${1:-cmd}" "${2:-}" "${3:-}" "$5" >/dev/null 2>&1 || true
+else
+  qs -c takumi ipc --any-display call core notice "${1:-cmd}" "${2:-}" "${3:-}" "${4:--1}" >/dev/null 2>&1 || true
+fi

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Turn Wi-Fi on or off
+risk: 0
+title: Wi-Fi
+words: wifi wireless internet network
+glyph: wifi
+ABOUT
+set -euo pipefail
+if [[ "$(nmcli radio wifi)" == enabled ]]; then nmcli radio wifi off; takumi notice wifiOff "Wi-Fi off"; else nmcli radio wifi on; takumi notice wifi "Wi-Fi on"; fi

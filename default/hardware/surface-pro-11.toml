@@ -1,0 +1,15 @@
+# Microsoft Surface Pro 11 (Snapdragon X Elite and Plus, "Denali"): its device tree is on its way into Linux; on
+# Arch Linux ARM it starts, types, plays and joins Wi-Fi, while the touchscreen, the pen and the cameras have no
+# driver yet. Found by its device tree.
+# Kernel: https://lore.kernel.org/all/?q=Microsoft+Surface+Pro+11+support (arm64: dts: qcom: x1e80100-microsoft-denali)
+title = "Surface Pro 11"
+part = "computer"
+works = "partly"
+says = "no touchscreen, pen or cameras yet"
+
+[match]
+dt_compatible = ["microsoft,denali*"]
+arch = ["aarch64"]
+
+[apply]
+note = "This Surface runs on Qualcomm's Snapdragon X, which Linux supports only in part so far: the keyboard cover, the screen, sound and Wi-Fi work; the touchscreen, the pen and the cameras do not yet. A USB camera works."

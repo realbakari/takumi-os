@@ -1,0 +1,16 @@
+# Intel laptops: thermald follows the cooling tables the laptop's maker put in its firmware, so the processor
+# slows a little before it overheats instead of the fans running flat out.
+# Intel: https://github.com/intel/thermal_daemon
+title = "Intel processor cooling"
+part = "processor"
+says = "kept cool by thermald"
+
+[match]
+cpu_vendor = ["GenuineIntel"]
+laptop = true
+arch = ["x86_64"]
+
+[apply]
+packages = ["thermald"]
+services = ["thermald.service"]
+note = "thermald follows the cooling plan the laptop's maker built in, so the processor slows down a little before it gets hot, instead of the fans running flat out."

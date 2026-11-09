@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Turn backups off; the backups already made stay where they are
+risk: 1
+title: Turn backups off
+words: backup backups stop off disable turn off
+glyph: drive
+ABOUT
+set -euo pipefail
+# The hourly timer and the plug-in start go, and so does the place in backup.toml; the list of skipped folders and the
+# key in the keyring stay, so setting up the same place again goes on with the same backups. See docs/backup.md.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/backup.sh" ]] && { . "$l/backup.sh"; break; }; done
+declare -F backup_load >/dev/null || { echo "takumi: the backup library is missing" >&2; exit 1; }
+backup_load
+[[ -n "$place_kind" ]] || { echo "Backups are already off"; exit 0; }
+was=$place_name
+systemctl --user disable --now takumi-backup.timer >/dev/null 2>&1 || true
+systemctl --user stop takumi-backup.service "$backup_restore_unit" >/dev/null 2>&1 || true
+backup_trigger_off
+systemctl --user daemon-reload >/dev/null 2>&1 || true
+backup_set_place "" "" "" "" ""
+rm -f "$backup_state/problem" "$backup_state/reminded"
+rmdir "$backup_open" 2>/dev/null || true
+takumi notice drive "Backups are off" "the backups made so far stay on $was" >/dev/null 2>&1 || true
+echo "Backups are off. The backups made so far stay on $was."

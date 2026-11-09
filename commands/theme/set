@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Switch to a theme by name and re-render the current phase
+usage: <name>
+example: takumi theme set ember
+risk: 0
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/theme.sh" ]] && { . "$l/theme.sh"; break; }; done
+declare -F theme_find >/dev/null || { echo "takumi: the theme library is missing" >&2; exit 1; }
+name=${1:?theme name}
+dir=$(theme_find "$name") || { echo "no theme named $name" >&2; exit 1; }
+mkdir -p "$HOME/.config/takumi"
+printf '%s\n' "$name" > "$HOME/.config/takumi/theme"
+takumi theme render "$name" "$(takumi phase current)"
+takumi theme apply
+title=$(theme_meta "$dir/theme.toml" title)
+# Chromium's colour is a file only root writes (takumi theme browsers), so a new theme reaches it when you
+# say so; the notice says when it is behind.
+detail=""
+if [[ -f "$theme_browsers_flag" ]]; then
+  was=$(theme_chromium_colour); now=$(theme_merged "$dir/theme.toml" day | sed -n 's/^accent=//p')
+  [[ -n "$was" && "$was" != "$now" ]] && detail="Chromium keeps the last colours until you colour the browsers again"
+fi
+takumi notice sun "Theme ${title:-$name}" "$detail"

@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# Contract checks for Wi-Fi (lib/wifi.sh, commands/wifi/*, the Palette's Wi-Fi rows) against a fake
+# nmcli: names with colons and accents, hidden and duplicate networks, the rows the Core shows, the exit
+# codes it reads, work and school networks (a username, a password and the server's domain, and the
+# certificate trouble wpa_supplicant writes down), and that a password never appears in any command's arguments.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; Wi-Fi checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-wifi.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state TAKUMI_CA_BUNDLE=$t/ca-certificates.crt; mkdir -p "$t/bin" "$FAKE"; : > "$TAKUMI_CA_BUNDLE"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice"   # fake takumi commands go in front of the real ones
+
+cat > "$t/bin/nmcli" <<'FAKE'
+#!/usr/bin/env bash
+# Answers from files in $FAKE and logs each call's arguments to $FAKE/calls.
+printf '%s\n' "$*" >> "$FAKE/calls"
+a=" $* "
+case "$a" in
+  *" radio wifi on "*) echo enabled > "$FAKE/radio" ;;
+  *" radio wifi "*) cat "$FAKE/radio" ;;
+  *" -f TYPE,STATE device "*) cat "$FAKE/devices" ;;
+  *" -f CONNECTIVITY general "*) cat "$FAKE/connectivity" ;;
+  *" general permissions "*) echo "org.freedesktop.NetworkManager.settings.modify.system:$(cat "$FAKE/perm")" ;;
+  *" device wifi list "*) cat "$FAKE/scan" ;;
+  *" -f UUID,TYPE,TIMESTAMP connection show "*) cat "$FAKE/profiles" ;;
+  *" connection.uuid,802-11-wireless.ssid,802-11-wireless.mode connection show "*) cat "$FAKE/blocks" ;;
+  *" connection add "*) echo "Connection 'x' (11111111-2222-3333-4444-555555555555) successfully added." ;;
+  *" connection edit "*) cat >> "$FAKE/stdin"; echo "Connection 'x' (u) successfully updated." ;;
+  *" connection up "*)
+    r=$(head -n 1 "$FAKE/up"); if [[ $(wc -l < "$FAKE/up") -gt 1 ]]; then tail -n +2 "$FAKE/up" > "$FAKE/up.next"; mv "$FAKE/up.next" "$FAKE/up"; fi
+    case "$r" in
+      ok) echo "Connection successfully activated" ;;
+      secrets) echo "Error: Connection activation failed: Secrets were required, but not provided"; exit 4 ;;
+      *) echo "Error: Timeout expired (60 seconds)"; exit 3 ;;
+    esac ;;
+  *" connection delete "*|*" connection modify "*) : ;;
+  *" -g 802-11-wireless-security.key-mgmt "*) echo wpa-psk ;;
+  *" -g 802-11-wireless-security.psk "*) echo "lantern:42 moss" ;;
+  *" -g 802-11-wireless.hidden "*) echo no ;;
+  *" -g 802-1x.identity "*) cat "$FAKE/identity" ;;
+  *" -g 802-1x.domain-suffix-match "*) cat "$FAKE/domain" ;;
+  *) echo "fake nmcli: unexpected: $*" >&2; exit 99 ;;
+esac
+FAKE
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$FAKE/calls"; cat > /dev/null; printf "##  ##\\n  ##  \\n"\n' > "$t/bin/qrencode"
+printf '#!/bin/sh\ncat "$FAKE/journal" 2>/dev/null\nexit 0\n' > "$t/bin/journalctl"
+chmod +x "$t/bin/"* "$t/commands/notice/main"
+
+reset() {
+  rm -f "${FAKE:?}"/*
+  echo enabled > "$FAKE/radio"; echo full > "$FAKE/connectivity"; echo yes > "$FAKE/perm"; echo ok > "$FAKE/up"
+  printf 'wifi:connected\nethernet:unavailable\nwifi-p2p:disconnected\n' > "$FAKE/devices"
+  # In use, a weaker copy of it, an accent, a colon inside and at the end, hidden, enterprise, weak.
+  cat > "$FAKE/scan" <<'SCAN'
+*:82:WPA2:Takumi Home
+ :64:WPA2:Takumi Home
+ :100::Corner Café
+ :40:WPA3:Attic: 5G
+ :30:WPA2:
+ :20:WPA2 802.1X:eduroam
+ :55:WPA1 WPA2:Ends with colon:
+ :70:WPA2:Old: Office
+ :12:WPA2:Weak One
+
+SCAN
+  printf '%s\n' "aaaa:802-11-wireless:1700000300" "bbbb:802-3-ethernet:1700000400" "cccc:802-11-wireless:1700000100" "dddd:802-11-wireless:1700000200" > "$FAKE/profiles"
+  printf '%s\n' aaaa "Takumi Home" infrastructure "" dddd "Old: Office" infrastructure "" cccc "My Hotspot" ap > "$FAKE/blocks"
+  : > "$FAKE/calls"; : > "$FAKE/stdin"; : > "$FAKE/notices"
+}
+check() { if eval "$2"; then :; else echo "wifi: $1"; status=1; fi; }
+lib() { bash -c '. lib/wifi.sh; "$@"' _ "$@"; }
+rows() { commands/palette/index wifi "$1"; }
+
+reset
+scan=$(lib wifi_scan no); tab=$(printf '\t')
+check "the network in use comes first" '[[ "$(head -n 1 <<< "$scan")" == "1${tab}82${tab}psk${tab}Takumi Home" ]]'
+check "one line per name, none without a name" '[[ $(wc -l <<< "$scan") -eq 7 ]] && ! grep -q "${tab}\$" <<< "$scan"'
+check "a colon inside a name is kept" '[[ "$scan" == *"${tab}sae${tab}Attic: 5G"* ]]'
+check "a colon at the end of a name is kept" '[[ "$scan" == *"${tab}psk${tab}Ends with colon:"* ]]'
+check "open, enterprise and accent" '[[ "$scan" == *"0${tab}100${tab}open${tab}Corner Café"* && "$scan" == *"${tab}enterprise${tab}eduroam"* ]]'
+check "saved networks: most recent first, no hotspot" '[[ "$(lib wifi_saved | cut -f2 | tr "\n" "|")" == "Takumi Home|Old: Office|" ]]'
+check "the current network" '[[ "$(lib wifi_current)" == "Takumi Home" ]]'
+check "qr escaping" '[[ "$(lib wifi_qr_escape "a;b,c:d\\e\"f")" == "a\;b\\,c\\:d\\\\e\\\"f" ]]'
+
+r=$(rows wifi)
+check "rows are JSON with an id, a title and a kind" '[[ -n "$r" ]] && jq -e "select(.id and .title and .kind) | true" <<< "$r" >/dev/null'
+check "the connected row shares" '[[ "$(jq -r "select(.title == \"Takumi Home\") | .subtitle + \"|\" + (.card|tostring) + \"|\" + (.run[0:3] | join(\" \"))" <<< "$r")" == "Connected · Enter to share|true|takumi wifi share" ]]'
+check "a network row is a conversation with the join command" '[[ "$(jq -c "select(.title == \"Attic: 5G\") | [.converse, .run]" <<< "$r")" == "[true,[\"takumi\",\"wifi\",\"join\",\"Attic: 5G\"]]" ]]'
+check "a saved network says so" '[[ "$(jq -c "select(.title == \"Old: Office\") | [.subtitle, .converse]" <<< "$r")" == "[\"Saved\",true]" ]]'
+check "the hidden row runs the join command with --hidden" '[[ "$(jq -c "select(.id == \"wifi:hidden\") | .run" <<< "$r")" == "[\"takumi\",\"wifi\",\"join\",\"--hidden\"]" ]]'
+check "an open network says so" '[[ "$(jq -r "select(.title == \"Corner Café\") | .subtitle" <<< "$r")" == "Open, no password" ]]'
+check "weak and enterprise" '[[ "$(jq -r "select(.title == \"Weak One\" or .title == \"eduroam\") | .subtitle" <<< "$r" | tr "\n" "|")" == "Work or school sign-in · weak signal|Needs a password · weak signal|" ]]'
+check "signal as bars" '[[ "$(jq -r "select(.title == \"Corner Café\" or .title == \"Attic: 5G\" or .title == \"Weak One\") | .bars" <<< "$r" | tr "\n" " ")" == "3 2 1 " ]]'
+check "hidden and off rows, no forget or share rows" '[[ "$(jq -r .id <<< "$r" | grep -c "^wifi:\(hidden\|off\)$")" -eq 2 && "$r" != *wifi-forget* && "$r" != *wifi:share* ]]'
+check "network rows keep their order whatever the history" '[[ "$(jq -r "select(.bars) | .steady" <<< "$r" | sort -u)" == "true" ]]'
+check "the order: in use, saved, the rest by signal" '[[ "$(jq -sr "sort_by(-.score) | .[0:3] | map(.title) | join(\"|\")" <<< "$r")" == "Takumi Home|Old: Office|Corner Café" ]]'
+check "unrelated words list nothing" '[[ -z "$(rows zebra)" ]]'
+check "three letters of a name find it" '[[ "$(rows attic | jq -r .title)" == "Attic: 5G" ]]'
+check "forget rows ask first" '[[ "$(rows forget | jq -r "[.title, .risk] | join(\"/\")" | tr "\n" "|")" == "Forget Takumi Home/1|Forget Old: Office/1|" ]]'
+check "share and sign-in rows" '[[ "$(rows share | jq -r .id)" == "wifi:share" && "$(rows "share wifi" | jq -r .id)" == "wifi:share" && "$(rows hotel | jq -r .id)" == "wifi:signin" ]]'
+check "every word of a query counts, hyphens ignored" '[[ "$(rows "wifi off" | jq -r .title)" == "Turn Wi-Fi off" && "$(rows "turn off wifi" | jq -r .title)" == "Turn Wi-Fi off" ]]'
+# The same query filter keeps a calculator answer, whose title never holds the expression.
+printf '#!/bin/sh\necho 4\n' > "$t/bin/qalc"; chmod +x "$t/bin/qalc"
+check "the calculator's answer survives the query filter" '[[ "$(commands/palette/index calc "2+2" | jq -r .title)" == "4" ]]'
+echo portal > "$FAKE/connectivity"
+check "a sign-in page in the way" '[[ "$(rows wifi | jq -r "select(.title == \"Takumi Home\") | .subtitle + \"|\" + (.run | join(\" \"))")" == "Connected · sign in to use the internet|takumi wifi signin" ]]'
+echo disabled > "$FAKE/radio"
+check "Wi-Fi off: one row turns it on" '[[ "$(rows wifi | jq -r .title)" == "Turn Wi-Fi on" ]]'
+printf 'ethernet:connected\n' > "$FAKE/devices"
+check "no Wi-Fi here" '[[ "$(rows wifi | jq -r ".title + \"|\" + .subtitle")" == "No Wi-Fi on this computer|Connected by cable" ]]'
+check "no Wi-Fi here, other words: nothing" '[[ -z "$(rows zebra)" ]]'
+
+join() { local out rc=0; out=$(commands/wifi/join "$@") || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+reset
+res=$(printf '%s\n' "star light:9" | join "Attic: 5G")
+check "a new network joins with the password from stdin ($res)" '[[ "$res" == "0|Connected to Attic: 5G" ]]'
+check "the password never appears in arguments" '! grep -q "star light" "$FAKE/calls"'
+check "the password goes to nmcli on stdin" 'grep -qx "set 802-11-wireless-security.psk star light:9" "$FAKE/stdin"'
+check "saved for everyone, WPA3, joined by itself next time" 'grep -q "connection add type wifi con-name Attic: 5G ssid Attic: 5G connection.autoconnect no wifi-sec.key-mgmt sae" "$FAKE/calls" && grep -q "connection.autoconnect yes" "$FAKE/calls" && ! grep -q "connection delete" "$FAKE/calls"'
+reset; echo secrets > "$FAKE/up"
+res=$(printf '%s\n' "wrong password" | join "Attic: 5G")
+check "a wrong password: 4 and the new profile is removed ($res)" '[[ "$res" == "4|That password did not work" ]] && grep -q "connection delete uuid 11111111-2222-3333-4444-555555555555" "$FAKE/calls"'
+reset
+res=$(join "Attic: 5G" </dev/null)
+check "no password given: 3 ($res)" '[[ "$res" == "3|Attic: 5G needs a password" ]] && ! grep -q "connection add" "$FAKE/calls"'
+res=$(printf 'short\n' | join "Ends with colon:")
+check "a password too short for WPA ($res)" '[[ "$res" == "4|Wi-Fi passwords have 8 to 63 characters" ]]'
+res=$(join "Nowhere" </dev/null)
+check "not nearby: 5 ($res)" '[[ "$res" == "5|Nowhere is not nearby" ]]'
+res=$(join "Corner Café" </dev/null)
+check "an open network joins without a password ($res)" '[[ "$res" == "0|Connected to Corner Café" ]] && ! grep -q "key-mgmt" "$FAKE/calls"'
+reset
+res=$(join "Old: Office" </dev/null)
+check "a saved network joins with its saved password ($res)" '[[ "$res" == "0|Connected to Old: Office" ]] && ! grep -q "connection add" "$FAKE/calls" && grep -q "connection up uuid dddd" "$FAKE/calls"'
+reset; echo secrets > "$FAKE/up"
+res=$(join "Old: Office" </dev/null)
+check "a saved password that stopped working: 3 ($res)" '[[ "$res" == "3|The saved password for Old: Office did not work" ]]'
+reset; echo no > "$FAKE/perm"
+printf '%s\n' "star light:9" | join "Attic: 5G" >/dev/null
+check "without permission to save for everyone, saved for this user" 'grep -q "connection.permissions user:" "$FAKE/calls"'
+reset
+res=$(printf '%s\n' "studio-pass" | join --hidden "Studio")
+check "a hidden network ($res)" '[[ "$res" == "0|Connected to Studio" ]] && grep -q "802-11-wireless.hidden yes wifi-sec.key-mgmt wpa-psk" "$FAKE/calls"'
+
+# In the Core (TAKUMI_CORE=1) the command speaks the line protocol of lib/core.sh and asks again after a
+# wrong password instead of giving up.
+reset; printf 'secrets\nok\n' > "$FAKE/up"
+said=$(printf '%s\n' "wrong password" "star light:9" | TAKUMI_CORE=1 commands/wifi/join "Attic: 5G"; echo "rc=$?")
+want=$(printf '%s\n' "secret Password for Attic: 5G" "note Joining Attic: 5G…" "wrong That password did not work" "secret Password for Attic: 5G" "done Connected to Attic: 5G" "rc=0")
+check "in the Core: secret, note, wrong, secret again, done" '[[ "$said" == "$want" ]]'
+check "in the Core the right password went to nmcli last" '[[ "$(grep "^set " "$FAKE/stdin" | tail -n 1)" == "set 802-11-wireless-security.psk star light:9" ]]'
+reset; echo secrets > "$FAKE/up"
+said=$(printf '%s\n' "wrong password" | TAKUMI_CORE=1 commands/wifi/join "Attic: 5G"; echo "rc=$?")
+check "in the Core, no more answers: exit 3 after asking again ($said)" '[[ "$said" == *"wrong That password did not work"*"secret Password for Attic: 5G"*"rc=3" ]]'
+reset
+said=$(printf '%s\n' "Studio" "" | TAKUMI_CORE=1 commands/wifi/join --hidden; echo "rc=$?")
+check "a hidden network asks its name, then its password; empty means open ($said)" '[[ "$said" == *"ask Network name"*"secret Password for Studio"*"done Connected to Studio"*"rc=0" ]] && grep -q "802-11-wireless.hidden yes" "$FAKE/calls"'
+# Work and school networks: a username, a password and the server's domain (Enter takes the one in the username),
+# PEAP or TTLS with MSCHAPv2, the system's list of authorities, and the password on stdin only.
+check "a work or school password is 802.1X's" '[[ "$(lib wifi_secret_key enterprise)" == 802-1x.password ]]'
+check "the domain in a username, and what is a domain" '[[ "$(lib wifi_realm "ada@Uni.Example")" == uni.example && -z "$(lib wifi_realm "UNI\\ada")" ]] && lib wifi_domain_ok radius.uni.example && ! lib wifi_domain_ok uni'
+reset
+res=$(printf '%s\n' "ada@uni.example" "pa ss,w=rd" "" | join eduroam)
+check "a work or school network joins with a username, a password and the domain from the username ($res)" '[[ "$res" == "0|Connected to eduroam" ]]'
+check "PEAP or TTLS, MSCHAPv2, the system's authorities and the domain" 'grep -qF "connection add type wifi con-name eduroam ssid eduroam connection.autoconnect no wifi-sec.key-mgmt wpa-eap 802-1x.eap peap,ttls 802-1x.phase2-auth mschapv2 802-1x.identity ada@uni.example 802-1x.ca-cert $TAKUMI_CA_BUNDLE 802-1x.domain-suffix-match uni.example" "$FAKE/calls"'
+check "the work or school password goes to nmcli on stdin, never in arguments" 'grep -qx "set 802-1x.password pa ss,w=rd" "$FAKE/stdin" && ! grep -q "pa ss" "$FAKE/calls"'
+reset
+said=$(printf '%s\n' "jsmith" "secret-1" "Radius.Example.ORG." | TAKUMI_CORE=1 commands/wifi/join eduroam; echo "rc=$?")
+want=$(printf '%s\n' "ask Username for eduroam" "secret Password for eduroam" "ask Server domain, from your IT department's Wi-Fi page" "note Joining eduroam…" "done Connected to eduroam" "rc=0")
+check "in the Core: username, password, then where the domain is found" '[[ "$said" == "$want" ]] && grep -q "802-1x.domain-suffix-match radius.example.org" "$FAKE/calls"'
+reset
+said=$(printf '%s\n' "ada@uni.example" "secret-1" "uni" "" | TAKUMI_CORE=1 commands/wifi/join eduroam; echo "rc=$?")
+check "a domain in the username is offered; something that is no domain is asked again ($said)" '[[ "$said" == *"ask Server domain, or Enter for uni.example"*"wrong That is not a domain, such as example.edu"*"ask Server domain, or Enter for uni.example"*"done Connected to eduroam"*"rc=0" ]]'
+reset; echo secrets > "$FAKE/up"
+res=$(printf '%s\n' "ada@uni.example" "wrong one" "" | join eduroam)
+check "a wrong username or password: 4, and the new profile is removed ($res)" '[[ "$res" == "4|That username or password did not work" ]] && grep -q "connection delete uuid 11111111-2222-3333-4444-555555555555" "$FAKE/calls"'
+reset; printf 'secrets\nok\n' > "$FAKE/up"
+said=$(printf '%s\n' "ada@uni.example" "wrong one" "" "" "right one" | TAKUMI_CORE=1 commands/wifi/join eduroam; echo "rc=$?")
+want=$(printf '%s\n' "ask Username for eduroam" "secret Password for eduroam" "ask Server domain, or Enter for uni.example" "note Joining eduroam…" \
+  "wrong That username or password did not work" "ask Username, or Enter to keep ada@uni.example" "secret Password for eduroam" "note Joining eduroam…" "done Connected to eduroam" "rc=0")
+check "in the Core a wrong password is asked for again, Enter keeping the username" '[[ "$said" == "$want" ]] && [[ "$(grep "^set " "$FAKE/stdin" | tail -n 1)" == "set 802-1x.password right one" ]] && ! grep -q "802-1x.identity ada@uni.example$" "$FAKE/calls"'
+reset; echo secrets > "$FAKE/up"
+echo "CTRL-EVENT-EAP-TLS-CERT-ERROR reason=9 depth=0 subject='/CN=radius.other.example' err='Domain suffix mismatch'" > "$FAKE/journal"
+res=$(printf '%s\n' "ada@uni.example" "pass" "" | join eduroam)
+check "a certificate for another domain: 6 ($res)" '[[ "$res" == "6|eduroam'"'"'s certificate is not for uni.example" ]]'
+reset; printf 'secrets\nok\n' > "$FAKE/up"
+echo "CTRL-EVENT-EAP-TLS-CERT-ERROR reason=9 depth=0 subject='/CN=radius.other.example' err='Domain suffix mismatch'" > "$FAKE/journal"
+said=$(printf '%s\n' "ada@uni.example" "pass" "" "other.example" | TAKUMI_CORE=1 commands/wifi/join eduroam; echo "rc=$?")
+check "in the Core the domain is asked for again and changed ($said)" '[[ "$said" == *"wrong eduroam'"'"'s certificate is not for uni.example"*"ask Server domain, from your IT department'"'"'s Wi-Fi page"*"done Connected to eduroam"*"rc=0" ]] && grep -q "connection modify uuid 11111111-2222-3333-4444-555555555555 802-1x.domain-suffix-match other.example" "$FAKE/calls"'
+reset; echo secrets > "$FAKE/up"
+echo "CTRL-EVENT-EAP-TLS-CERT-ERROR reason=1 depth=1 subject='/CN=Campus CA' err='self-signed certificate in certificate chain'" > "$FAKE/journal"
+res=$( (printf '%s\n' "ada@uni.example" "pass" "" | TAKUMI_CORE=1 commands/wifi/join eduroam || true) | tail -n 1)
+check "a certificate from an authority this computer does not trust ($res)" '[[ "$res" == "eduroam'"'"'s certificate is not from an authority this computer trusts: ask your IT department" ]]'
+reset
+res=$(join eduroam </dev/null)
+check "a work or school network with no answers: 3 ($res)" '[[ "$res" == "3|eduroam needs your username" ]] && ! grep -q "connection add" "$FAKE/calls"'
+rm -f "$TAKUMI_CA_BUNDLE"; res=$(printf '%s\n' "ada@uni.example" "pass" "" | join eduroam); : > "$TAKUMI_CA_BUNDLE"
+check "no list of trusted authorities: nothing is saved ($res)" '[[ "$res" == "1|This computer has no list of trusted certificates to check eduroam against" ]] && ! grep -q "connection add" "$FAKE/calls"'
+reset; printf 'secrets\nok\n' > "$FAKE/up"; echo "ada@uni.example" > "$FAKE/identity"; echo "uni.example" > "$FAKE/domain"
+echo "eeee:802-11-wireless:1700000900" >> "$FAKE/profiles"; printf '%s\n' "" eeee eduroam infrastructure >> "$FAKE/blocks"
+res=$(printf '%s\n' "" "new pass" | join eduroam)
+check "a saved work or school network whose password changed asks again, keeping the username ($res)" '[[ "$res" == "0|Connected to eduroam" ]] && grep -q "connection up uuid eeee" "$FAKE/calls" && grep -qx "set 802-1x.password new pass" "$FAKE/stdin" && ! grep -q "connection add" "$FAKE/calls"'
+
+reset
+card=$(commands/wifi/share --card)
+check "the share card" '[[ "$(jq -c "[.title, .secretLabel, .secret, .qr]" <<< "$card")" == "[\"Takumi Home\",\"Password\",\"lantern:42 moss\",[\"101\",\"010\"]]" ]]'
+check "the password reaches neither nmcli nor qrencode as an argument" '! grep -q "lantern" "$FAKE/calls"'
+commands/wifi/forget "Old: Office" >/dev/null
+check "forget removes the saved profile" 'grep -q "connection delete uuid dddd" "$FAKE/calls" && grep -q "Forgot Old: Office" "$FAKE/notices"'
+
+echo "   $(grep -c '^check ' "$0") Wi-Fi checks against a fake nmcli"
+exit $status

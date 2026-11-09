@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Carry the chosen fonts and text size to every app again
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/font.sh" ]] && { . "$l/font.sh"; break; }; done
+declare -F font_apply >/dev/null || { echo "takumi: the font library is missing" >&2; exit 1; }
+# For anything that changes shell.toml's font lines by itself (takumi display text): the look drawn again,
+# fontconfig's link and GNOME's settings (lib/font.sh).
+font_apply

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Delete a room that was never used
+usage: <name>
+risk: 2
+sudo: yes
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_current >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || { echo "run via sudo" >&2; exit 1; }
+name=${1:?room name}
+rooms_mount_top
+[[ "$name" != "$(rooms_current)" ]] || { echo "that is the running room" >&2; exit 1; }
+rooms_delete "$name"

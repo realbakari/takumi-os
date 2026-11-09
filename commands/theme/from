@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: A theme in a picture's colours, readable in every phase, with the picture as its sky
+usage: [picture] [name] [--dark|--light]
+example: takumi theme from ~/Pictures/beach.jpg
+example: takumi theme from ~/Pictures/beach.jpg "Beach house" --dark
+risk: 0
+title: Make a theme from my background
+words: theme look colours colors picture photo wallpaper background sky make create own personal
+glyph: picture
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/theme.sh" ]] && { . "$l/theme.sh"; break; }; done
+declare -F theme_derive >/dev/null || { echo "takumi: the theme library is missing" >&2; exit 1; }
+
+# The picture's eight main colours become a whole palette, light or dark as the picture is, with its four
+# phases, every one checked to read (lib/theme.sh, docs/look.md). The theme is written to
+# ~/.config/takumi/themes/<name>/ with the picture as its sky, then the Core opens on its row, which shows
+# it live on the shell and the sky: Enter there chooses it, Esc keeps yours.
+#
+# Exit status, for scripts: 0 made · 2 usage · 3 no picture, or none ImageMagick can read · 4 ImageMagick is
+# not installed · 1 anything else. The last line says it in words; run from the Palette, a notice does.
+usage() { echo "usage: takumi theme from [picture] [name] [--dark|--light]" >&2; exit 2; }
+fail() {  # <code> <title> <detail>
+  takumi notice drop "$2" "$3" >/dev/null 2>&1 || true
+  printf '%s: %s\n' "$2" "$3"
+  exit "$1"
+}
+
+pic=""; name=""; named=no; mode=auto
+for a in "$@"; do
+  case "$a" in
+    --dark) mode=dark ;;
+    --light) mode=light ;;
+    -*) usage ;;
+    *) if [[ -z "$pic" ]]; then pic=$a; elif [[ $named == no ]]; then name=$a; named=yes; else usage; fi ;;
+  esac
+done
+
+from=""
+if [[ -z "$pic" ]]; then
+  [[ -e "$theme_look/sky" ]] || fail 3 "No picture on the sky" "it is painted from the theme; choose a picture with “Make a theme from a picture…”"
+  pic=$(readlink -f "$theme_look/sky")
+  cur=$(theme_current); cur_dir=$(theme_find "$cur" || true)
+  cur_title=""; [[ -n "$cur_dir" ]] && cur_title=$(theme_meta "$cur_dir/theme.toml" title)
+  from="the ${cur_title:-$cur} sky"
+  [[ -n "$name" ]] || name="${cur_title:-$cur} sky"
+fi
+[[ -f "$pic" ]] || fail 3 "No picture there" "$pic"
+command -v magick >/dev/null || fail 4 "Making a theme from a picture needs ImageMagick" "it is not installed"
+file=$(basename "$pic"); [[ -n "$from" ]] || from=$(printf '%s' "$file" | tr -d '"\\')
+[[ -n "$name" ]] || name=${file%.*}
+
+slug=$(theme_slug "$name"); title=$(theme_title_of "$name")
+# A name you gave again makes your theme of that name anew; any other clash, and every one of Takumi's own
+# names, gets a number, so a theme never hides another.
+replace=no
+if [[ $named == yes && -f "$theme_user_dir/$slug/theme.toml" ]]; then
+  replace=yes
+else
+  base=$slug; base_title=$title; n=2
+  while theme_find "$slug" >/dev/null; do slug="$base-$n"; title="$base_title $n"; n=$((n + 1)); done
+fi
+
+hist=$(theme_histogram "$pic" || true)
+[[ -n "$hist" ]] || fail 3 "Not a picture ImageMagick can read" "$file"
+derived=$(theme_derive "$mode" <<< "$hist") || fail 1 "Could not make colours from $file" "ImageMagick found none"
+
+mkdir -p "$theme_user_dir"
+tmp="$theme_user_dir/.$slug.new"; rm -rf "$tmp"; mkdir -p "$tmp/skies"
+trap 'rm -rf "$tmp"' EXIT
+{
+  printf '# %s: made from %s by takumi theme from on %s.\n' "$title" "$from" "$(date '+%-d %B %Y')"
+  printf '# The colours are the picture'"'"'s, moved until text reads at 7:1 and the accent at 3:1\n'
+  printf '# against surfaces, in every phase.\n\n'
+  theme_toml "$slug" "$title" "made from $from" true <<< "$derived"
+} > "$tmp/theme.toml"
+check=$(theme_check "$tmp/theme.toml") || fail 1 "Could not make readable colours from $file" "try another picture"
+
+# The sky: the picture turned the way the camera held it, at most 4K, without its camera details (a phone
+# photo carries where it was taken). PNG and WebP stay as they are; everything else becomes JPEG, which the
+# Sky and the login screen read.
+case "$file" in *.[Pp][Nn][Gg]) ext=png ;; *.[Ww][Ee][Bb][Pp]) ext=webp ;; *) ext=jpg ;; esac
+magick "$pic[0]" -auto-orient -resize '3840x2160>' -strip "$tmp/skies/default.$ext" 2>/dev/null || fail 3 "Not a picture ImageMagick can read" "$file"
+magick -define jpeg:size=960x540 "$pic[0]" -auto-orient -resize '480x270^' -gravity center -extent 480x270 -strip "$tmp/sample.png" 2>/dev/null || true
+if [[ $replace == yes ]]; then rm -rf "${theme_user_dir:?}/$slug"; fi
+mv "$tmp" "$theme_user_dir/$slug"
+trap - EXIT
+mode_made=$(theme_meta "$theme_user_dir/$slug/theme.toml" mode)
+
+# The theme in use, made anew: draw it again. Any other: show it in the Core, where Enter chooses it.
+if [[ "$(theme_current)" == "$slug" ]]; then takumi theme set "$slug" >/dev/null; fi
+query="theme $(printf '%s' "$title" | tr '[:upper:]' '[:lower:]')"
+shown=no
+if command -v qs >/dev/null && qs -c takumi ipc --any-display call core search "$query" >/dev/null 2>&1; then shown=yes; fi
+[[ $shown == yes ]] || takumi notice drop "Theme $title made" "type its name in the Core to see it" >/dev/null 2>&1 || true
+
+if [[ -t 1 ]]; then
+  swatch() { printf '\033[48;2;%d;%d;%dm    \033[0m' "0x${1:1:2}" "0x${1:3:2}" "0x${1:5:2}"; }
+  printf 'Made %s, a %s theme, from %s\n\n' "$title" "$mode_made" "$from"
+  for k in $theme_keys; do
+    c=$(theme_merged "$theme_user_dir/$slug/theme.toml" day | sed -n "s/^$k=//p")
+    printf '  '; swatch "$c"; printf ' %-11s %s\n' "$k" "$c"
+  done
+  printf '\n'
+  awk '{ printf "  %-6s text %s:1 · accent %s:1 against surfaces · quiet text %s:1\n", $1, $2, $3, $4 }' <<< "$check"
+  printf '\n'
+  [[ $shown == yes ]] && echo "Shown in the Core now: Enter there uses it, Esc keeps yours."
+fi
+echo "Made $title in $theme_user_dir/$slug: takumi theme set $slug uses it"

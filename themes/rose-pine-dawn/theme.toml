@@ -1,0 +1,35 @@
+# Rosé Pine Dawn: Rosé Pine on morning linen
+# Colours after Rosé Pine (https://rosepinetheme.com); phases by Takumi.
+
+[meta]
+name = "rose-pine-dawn"
+mode = "light"
+title = "Rosé Pine Dawn"
+about = "Rosé Pine on morning linen"
+credit = "Rosé Pine (https://rosepinetheme.com)"
+
+[palette]
+accent     = "#c67874"
+background = "#faf4ed"
+surface    = "#f2e9e1"
+foreground = "#524d72"
+muted      = "#8f8a9b"
+red        = "#b4637a"
+yellow     = "#bb7e2a"
+green      = "#286983"
+cyan       = "#56949f"
+blue       = "#286983"
+magenta    = "#907aa9"
+
+[phase.dawn]
+accent     = "#bb7e2a"
+background = "#fcf3e8"
+
+[phase.dusk]
+accent     = "#b4637a"
+
+[phase.night]
+accent     = "#aa6764"
+background = "#f2ece7"
+surface    = "#e8e0da"
+foreground = "#4f4b65"

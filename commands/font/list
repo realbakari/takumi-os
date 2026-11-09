@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: The fonts in use and the families on this computer
+usage: [ui|mono]
+example: takumi font list mono
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/font.sh" ]] && { . "$l/font.sh"; break; }; done
+declare -F font_families >/dev/null || { echo "takumi: the font library is missing" >&2; exit 1; }
+only=${1:-}
+case "$only" in ''|ui|mono) ;; *) echo "usage: takumi font list [ui|mono]" >&2; exit 2 ;; esac
+ui=$(font_ui); mono=$(font_mono)
+printf 'Interface   %s\nCode        %s\nText size   %s\n\n' "$ui" "$mono" "$(font_size)"
+command -v fc-list >/dev/null || { echo "fontconfig is not installed, so the families here cannot be listed"; exit 0; }
+font_families | while IFS="$(printf '\t')" read -r f n m; do
+  [[ $only == mono && $m != yes ]] && continue
+  [[ $only == ui && $m == yes ]] && continue
+  note=""; [[ $m == yes ]] && note="monospaced"
+  [[ "$f" == "$ui" ]] && note="${note:+$note, }in use for the interface"
+  [[ "$f" == "$mono" ]] && note="${note:+$note, }in use for code"
+  printf '  %-34s %2s %-6s  %s\n' "$f" "$n" "$([[ $n == 1 ]] && echo style || echo styles)" "$note"
+done

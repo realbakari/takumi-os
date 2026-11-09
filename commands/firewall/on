@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Turn the firewall on: other devices cannot connect to this computer unless you allow an app
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/firewall.sh" ]] && { . "$l/firewall.sh"; . "$l/core.sh"; break; }; done
+declare -F firewall_state >/dev/null && declare -F core_done >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh) with one password for all of it: ufw installed when it is missing, connections
+# other devices start turned away, everything this computer starts let out, and ufw started now and with the
+# computer from then on. The rules you made are kept.
+log="$HOME/.local/state/takumi/firewall.log"; mkdir -p "${log%/*}"
+admin() { core_sudo "Turning the firewall on needs your password" "$@"; }
+run() { if core_in_core; then "$@" >> "$log" 2>&1; else "$@"; fi; }
+if ! firewall_installed; then
+  core_note "Installing the firewall…"
+  run admin pacman -S --needed --noconfirm ufw || core_fail 1 "The firewall did not install: $log"   # pacman
+fi
+core_note "Turning the firewall on…"
+run admin takumi firewall apply on || core_fail 1 "The firewall did not turn on: $log"   # /etc/default/ufw, /etc/ufw/ufw.conf, /etc/systemd/system/multi-user.target.wants/ufw.service, /etc/takumi/firewall
+core_done "The firewall is on: other devices cannot connect unless you allow an app"

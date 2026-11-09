@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: This computer: what is in it, whether each part works, and the fixes Takumi set up for it
+usage: [--json | --card <row>]
+example: takumi hardware
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/hardware.sh" ]] && { . "$l/hardware.sh"; break; }; done
+declare -F hw_rows >/dev/null || { echo "takumi: the hardware library is missing" >&2; exit 1; }
+# One line per part: "Graphics: NVIDIA GeForce RTX 4070 · NVIDIA's own driver". --json prints the rows the
+# Palette shows (commands/palette/hardware); --card <row> prints the card Enter opens on one of them: the
+# part in a sentence, what does not work, and what to do. Exit: 0, 2 usage, 3 no such row.
+mode=text id=""
+case "${1:-}" in
+  "") ;;
+  --json) mode=json ;;
+  --card) [[ -n "${2:-}" ]] || { echo "usage: takumi hardware [--json | --card <row>]" >&2; exit 2; }; mode=card; id=$2 ;;
+  *) echo "usage: takumi hardware [--json | --card <row>]" >&2; exit 2 ;;
+esac
+command -v jq >/dev/null || { echo "This computer: jq is needed to read the hardware" >&2; exit 1; }
+rows=$(hw_rows)
+case "$mode" in
+  json) printf '%s\n' "$rows" ;;
+  card)
+    row=$(jq -c --arg id "$id" 'select(.id == $id)' <<< "$rows")
+    if [[ -z "$row" ]]; then
+      jq -cn '{kicker: "This computer", title: "Not here any more", detail: "That part is not in this computer now.", secretLabel: "", secret: "", qr: []}'
+      exit 3
+    fi
+    jq -c '{kicker: "This computer", title, detail: (if .detail != "" then .detail else .subtitle end), secretLabel: "", secret: "", qr: []}' <<< "$row" ;;
+  text)
+    jq -sr 'sort_by(-.score) | .[] | select(.id != "hw:pending") | "\(.title) · \(.subtitle)"' <<< "$rows"
+    todo=$(jq -r 'select(.id == "hw:pending") | .subtitle | sub(" · Enter.*$"; "")' <<< "$rows")
+    [[ -z "$todo" ]] || printf '\nNot set up yet: %s. takumi update sets them up, in a new system.\n' "$todo" ;;
+esac

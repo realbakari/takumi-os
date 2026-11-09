@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set up Git with your name and email, and sign in to GitHub
+risk: 1
+converse: yes
+title: Set up Git and GitHub
+words: git github developer commits name email sign in login gh
+glyph: person
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; . "$l/core.sh"; break; }; done
+declare -F apps_slug >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh, docs/development.md). Your name and email go in ~/.gitconfig, then GitHub's
+# own tool signs you in through the browser (gh auth login --web). In the Core the one-time code is a card:
+# the browser opens on GitHub's page for it, a phone can scan that page's address instead, and a notice says
+# when you are signed in. Exit status: 0 · 3 an answer was needed and none came · 1 anything else.
+log="$apps_state/dev.log"; mkdir -p "$apps_state"
+admin() { core_sudo "Installing GitHub's tool needs your password" "$@"; }
+run() { if core_in_core; then "$@" >> "$log" 2>&1; else "$@"; fi; }
+command -v git >/dev/null || core_fail 1 "Git is not installed"
+
+had_name=$(git config --global --get user.name 2>/dev/null || true)
+had_mail=$(git config --global --get user.email 2>/dev/null || true)
+guess=$had_name
+[[ -n "$guess" ]] || guess=$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f5 | cut -d, -f1 || true)
+while :; do
+  core_ask name "Your name, as your commits show it${guess:+ (Enter for $guess)}" || core_fail 3 "Nothing changed"
+  [[ -n "$name" ]] || name=$guess
+  [[ -z "$name" ]] || break
+  core_wrong "Git needs a name"; core_in_core || core_fail 3 "Git needs a name"
+done
+while :; do
+  core_ask mail "Your email for commits${had_mail:+ (Enter for $had_mail)}" || core_fail 3 "Nothing changed"
+  [[ -n "$mail" ]] || mail=$had_mail
+  [[ ! "$mail" =~ ^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$ ]] || break
+  core_wrong "That does not look like an email address"; core_in_core || core_fail 3 "That does not look like an email address"
+done
+git config --global user.name "$name"
+git config --global user.email "$mail"
+[[ -n "$(git config --global --get init.defaultBranch 2>/dev/null || true)" ]] || git config --global init.defaultBranch main
+said="Git knows you as $name <$mail>"
+
+if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then core_done "$said, and you are signed in to GitHub"; exit 0; fi
+core_confirm "Sign in to GitHub too? Your browser does it with a one-time code." || { core_done "$said"; exit 0; }
+if ! command -v gh >/dev/null; then
+  core_note "Installing GitHub's tool…"
+  # pacman: github-cli's files under /usr and its entry in /var/lib/pacman
+  run admin pacman -S --needed --noconfirm github-cli || core_fail 1 "GitHub's tool did not install. What happened is in $log"
+fi
+# At a terminal, gh signs in right there.
+if ! core_in_core && [[ -t 0 ]]; then
+  gh auth login --web --git-protocol https --hostname github.com || core_fail 1 "Not signed in to GitHub"
+  gh auth setup-git || true
+  core_done "$said, and you are signed in to GitHub"
+  exit 0
+fi
+
+# Elsewhere it signs in in the background, where it waits for you on GitHub's page, and says how it ended.
+dir="${XDG_RUNTIME_DIR:-$apps_state}"; mkdir -p "$dir"
+out="$dir/takumi-gh-login.$$"
+job='gh auth login --web --git-protocol https --hostname github.com > "$1" 2>&1 < /dev/null; ok=$?; rm -f "$1"
+if [ "$ok" -eq 0 ]; then
+  gh auth setup-git > /dev/null 2>&1
+  who=$(gh api user --jq .login 2> /dev/null)
+  takumi notice person "Signed in to GitHub" "${who:+as $who: }git uses it to push" -1 8
+else
+  takumi notice person "GitHub sign-in did not finish" "type git in the Core to try again" -1 10
+fi'
+if command -v setsid >/dev/null; then setsid sh -c "$job" _ "$out" </dev/null >/dev/null 2>&1 &
+else sh -c "$job" _ "$out" </dev/null >/dev/null 2>&1 & fi
+code="" url="https://github.com/login/device"
+for _ in $(seq 1 40); do
+  if [[ -s "$out" ]]; then
+    code=$(grep -o '[A-Z0-9]\{4\}-[A-Z0-9]\{4\}' "$out" | head -n 1 || true)
+    u=$(grep -o 'https://[^ ]*/login/device' "$out" | head -n 1 || true)
+    [[ -z "$u" ]] || url=$u
+    [[ -z "$code" ]] || break
+  fi
+  sleep 0.5
+done
+[[ -n "$code" ]] || core_fail 1 "GitHub gave no code. Try again in a minute."
+gio open "$url" >/dev/null 2>&1 || xdg-open "$url" >/dev/null 2>&1 || true
+qr=""
+if command -v qrencode >/dev/null; then qr=$(printf '%s' "$url" | qrencode -t ASCII -m 0 -o - 2>/dev/null | sed 's/##/1/g; s/  /0/g' || true); fi
+core_card "$(C=$code Q=$qr jq -cn '{kicker: "Sign in to GitHub", title: env.C,
+  detail: "Type this code on the GitHub page that opened in your browser, or scan the square to do it on your phone. A notice says when you are signed in.",
+  secretLabel: "", secret: "", qr: (env.Q | split("\n") | map(select(length > 0)))}')"

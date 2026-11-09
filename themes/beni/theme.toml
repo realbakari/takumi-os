@@ -1,0 +1,33 @@
+# Beni: safflower crimson on lacquer
+# A Takumi theme.
+
+[meta]
+name = "beni"
+mode = "dark"
+title = "Beni"
+about = "safflower crimson on lacquer"
+
+[palette]
+accent     = "#e5486a"
+background = "#140e10"
+surface    = "#1d1517"
+foreground = "#eadde0"
+muted      = "#725f65"
+red        = "#e5486a"
+yellow     = "#e8c06e"
+green      = "#93c48a"
+cyan       = "#7ec2c6"
+blue       = "#8fa5dd"
+magenta    = "#d58ccf"
+
+[phase.dawn]
+accent     = "#e8885a"
+
+[phase.dusk]
+accent     = "#e77260"
+
+[phase.night]
+accent     = "#b275ad"
+background = "#0d090a"
+surface    = "#140f10"
+foreground = "#d0c4c7"

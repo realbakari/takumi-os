@@ -1,0 +1,18 @@
+# What the setup disc puts on the disk before the Takumi installer runs (which adds
+# install/packages/base.txt and install/packages/desktop.txt). A bracketed architecture keeps a line
+# to that one. The disc carries every package of all three lists, so installing needs no network.
+base
+linux                 [x86_64]
+linux-firmware        [x86_64]
+intel-ucode           [x86_64]
+amd-ucode             [x86_64]
+sof-firmware          [x86_64]
+archlinux-keyring     [x86_64]
+linux-aarch64         [aarch64]
+archlinuxarm-keyring  [aarch64]
+btrfs-progs
+dosfstools
+cryptsetup
+networkmanager
+sudo
+rsync

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Make a printer the one apps print to unless you choose another
+usage: <name>
+example: takumi printer default "HP LaserJet M110w"
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/printer.sh" ]] && { . "$l/printer.sh"; break; }; done
+declare -F printer_queues >/dev/null || { echo "takumi: the printer library is missing" >&2; exit 1; }
+
+# Yours alone: lpoptions keeps it in ~/.cups/lpoptions, which every app's print dialog reads, so it needs
+# no password. Exit status: 0 · 5 no such printer · 1 anything else.
+name=${1:-}
+[[ -n "$name" ]] || { echo "usage: takumi printer default <name>" >&2; exit 2; }
+command -v lpoptions >/dev/null || { echo "Printing needs CUPS (the cups package)"; exit 1; }
+q=$(printer_find "$name")
+[[ -n "$q" ]] || { echo "No printer called $name"; exit 5; }
+desc=$(printer_queues | awk -F "$printer_sep" -v q="$q" '$1 == q { print $2; exit }')
+label=$(printer_label "$q" "$desc")
+lpoptions -d "$q" >/dev/null 2>&1 || { echo "Could not make $label the default"; exit 1; }
+takumi notice printer "Apps print to $label" "unless you choose another printer" -1 >/dev/null 2>&1 || true
+echo "Apps print to $label"

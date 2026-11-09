@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: How a Bluetooth headset's sound travels, in words: "AirPods Pro · AAC · good quality"
+risk: 0
+title: Bluetooth sound quality
+words: bluetooth codec headphones headset airpods quality aac ldac aptx sbc
+glyph: bt
+ABOUT
+set -euo pipefail
+# One line per Bluetooth headset or speaker that is connected, and the same in the Core, so the Palette's
+# row says it too. Headset mode (the microphone in use) is call quality and says so. Exit 1 when sound is
+# not running, 3 when no Bluetooth sound device is connected.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/audio.sh" ]] && { . "$l/audio.sh"; break; }; done
+declare -F audio_devices >/dev/null || { echo "takumi: the sound library is missing" >&2; exit 1; }
+dump=$(audio_dump) || audio_fail 1 "Sound is not running"
+lines=$(audio_devices <<< "$dump" | jq -sr '[.[] | select(.bluetooth and .codec != "")] | unique_by(if .address != "" then .address else .short end)
+  | sort_by(if .dir == "out" then 0 else 1 end) | .[] | .short + " · " + .codecWords')
+if [[ -z "$lines" ]]; then
+  takumi notice bt "No Bluetooth headphones are connected" >/dev/null 2>&1 || true
+  echo "No Bluetooth headphones are connected"; exit 3
+fi
+first=$(head -n 1 <<< "$lines")
+takumi notice bt "${first%% · *}" "${first#* · }" >/dev/null 2>&1 || true
+printf '%s\n' "$lines"

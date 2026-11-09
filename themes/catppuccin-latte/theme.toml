@@ -1,0 +1,35 @@
+# Catppuccin Latte: pastel ink on cool paper
+# Colours after Catppuccin (https://catppuccin.com); phases by Takumi.
+
+[meta]
+name = "catppuccin-latte"
+mode = "light"
+title = "Catppuccin Latte"
+about = "pastel ink on cool paper"
+credit = "Catppuccin (https://catppuccin.com)"
+
+[palette]
+accent     = "#8839ef"
+background = "#eff1f5"
+surface    = "#e6e9ef"
+foreground = "#4c4f69"
+muted      = "#86899b"
+red        = "#d20f39"
+yellow     = "#c07a19"
+green      = "#3f9d2a"
+cyan       = "#179299"
+blue       = "#1e66f5"
+magenta    = "#c965af"
+
+[phase.dawn]
+accent     = "#ea5c0a"
+background = "#f5f1ee"
+
+[phase.dusk]
+accent     = "#e64553"
+
+[phase.night]
+accent     = "#7531ce"
+background = "#e7e9ee"
+surface    = "#dde0e7"
+foreground = "#484a5d"

@@ -1,0 +1,35 @@
+# Light Owl: Night Owl's daytime twin
+# Colours after Night Owl by Sarah Drasner (https://github.com/sdras/night-owl-vscode-theme); phases by Takumi.
+
+[meta]
+name = "light-owl"
+mode = "light"
+title = "Light Owl"
+about = "Night Owl's daytime twin"
+credit = "Night Owl by Sarah Drasner (https://github.com/sdras/night-owl-vscode-theme)"
+
+[palette]
+accent     = "#288ed7"
+background = "#fbfbfb"
+surface    = "#f0f0f0"
+foreground = "#403f53"
+muted      = "#8c92a3"
+red        = "#de3d3b"
+yellow     = "#b38c02"
+green      = "#08916a"
+cyan       = "#2aa298"
+blue       = "#288ed7"
+magenta    = "#d6438a"
+
+[phase.dawn]
+accent     = "#c96765"
+background = "#fcf8f2"
+
+[phase.dusk]
+accent     = "#d05856"
+
+[phase.night]
+accent     = "#227ab9"
+background = "#f2f2f3"
+surface    = "#e5e5e7"
+foreground = "#515062"

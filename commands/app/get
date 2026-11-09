@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Get an app from the Shelf: from Flathub, just for you, or a site as a web app
+usage: <flathub id or web address> [name]
+example: takumi app get org.videolan.VLC VLC
+risk: 1
+glyph: down
+ABOUT
+set -euo pipefail
+id=${1:?flathub id}; name=${2:-$1}
+log="$HOME/.local/state/takumi/app-get.log"; mkdir -p "${log%/*}"
+# A web address becomes a web app (takumi app web). At a terminal it talks there; run by a row that cannot
+# answer, it works when a browser with an app mode is here, and a notice says why when one is not.
+case "$id" in
+  http://* | https://*)
+    [[ -t 0 ]] && exec takumi app web "$id" "$name"
+    if out=$(takumi app web "$id" "$name" </dev/null 2>&1); then
+      takumi notice globe "$name is ready" "find it in the Core" -1 6 >/dev/null 2>&1 || true; exit 0
+    fi
+    takumi notice globe "Could not make $name" "$(tail -n 1 <<< "$out")" -1 10 >/dev/null 2>&1 || true
+    exit 1 ;;
+esac
+# Installs for you only (flatpak --user): no password, sandboxed, and rolling back the system never removes it.
+command -v flatpak >/dev/null || { takumi notice down "Apps are not set up" "flatpak is missing" -1 6; exit 1; }
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo >>"$log" 2>&1
+takumi notice down "Getting $name" "keep working; it arrives in the background" -1 6
+if flatpak install --user --noninteractive -y flathub "$id" >>"$log" 2>&1; then
+  # Sunshine's own one-time step gives the session a virtual mouse and keyboard for whoever streams from it
+  # (its docs: additional-install.sh; it asks for root through polkit, which the Core draws).
+  if [[ "$id" == dev.lizardbyte.app.Sunshine ]]; then
+    flatpak run --command=additional-install.sh dev.lizardbyte.app.Sunshine >>"$log" 2>&1 || true
+  fi
+  takumi notice down "$name is ready" "find it in the Core" -1 8
+else
+  takumi notice down "Could not get $name" "the details are in ~/.local/state/takumi/app-get.log" -1 10
+  exit 1
+fi

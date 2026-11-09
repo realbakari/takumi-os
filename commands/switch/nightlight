@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Warm the screen for the evening, or turn it back
+risk: 0
+title: Night light
+words: night light warm blue light
+glyph: moon
+ABOUT
+set -euo pipefail
+# The key and the old command: off when it is on, on when it is off. The Palette's display rows offer the
+# schedule too (takumi display nightlight).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/display.sh" ]] && { . "$l/display.sh"; break; }; done
+if declare -F display_nightlight_running >/dev/null && display_nightlight_running; then exec takumi display nightlight off; fi
+exec takumi display nightlight on

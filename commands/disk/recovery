@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Make a new recovery code for the encrypted disk; the old one stops opening it
+risk: 1
+sudo: yes
+converse: yes
+title: New recovery code
+words: recovery code key encryption encrypted disk forgot password locked out
+glyph: key
+ABOUT
+#
+# Asks for your password once (it opens the disk and lets this change it), adds a new code, takes the old
+# code's key slots away, and ends on a card: the new code, shown when you press Enter, and as a code a phone
+# camera keeps. Exit codes: 0 done, 1 cancelled or not possible here, 3 the password did not work three
+# times. See docs/encryption.md.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/disk.sh" ]] && { . "$l/core.sh"; . "$l/rooms.sh"; . "$l/disk.sh"; break; }; done
+
+# As root (sudo, below): the rest of stdin is the disk's passphrase. Prints the new code; exit 3 when the
+# disk refuses the passphrase.
+if [[ "${1:-}" == --root ]]; then
+  [[ "$(id -u)" == 0 ]] || exit 1
+  pass=$(cat)
+  dev=$(disk_luks_device)
+  [[ -n "$dev" ]] || { echo "no encrypted disk under /" >&2; exit 1; }
+  printf '%s' "$pass" | cryptsetup open --test-passphrase --key-file=- "$dev" 2>/dev/null || exit 3
+  old=$(disk_recovery_tokens "$dev")
+  code=$(disk_recovery_code)
+  disk_add_code "$dev" "$pass" "$code"
+  while read -r id slots; do
+    [[ -n "$id" ]] || continue
+    for s in $slots; do
+      [[ "$s" == 0 ]] && continue   # never the password's own slot
+      cryptsetup luksKillSlot --batch-mode --key-file=<(printf '%s' "$pass") "$dev" "$s"
+    done
+    cryptsetup token remove --token-id "$id" "$dev"
+  done <<< "$old"
+  printf '%s\n' "$code"
+  exit 0
+fi
+
+rooms_encrypted || core_fail 1 "This computer's disk is not encrypted, so it has no recovery code."
+core_secret pw "Your password" || exit 1
+for try in 1 2 3; do
+  # sudo reads the first line as its password and leaves the second, the disk's, to --root.
+  if code=$( { printf '%s\n' "$pw"; printf '%s' "$pw"; } | sudo -k -S -p '' "$(readlink -f "$0")" --root 2>/dev/null ); then break; fi
+  code=""
+  (( try < 3 )) || { pw=""; core_fail 3 "That password did not work."; }
+  core_wrong "That password did not work"
+  core_secret pw "Your password" || exit 1
+done
+pw=""
+qr=""
+command -v qrencode >/dev/null && qr=$(printf '%s' "$code" | qrencode -t ASCII -m 0 -o - 2>/dev/null | sed 's/##/1/g; s/  /0/g')
+core_card "$(jq -cn --arg code "$code" --arg qr "$qr" '{kicker: "Recovery code", title: "Your new recovery code",
+  detail: "Write it down or take a photo of it, and keep it away from this computer. The old code no longer opens the disk.",
+  secretLabel: "Code", secret: $code, qr: ($qr | split("\n") | map(select(. != "")))}')"

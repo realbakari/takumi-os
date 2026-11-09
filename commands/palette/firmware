@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for firmware as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "firmware", "bios" or "uefi": the row that checks and updates, in the Core (docs/firmware.md). The
+# command row "Update firmware" does the same; this one adds what fwupd last found, without asking it.
+command -v jq >/dev/null || exit 0
+q=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'); match=no
+for w in firmware bios uefi fwupd; do [[ ${#q} -ge 3 && ( "$w" == "$q"* || "$q" == *"$w"* ) ]] && match=yes; done
+[[ $match == yes ]] || exit 0
+command -v fwupdmgr >/dev/null || { jq -cn '{id:"fw:none", title:"Firmware updates need fwupd", subtitle:"It comes with Takumi'"'"'s desktop packages", glyph:"chip", kind:"Firmware", run:["true"], score:0.9}'; exit 0; }
+# What is installed, by name, so the person sees what fwupd knows about (no network, no root).
+fwupdmgr get-devices --json 2>/dev/null | jq -c '
+  [.Devices[]? | select((.Flags // []) | index("updatable"))] | .[0:6][]
+  | {id: ("fw:dev:" + (.DeviceId // .Name)), title: .Name, subtitle: ("Firmware " + (.Version // "unknown") + " · updatable"),
+     glyph: "chip", kind: "Firmware", steady: true, run: ["takumi", "firmware"], converse: true, score: 0.8}' 2>/dev/null || true
+exit 0

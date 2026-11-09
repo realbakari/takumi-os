@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Get Steam, with the graphics drivers this computer needs for games, game mode and the performance overlay
+risk: 1
+converse: yes
+title: Get Steam
+words: steam games gaming play proton valve gamemode mangohud
+glyph: play
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; break; }; done
+declare -F core_confirm >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh, docs/gaming.md). Steam comes from Arch's multilib repository, the 32-bit
+# libraries most games still use, with the 32-bit graphics drivers for each graphics chip lspci finds;
+# gamemode lets a game ask for the computer's full speed, and MangoHud draws frame rate and temperatures
+# over it. Exit status: 0 · 3 an answer was needed and none came, or no · 5 Steam does not run on this
+# computer · 1 anything else. The last line says it in words.
+arch=$(uname -m)
+[[ $arch == x86_64 ]] ||
+  core_fail 5 "Steam runs only on Intel and AMD computers (x86_64), and this one is $arch. RetroArch and Moonlight run here: type their names in the Core."
+command -v pacman >/dev/null || core_fail 1 "Steam needs pacman, Arch's package manager"
+log="$HOME/.local/state/takumi/install.log"; mkdir -p "${log%/*}"
+admin() { core_sudo "Getting Steam needs your password" "$@"; }
+run() { if core_in_core; then "$@" >> "$log" 2>&1; else "$@"; fi; }
+
+# The graphics chips' makers: 1002 AMD, 8086 Intel, 10de NVIDIA. lspci when it is here, else the kernel's list.
+gpus() {
+  local d
+  if command -v lspci >/dev/null; then lspci -n 2>/dev/null | awk '$2 ~ /^03/ { split($3, v, ":"); print v[1] }'; return 0; fi
+  for d in /sys/bus/pci/devices/*; do
+    if [[ "$(cat "$d/class" 2>/dev/null)" == 0x03* ]]; then sed 's/^0x//' "$d/vendor"; fi
+  done
+  return 0
+}
+want=(steam gamemode lib32-gamemode mangohud lib32-mangohud) makers=()
+for v in $(gpus | sort -u); do
+  case "$v" in
+    1002) want+=(vulkan-radeon lib32-vulkan-radeon lib32-mesa); makers+=(AMD) ;;
+    8086) want+=(vulkan-intel lib32-vulkan-intel lib32-mesa); makers+=(Intel) ;;
+    10de) # NVIDIA's own driver brings its 32-bit half; the open driver is Mesa's
+          if pacman -Q nvidia-utils >/dev/null 2>&1; then want+=(lib32-nvidia-utils); else want+=(vulkan-nouveau lib32-vulkan-nouveau lib32-mesa); fi
+          makers+=(NVIDIA) ;;
+  esac
+done
+if (( ${#makers[@]} == 0 )); then
+  # No graphics chip Steam knows (a virtual machine): games draw on the processor.
+  want+=(vulkan-swrast lib32-vulkan-swrast lib32-mesa); drivers="drivers that draw on the processor"
+else
+  drivers="the $(printf '%s\n' "${makers[@]}" | awk '!seen[$0]++' | paste -sd '/' - | sed 's#/# and #g') graphics drivers"
+fi
+pkgs=(); while IFS= read -r p; do pkgs+=("$p"); done < <(printf '%s\n' "${want[@]}" | awk '!seen[$0]++')
+
+if pacman -Q steam >/dev/null 2>&1 && pacman -Q "${pkgs[@]}" >/dev/null 2>&1; then
+  core_done "Steam is already here: find it in the Core"; exit 0
+fi
+core_confirm "Get Steam, with $drivers for 32-bit games, game mode and the performance overlay? It needs your password and brings the system's packages up to date first." ||
+  core_fail 3 "Nothing changed"
+
+repos=$(pacman-conf --repo-list 2>/dev/null || true)
+if ! grep -qx multilib <<< "$repos"; then
+  core_note "Turning on Arch's 32-bit packages…"
+  if grep -q '^#\[multilib\]' /etc/pacman.conf 2>/dev/null; then
+    # /etc/pacman.conf: uncomments the [multilib] section Arch ships commented out
+    run admin sed -i '/^#\[multilib\]$/,/^#Include/ s/^#//' /etc/pacman.conf || core_fail 1 "The 32-bit packages could not be turned on. What happened is in $log"
+  else
+    # /etc/pacman.conf: adds the [multilib] section
+    printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' | run admin tee -a /etc/pacman.conf >/dev/null ||
+      core_fail 1 "The 32-bit packages could not be turned on. What happened is in $log"
+  fi
+fi
+core_note "Getting Steam and the drivers…"
+# pacman: multilib's list is new, and Arch never installs onto an older list, so every package is brought up
+# to date (-Syu) as Steam and the drivers go in under /usr
+run admin pacman -Syu --needed --noconfirm "${pkgs[@]}" || core_fail 1 "Steam did not install. What happened is in $log"
+
+said="Steam is ready: find it in the Core."
+groups=" $(id -nG 2>/dev/null) "
+if getent group gamemode >/dev/null 2>&1 && [[ "$groups" != *" gamemode "* ]]; then
+  # usermod: adds you to the gamemode group in /etc/group, which lets game mode raise a game's priority
+  if run admin usermod -aG gamemode "$(id -un)"; then said="Steam is ready: find it in the Core. Game mode works fully after you next log in."; fi
+fi
+core_done "$said"

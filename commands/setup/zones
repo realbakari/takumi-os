@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Every time zone by city and country, or the time in one
+usage: [--at <zone> | --guess]
+risk: 0
+hidden: yes
+ABOUT
+# Without arguments: {"zone":"Europe/Paris","city":"Paris","country":"France"} per line, by city.
+# --at <zone>: {"zone","time":"21:42","day":"Sunday","phase":"night"}, and the setup screen's sky turns to
+# that phase there (the theme file takumi setup start points the screen at).
+# --guess: {"zone","city"} where this network is, asked once of ipinfo.io, which sees the computer's internet
+# address (the same lookup as takumi clock auto). Only when the person presses "Find it online"; exit 1 when
+# there is no answer or no time zone this computer knows.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib/setup.sh "$here/../../lib/setup.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+if [[ "${1:-}" == --guess ]]; then
+  json=$(curl -fsS --max-time 8 --proto '=https' "${TAKUMI_ZONE_LOOKUP:-https://ipinfo.io/json}" 2>/dev/null) || exit 1
+  zone=$(jq -r '.timezone // empty' <<< "$json" 2>/dev/null || true)
+  city=$(jq -r '.city // empty' <<< "$json" 2>/dev/null || true)
+  [[ "$zone" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ && -f "$TAKUMI_ZONEINFO/$zone" ]] || exit 1
+  jq -cn --arg zone "$zone" --arg city "$city" '{zone: $zone, city: $city}'
+  exit 0
+fi
+if [[ "${1:-}" == --at ]]; then
+  zone=${2:?usage: takumi setup zones --at <zone>}
+  [[ "$zone" != *..* && -f "$TAKUMI_ZONEINFO/$zone" ]] || { echo "no time zone $zone" >&2; exit 2; }
+  read -r hm day <<< "$(TZ=$zone date '+%H:%M %A')"
+  m=$(( 10#${hm%%:*} * 60 + 10#${hm##*:} ))
+  # The sky's own clock (shell/Sky/SkyCanvas.qml): dawn 05:30, day 08:00, dusk 17:30, night 20:30.
+  if (( m >= 1230 || m < 330 )); then phase=night; elif (( m >= 1050 )); then phase=dusk; elif (( m >= 480 )); then phase=day; else phase=dawn; fi
+  run=$(setup_run)
+  # Only a new phase is a new sky: the same palette again would fade the sky into itself every half minute.
+  new=$(setup_skies)/$phase/palette.toml
+  if [[ -f "$new" && "$(cat "$new")" != "$(cat "$run/palette.toml" 2>/dev/null)" ]]; then
+    mkdir -p "$run"; cp "$new" "$run/palette.toml.new"; mv "$run/palette.toml.new" "$run/palette.toml"
+  fi
+  jq -cn --arg zone "$zone" --arg time "$hm" --arg day "$day" --arg phase "$phase" '{zone: $zone, time: $time, day: $day, phase: $phase}'
+  exit 0
+fi
+[[ -r "$TAKUMI_ZONEINFO/zone.tab" ]] || { echo "no time zone table under $TAKUMI_ZONEINFO" >&2; exit 1; }
+awk -F'\t' '
+  FNR == NR { if ($1 !~ /^#/) name[$1] = $2; next }
+  $1 ~ /^#/ { next }
+  { n = split($3, p, "/"); city = p[n]; gsub(/_/, " ", city); printf "%s\t%s\t%s\n", $3, city, ($1 in name ? name[$1] : $1) }
+' "$TAKUMI_ZONEINFO/iso3166.tab" "$TAKUMI_ZONEINFO/zone.tab" | sort -t "$(printf '\t')" -k2,2 -f \
+  | jq -cR 'split("\t") | {zone: .[0], city: .[1], country: .[2]}'
+jq -cn '{zone: "UTC", city: "UTC", country: "Coordinated Universal Time"}'

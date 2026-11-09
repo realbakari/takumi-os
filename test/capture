@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# Contract checks for capture (lib/capture.sh, commands/screen/record, shot and markup) against fake tools: the
+# recorder, slurp, the sound server (pactl), udev's camera list, the shell (qs), niri, ffmpeg and satty. What a
+# recording takes in and how two sounds are mixed, the camera's bubble, the questions the Core asks and the choice
+# it keeps, stopping and evening out the sound in place, and marking up a screenshot.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; capture checks skipped)"; exit 0; }
+command -v perl >/dev/null || { echo "   (perl not installed; capture checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-capture.XXXXXX")
+trap 'pkill -f "$t/bin/wf-recorder" 2>/dev/null || true; rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run TAKUMI_DEV=$t/dev
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR" "$TAKUMI_DEV"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice"   # fake takumi commands go in front of the real ones
+unset TAKUMI_CORE
+
+# The recorder: writes its file and runs until SIGINT, as wf-recorder does. Perl, because a background shell
+# script cannot catch the SIGINT its shell ignored for it.
+cat > "$t/bin/wf-recorder" <<'FAKE'
+#!/usr/bin/env perl
+use strict; use warnings;
+my $fake = $ENV{FAKE};
+sub say_ { open(my $c, '>>', "$fake/calls") or die; print $c "@_\n"; close $c; }
+say_("wf-recorder @ARGV");
+my ($out, $audio) = ('', 0);
+for my $i (0 .. $#ARGV) { $out = $ARGV[$i + 1] if $ARGV[$i] eq '-f'; $audio = 1 if $ARGV[$i] =~ /^--audio=/; }
+exit 1 if -e "$fake/wf-fail" or ($audio and -e "$fake/wf-no-audio");
+open(my $o, '>', $out) or die; print $o "picture"; close $o;
+$SIG{INT} = sub { say_("wf-recorder stopped"); exit 0 };
+sleep 1 while 1;
+FAKE
+cat > "$t/bin/slurp" <<'FAKE'
+#!/bin/sh
+printf 'slurp %s\n' "$*" >> "$FAKE/calls"
+[ -s "$FAKE/slurp" ] || exit 1
+cat "$FAKE/slurp"
+FAKE
+cat > "$t/bin/pactl" <<'FAKE'
+#!/bin/sh
+printf 'pactl %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  get-default-sink) cat "$FAKE/sink" 2>/dev/null ;;
+  get-default-source) cat "$FAKE/source" 2>/dev/null ;;
+  load-module)
+    [ -e "$FAKE/no-mix" ] && case "$2" in module-loopback) echo "Failure: Module initialization failed" >&2; exit 1 ;; esac
+    n=$(cat "$FAKE/module" 2>/dev/null || echo 100); n=$((n + 1)); echo "$n" > "$FAKE/module"; echo "$n" ;;
+  list) cat "$FAKE/modules" 2>/dev/null ;;
+esac
+FAKE
+cat > "$t/bin/qs" <<'FAKE'
+#!/bin/sh
+printf 'qs %s\n' "$*" >> "$FAKE/calls"
+[ -e "$FAKE/qs-false" ] && echo false
+[ ! -e "$FAKE/qs-fail" ]
+FAKE
+cat > "$t/bin/udevadm" <<'FAKE'
+#!/bin/sh
+for a; do case "$a" in --name=*) d=${a#--name=} ;; esac; done
+cat "$FAKE/$(basename "$d").props" 2>/dev/null
+FAKE
+cat > "$t/bin/ffmpeg" <<'FAKE'
+#!/bin/sh
+printf 'ffmpeg %s\n' "$*" >> "$FAKE/calls"
+case "$*" in
+  *print_format=json*)
+    i=-27.10; [ -e "$FAKE/silent" ] && i=-inf
+    printf '[Parsed_loudnorm_0 @ 0x1] \n{\n\t"input_i" : "%s",\n\t"input_tp" : "-4.20",\n\t"input_lra" : "6.30",\n\t"input_thresh" : "-37.50",\n' "$i" >&2
+    printf '\t"output_i" : "-16.00",\n\t"normalization_type" : "linear",\n\t"target_offset" : "0.10"\n}\n' >&2 ;;
+  *) [ -e "$FAKE/ffmpeg-fail" ] && exit 1
+     for last; do :; done; printf 'even' > "$last" ;;
+esac
+FAKE
+cat > "$t/bin/niri" <<'FAKE'
+#!/bin/sh
+printf 'niri %s\n' "$*" >> "$FAKE/calls"
+case "$*" in
+  "msg -j focused-output") cat "$FAKE/output" ;;
+  *" --path "*) [ -e "$FAKE/old-niri" ] && { echo "error: unexpected argument '--path' found" >&2; exit 2; }
+                for last; do :; done; printf 'png' > "$last" ;;
+  "msg action screenshot"*) [ -e "$FAKE/old-niri" ] && printf 'png' > "$HOME/Pictures/Screenshots/2031-01-01 00-00-00.png" ;;
+esac
+exit 0
+FAKE
+cat > "$t/bin/satty" <<'FAKE'
+#!/bin/sh
+{ printf 'satty'; for a; do printf ' [%s]' "$a"; done; echo; } >> "$FAKE/calls"
+out=""; prev=""
+for a; do [ "$prev" = --output-filename ] && out=$a; prev=$a; done
+if [ -e "$FAKE/satty-keeps" ]; then
+  n=$(cat "$FAKE/kept" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE/kept"
+  printf 'marked %s' "$n" > "$(printf '%s' "$out" | sed 's/%%/%/g')"
+fi
+exit 0
+FAKE
+printf '#!/bin/sh\necho "$HOME/Videos"\n' > "$t/bin/xdg-user-dir"
+printf '#!/bin/sh\ncat > /dev/null\n' > "$t/bin/wl-copy"
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+chmod +x "$t/bin/"* "$t/commands/notice/main"
+
+reset() {
+  pkill -f "$t/bin/wf-recorder" 2>/dev/null || true
+  rm -rf "${FAKE:?}"/* "${XDG_RUNTIME_DIR:?}"/* "${TAKUMI_DEV:?}"/* "$HOME/.config" "$HOME/Videos" "$HOME/Pictures"
+  echo alsa_output.pci.analog-stereo > "$FAKE/sink"; echo alsa_input.pci.analog-stereo > "$FAKE/source"
+  echo '120,80 1280x720' > "$FAKE/slurp"
+  echo '{"name":"eDP-1","logical":{"x":0,"y":0,"width":1920,"height":1200,"scale":1.5,"transform":"Normal"}}' > "$FAKE/output"
+  : > "$FAKE/calls"; : > "$FAKE/notices"
+}
+camera() { : > "$TAKUMI_DEV/video0"; echo 'ID_V4L_CAPABILITIES=:capture:' > "$FAKE/video0.props"; }
+check() { if eval "$2"; then :; else echo "capture: $1"; status=1; fi; }
+lib() { bash -c '. lib/capture.sh; "$@"' _ "$@"; }
+run() { local out rc=0; out=$(commands/screen/"$@" 2>&1) || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+recorder() { grep '^wf-recorder ' "$FAKE/calls" | grep -v stopped | tail -n 1; }
+marked() { [[ -s "$XDG_RUNTIME_DIR/takumi-recording" ]]; }
+waitfor() { local n=60; until eval "$1"; do n=$((n - 1)); (( n > 0 )) || return 1; sleep 0.1; done; }
+
+reset
+check "slurp's geometry as four numbers" '[[ "$(lib capture_numbers "120,80 1280x720")" == "120 80 1280 720" && "$(lib capture_numbers "-1920,-40 800x600")" == "-1920 -40 800 600" ]] && ! lib capture_numbers "a screen" >/dev/null'
+check "the marked-up copy goes beside the picture" '[[ "$(lib capture_marked_name "/p/2026-11-09 10-00-00.png")" == "/p/2026-11-09 10-00-00 marked.png" ]]'
+check "the four choices in words" '[[ "$(lib capture_words none no)|$(lib capture_words computer no)|$(lib capture_words both no)|$(lib capture_words both yes)" == "No sound|Computer sound|Computer sound and microphone|Sound, microphone and camera" ]]'
+check "before any choice: no sound, no camera" '[[ "$(lib capture_saved sound) $(lib capture_saved camera)" == "none no" ]]'
+lib capture_save both yes
+check "a choice is kept in capture.toml" 'grep -qx "sound = \"both\"   # none | computer | mic | both" "$HOME/.config/takumi/capture.toml" && grep -qx "camera = true" "$HOME/.config/takumi/capture.toml" && [[ "$(lib capture_saved sound) $(lib capture_saved camera)" == "both yes" ]]'
+check "the microphone in use" '[[ "$(lib capture_mic)" == alsa_input.pci.analog-stereo ]]'
+echo alsa_output.pci.analog-stereo.monitor > "$FAKE/source"
+check "an output's monitor standing in is no microphone" '[[ -z "$(lib capture_mic)" ]]'
+check "no camera device, no camera" '! lib capture_camera'
+: > "$TAKUMI_DEV/video1"; echo 'ID_V4L_CAPABILITIES=:' > "$FAKE/video1.props"
+check "a device that does not capture is no camera" '! lib capture_camera'
+camera
+check "a device that captures is a camera" 'lib capture_camera'
+
+reset
+res=$(run record --sound computer)
+check "computer sound: the output's monitor ($res)" '[[ "$res" == "0|Recording to $HOME/Videos/Recordings/"*.mp4 ]] && [[ "$(recorder)" == "wf-recorder -f $HOME/Videos/Recordings/"*".mp4 -g 120,80 1280x720 --audio=alsa_output.pci.analog-stereo.monitor" ]]'
+check "slurp: drag an area or click a screen, no boxes from stdin" 'grep -qx "slurp -o -d" "$FAKE/calls"'
+read -r pid since file < "$XDG_RUNTIME_DIR/takumi-recording"
+check "the marker the Core reads: pid, start, file" '[[ "$pid" =~ ^[0-9]+$ && "$since" =~ ^[0-9]+$ && "$file" == "$HOME/Videos/Recordings/"*.mp4 ]] && kill -0 "$pid"'
+check "what it takes in, kept beside the marker" '[[ "$(tr "\n" "|" < "$XDG_RUNTIME_DIR/takumi-recording.parts")" == "sound computer|camera no|" ]]'
+check "the Core says what it records" 'grep -qx "video|Recording|Computer sound · press the red mark in the Core to stop|-1|" "$FAKE/notices"'
+: > "$FAKE/notices"
+res=$(run record stop)
+check "stop: the recorder finishes its file ($res)" '[[ "$res" == "0|Saved $file (0:"* ]] && grep -qx "wf-recorder stopped" "$FAKE/calls" && [[ ! -e "$XDG_RUNTIME_DIR/takumi-recording" && ! -e "$XDG_RUNTIME_DIR/takumi-recording.parts" ]]'
+check "stop: the loudness measured, then applied as one gain" 'grep -q "^ffmpeg .*-map 0:a:0 -af loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json -f null -" "$FAKE/calls" && grep -q "^ffmpeg .*-map 0 -c copy -c:a aac .*measured_I=-27.10:measured_TP=-4.20:measured_LRA=6.30:measured_thresh=-37.50:offset=0.10:linear=true" "$FAKE/calls"'
+check "stop: evened out in place, nothing left beside it" '[[ "$(cat "$file")" == even && -z "$(ls -A "$HOME/Videos/Recordings" | grep "^\.")" ]]'
+check "stop: the Core offers the file" 'grep -q "^--open|$file|video|Recording saved|0:0[0-9] · in Videos, Recordings · press to open|-1|6|" "$FAKE/notices"'
+check "the red mark says Saving while the sound is evened out" 'grep -q "^video|Saving the recording|evening out the sound|-1|30|" "$FAKE/notices"'
+
+reset
+run record --sound mic >/dev/null
+check "the microphone alone" '[[ "$(recorder)" == *" --audio=alsa_input.pci.analog-stereo" ]] && ! grep -q "load-module" "$FAKE/calls"'
+run record stop >/dev/null
+
+reset
+printf '7\tmodule-loopback\tsource=x sink=takumi-recording\n9\tmodule-null-sink\tsink_name=takumi-recording\n3\tmodule-other\tx\n' > "$FAKE/modules"
+run record --sound both >/dev/null
+check "both: what a recording left behind goes first" '[[ "$(grep "unload-module" "$FAKE/calls" | head -n 2 | tr "\n" "|")" == "pactl unload-module 9|pactl unload-module 7|" ]]'
+check "both: a private output, and the computer's sound and the microphone looped into it" 'grep -q "^pactl load-module module-null-sink sink_name=takumi-recording sink_properties=device.description=Recording rate=48000 channels=2$" "$FAKE/calls" && grep -q "^pactl load-module module-loopback source=alsa_output.pci.analog-stereo.monitor sink=takumi-recording latency_msec=30 source_dont_move=true sink_dont_move=true$" "$FAKE/calls" && grep -q "^pactl load-module module-loopback source=alsa_input.pci.analog-stereo sink=takumi-recording latency_msec=30" "$FAKE/calls"'
+check "both: the recorder takes the mix, one source in step with the picture" '[[ "$(recorder)" == *" --audio=takumi-recording.monitor" ]]'
+check "both: the modules kept, last loaded first" '[[ "$(grep "^module" "$XDG_RUNTIME_DIR/takumi-recording.parts" | tr "\n" "|")" == "module 103|module 102|module 101|" ]]'
+check "both: the Core says so" 'grep -q "^video|Recording|Computer sound and microphone · press the red mark in the Core to stop|" "$FAKE/notices"'
+: > "$FAKE/calls"
+run record stop >/dev/null
+check "stop: the mix taken apart in that order" '[[ "$(grep "unload-module" "$FAKE/calls" | tr "\n" "|")" == "pactl unload-module 103|pactl unload-module 102|pactl unload-module 101|" ]]'
+
+reset; echo alsa_output.pci.analog-stereo.monitor > "$FAKE/source"
+run record --sound both >/dev/null
+check "both, but no microphone: the computer's sound, said so" '[[ "$(recorder)" == *" --audio=alsa_output.pci.analog-stereo.monitor" ]] && ! grep -q load-module "$FAKE/calls" && grep -q "^video|Recording|No microphone found, so the computer.s sound only · press the red mark in the Core to stop|-1|5|" "$FAKE/notices"'
+run record stop >/dev/null
+reset; : > "$FAKE/no-mix"
+run record --sound both >/dev/null
+check "both, but the mix will not load: the computer's sound, the private output taken out" '[[ "$(recorder)" == *" --audio=alsa_output.pci.analog-stereo.monitor" ]] && grep -qx "pactl unload-module 101" "$FAKE/calls" && grep -q "Your microphone could not be added" "$FAKE/notices"'
+run record stop >/dev/null
+reset; : > "$FAKE/wf-no-audio"
+res=$(run record --sound both)
+check "a sound the recorder cannot open: once more for the picture alone ($res)" '[[ "$res" == "0|Recording to "* && "$(recorder)" != *--audio* ]] && grep -qx "pactl unload-module 103" "$FAKE/calls" && grep -q "The sound could not be recorded, so the picture only" "$FAKE/notices" && grep -qx "sound none" "$XDG_RUNTIME_DIR/takumi-recording.parts"'
+: > "$FAKE/calls"; run record stop >/dev/null
+check "a recording without sound is not evened out" '! grep -q "^ffmpeg" "$FAKE/calls"'
+
+reset; camera
+res=$(run record --camera)
+check "the camera's bubble in a corner of the area, before the first frame ($res)" '[[ "$res" == "0|"* ]] && grep -qx "qs -c takumi ipc --any-display call camera show 120 80 1280 720" "$FAKE/calls" && [[ "$(grep -n "camera show" "$FAKE/calls" | cut -d: -f1)" -lt "$(grep -n "^wf-recorder" "$FAKE/calls" | cut -d: -f1)" ]] && grep -qx "camera yes" "$XDG_RUNTIME_DIR/takumi-recording.parts"'
+check "--camera alone records no sound" '[[ "$(recorder)" != *--audio* ]] && grep -q "^video|Recording|Your camera, no sound · press" "$FAKE/notices"'
+run record stop >/dev/null
+check "stop: the bubble goes" 'grep -qx "qs -c takumi ipc --any-display call camera hide" "$FAKE/calls"'
+reset
+run record --camera --sound computer >/dev/null
+check "no camera here: none asked of the shell, and said" '! grep -q "camera show" "$FAKE/calls" && grep -q "^video|Recording|No camera found · press the red mark" "$FAKE/notices" && grep -qx "camera no" "$XDG_RUNTIME_DIR/takumi-recording.parts"'
+run record stop >/dev/null
+reset; camera; echo '-1920,0 800x600' > "$FAKE/slurp"
+run record --camera >/dev/null
+check "a screen left of the first: its numbers as they are" 'grep -qx "qs -c takumi ipc --any-display call camera show -1920 0 800 600" "$FAKE/calls"'
+run record stop >/dev/null
+reset; camera; : > "$FAKE/qs-fail"
+run record --camera >/dev/null
+check "a shell that cannot show the camera: the recording goes on without it" 'grep -q "The camera could not start" "$FAKE/notices" && grep -qx "camera no" "$XDG_RUNTIME_DIR/takumi-recording.parts" && marked'
+run record stop >/dev/null
+reset; camera; : > "$FAKE/qs-false"
+run record --camera >/dev/null
+check "a shell without Qt Multimedia answers false: no bubble, no wait for one" 'grep -q "The camera could not start" "$FAKE/notices" && grep -qx "camera no" "$XDG_RUNTIME_DIR/takumi-recording.parts"'
+run record stop >/dev/null
+
+reset; camera
+run record screen --camera >/dev/null
+check "the whole screen in front: the output by name, the bubble in its corner" '[[ "$(recorder)" == "wf-recorder -f "*" -o eDP-1" ]] && ! grep -q "^slurp" "$FAKE/calls" && grep -qx "qs -c takumi ipc --any-display call camera show 0 0 1920 1200" "$FAKE/calls"'
+res=$(run record screen)
+check "already recording: another start is refused ($res)" '[[ "$res" == "1|Already recording: takumi screen record stop" ]]'
+run record >/dev/null
+check "the same command again stops it" '! marked && grep -qx "wf-recorder stopped" "$FAKE/calls"'
+check "nothing to stop" '[[ "$(run record stop)" == "0|Nothing is recording" ]]'
+
+reset; : > "$FAKE/slurp"
+res=$(run record --sound computer)
+check "nothing drawn: no recording, no sound set up ($res)" '[[ "$res" == "0|Nothing was chosen" ]] && ! grep -q "^wf-recorder" "$FAKE/calls" && ! grep -q get-default "$FAKE/calls" && grep -q "^video|No recording|nothing was chosen|" "$FAKE/notices"'
+reset; camera; : > "$FAKE/wf-fail"
+res=$(run record --camera)
+check "a recorder that will not start: 1, said, the bubble gone ($res)" '[[ "$res" == "1|The recording did not start; wf-recorder said why in "* ]] && ! marked && grep -qx "qs -c takumi ipc --any-display call camera hide" "$FAKE/calls" && grep -q "^warn|The recording did not start|" "$FAKE/notices"'
+check "usage: 2" '[[ "$(run record --sound loud)" == 2\|usage:* && "$(run record area screen)" == 2\|usage:* && "$(run record --zoom)" == 2\|usage:* ]]'
+
+reset; : > "$FAKE/silent"
+run record --sound computer >/dev/null; read -r _ _ file < "$XDG_RUNTIME_DIR/takumi-recording"; run record stop >/dev/null
+check "silence is measured, not evened out" '[[ "$(grep -c "^ffmpeg" "$FAKE/calls")" -eq 1 && "$(cat "$file")" == picture ]]'
+reset; : > "$FAKE/ffmpeg-fail"
+run record --sound computer >/dev/null; read -r _ _ file < "$XDG_RUNTIME_DIR/takumi-recording"; res=$(run record stop)
+check "evening out failed: the recording is kept as it was ($res)" '[[ "$res" == "0|Saved $file"* && "$(cat "$file")" == picture && -z "$(ls -A "$HOME/Videos/Recordings" | grep "^\.")" ]]'
+
+# From its row the Core asks, one step at a time, keeps the answer, and the recording starts once it has closed.
+reset
+said=$(printf 'yes\nyes\nno\n' | TAKUMI_CORE=1 commands/screen/record; echo "rc=$?")
+want=$(printf '%s\n' "confirm Record the computer's sound?" "confirm And your microphone?" "confirm And your camera?" "done Drag over what to record, or click a screen" "rc=0")
+check "in the Core: three questions the first time, then it says what to do" '[[ "$said" == "$want" ]]'
+check "in the Core: the answer kept" '[[ "$(lib capture_saved sound) $(lib capture_saved camera)" == "both no" ]]'
+check "in the Core: the recording starts after the Core has closed, with the answer" 'waitfor marked && [[ "$(recorder)" == *" --audio=takumi-recording.monitor" ]]'
+said=$(printf '' | TAKUMI_CORE=1 commands/screen/record; echo "rc=$?")
+check "in the Core while recording: it stops, and says so while it works ($said)" '[[ "$said" == "$(printf "%s\n" "note Evening out the sound…" "rc=0")" ]] && ! marked && grep -q "^--open|.*|video|Recording saved|" "$FAKE/notices"'
+: > "$FAKE/calls"
+said=$(printf 'yes\n' | TAKUMI_CORE=1 commands/screen/record; echo "rc=$?")
+check "in the Core again: the last choice first, one Enter" '[[ "$said" == "$(printf "%s\n" "confirm Computer sound and microphone, like last time?" "done Drag over what to record, or click a screen" "rc=0")" ]] && waitfor marked'
+printf '' | TAKUMI_CORE=1 commands/screen/record >/dev/null
+said=$(printf 'no\nno\n' | TAKUMI_CORE=1 commands/screen/record; echo "rc=$?")
+check "in the Core: no to the last choice, no to sound: a silent recording" '[[ "$said" == *"confirm Record the computer'"'"'s sound?"*"done "*"rc=0" && "$(lib capture_saved sound)" == none ]] && waitfor marked && [[ "$(recorder)" != *--audio* ]]'
+run record stop >/dev/null
+
+reset; lib capture_save both yes; camera
+run record >/dev/null
+check "the key: what was chosen last, asked nothing" '[[ "$(recorder)" == *" --audio=takumi-recording.monitor" ]] && grep -q "camera show" "$FAKE/calls"'
+run record stop >/dev/null
+reset; lib capture_save both yes; camera
+run record --sound computer >/dev/null
+check "flags say exactly what to take in: no camera unless asked" '[[ "$(recorder)" == *" --audio=alsa_output.pci.analog-stereo.monitor" ]] && ! grep -q "camera show" "$FAKE/calls" && [[ "$(lib capture_saved sound)" == both ]]'
+run record stop >/dev/null
+
+# Marking up: the newest screenshot opens in satty; what is kept goes beside it and on the clipboard.
+reset
+res=$(run markup)
+check "no screenshot yet: 3, and said ($res)" '[[ "$res" == "3|No screenshot to mark up yet" ]] && grep -q "^shot|No screenshot to mark up yet|" "$FAKE/notices"'
+shots="$HOME/Pictures/Screenshots"; mkdir -p "$shots"
+printf 'a' > "$shots/2026-11-08 09-00-00.png"; sleep 1
+printf 'b' > "$shots/2026-11-09 10-00-00.png"; sleep 1
+printf 'c' > "$shots/2026-11-08 09-00-00 marked.png"
+: > "$FAKE/notices"
+res=$(run markup)
+check "the newest screenshot, never a marked-up copy ($res)" 'grep -q "^satty \[--filename\] \[$shots/2026-11-09 10-00-00.png\] \[--output-filename\] \[$shots/2026-11-09 10-00-00 marked.png\]" "$FAKE/calls"'
+check "satty: copied with wl-copy, saved too, Enter and Esc keep the work" 'grep -q "\[--copy-command\] \[wl-copy\] \[--save-after-copy\] \[--early-exit\] \[all\] \[--actions-on-enter\] \[save-to-clipboard,save-to-file,exit\] \[--actions-on-escape\] \[save-to-clipboard,save-to-file,exit\] \[--initial-tool\] \[arrow\] \[--disable-notifications\]" "$FAKE/calls"'
+check "closed without keeping: nothing said ($res)" '[[ "$res" == "0|Nothing was kept" && ! -s "$FAKE/notices" ]]'
+: > "$FAKE/satty-keeps"
+res=$(run markup "$shots/2026-11-08 09-00-00.png")
+check "kept: the copy beside it, offered by the Core ($res)" '[[ "$res" == "0|$shots/2026-11-08 09-00-00 marked.png" && "$(cat "$shots/2026-11-08 09-00-00 marked.png")" == "marked 1" ]] && grep -q "^--open|$shots/2026-11-08 09-00-00 marked.png|edit|Marked up and copied|saved beside the screenshot · press to open|-1|5|" "$FAKE/notices"'
+printf 'd' > "$shots/50% off.png"
+run markup "$shots/50% off.png" >/dev/null
+check "a % in the name reaches satty as %%, and the copy lands right" 'grep -q "\[--output-filename\] \[$shots/50%% off marked.png\]" "$FAKE/calls" && [[ -s "$shots/50% off marked.png" ]]'
+check "markup: no such picture 3, usage 2" '[[ "$(run markup "$shots/none.png")" == "3|No picture at $shots/none.png" && "$(run markup a b)" == 2\|usage:* ]]'
+
+reset; : > "$FAKE/satty-keeps"
+res=$(run shot area --markup)
+pic=$(sed -n 's/^niri msg action screenshot --path //p' "$FAKE/calls")
+check "shot --markup: saved where niri saves them, then opened to mark up ($res)" '[[ "$pic" == "$HOME/Pictures/Screenshots/"*.png && "$res" == "0|${pic%.png} marked.png" ]] && grep -q "^satty \[--filename\] \[$pic\]" "$FAKE/calls"'
+reset; : > "$FAKE/old-niri"; mkdir -p "$HOME/Pictures/Screenshots"
+run shot window --markup >/dev/null
+check "a niri without --path: it names the picture, and the newest one opens" '[[ "$(grep -c "^niri msg action screenshot-window" "$FAKE/calls")" -eq 2 ]] && grep -q "^satty \[--filename\] \[$HOME/Pictures/Screenshots/2031-01-01 00-00-00.png\]" "$FAKE/calls"'
+reset
+check "shot without --markup is niri's own" '[[ "$(run shot screen)" == "0|" ]] && grep -qx "niri msg action screenshot-screen" "$FAKE/calls" && [[ "$(run shot --big)" == 2\|usage:* ]]'
+
+echo "   $(grep -c '^check ' "$0") capture checks against fake recorders, sound, camera, niri and satty"
+exit $status

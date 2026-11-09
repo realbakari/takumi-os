@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Stop showing the weather in Today; Open-Meteo is not asked again
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/weather.sh"; break; }; done
+declare -F weather_save >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+weather_save false "$(weather_setting place)" "$(weather_setting units)"
+rm -f "$weather_cache"
+takumi notice sun "The weather is off" "Open-Meteo is not asked again" >/dev/null 2>&1 || true
+echo "The weather is off; Open-Meteo is not asked again"

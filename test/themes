@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+keys="accent background surface foreground muted red yellow green cyan blue magenta"
+status=0
+for t in themes/*/theme.toml; do
+  for k in $keys; do
+    grep -Eq "^$k += +\"#[0-9a-fA-F]{6}\"" "$t" || { echo "$t: missing or malformed $k"; status=1; }
+  done
+  grep -Eq '^mode = "(dark|light)"' "$t" || { echo "$t: mode must be dark or light"; status=1; }
+  # Phase sections may only override palette keys.
+  awk '/^\[phase\./{p=1;next} /^\[/{p=0} p && /^[a-z_]+ *=/{print $1}' "$t" | while read -r k; do
+    [[ " $keys " == *" $k "* ]] || { echo "$t: phase overrides unknown key $k"; exit 1; }
+  done || status=1
+  for f in "$(dirname "$t")"/* "$(dirname "$t")"/skies/*; do
+    [[ -f "$f" && -x "$f" ]] && { echo "$t: executable file in theme: $f"; status=1; }
+  done
+done
+# Readable: in every phase of every theme, body text is 4.5:1 or better against the background; a theme
+# after a community palette ([meta] credit) holds its day palette to what docs/phase-themes.md says: body
+# text at 7:1, the accent and quiet text at 3:1, against the background.
+. lib/theme.sh
+for t in themes/*/theme.toml; do
+  credited=$(theme_meta "$t" credit)
+  for p in dawn day dusk night; do
+    r=$(theme_merged "$t" "$p" | awk -v p="$p" -v credited="${credited:+yes}" "$theme_awk"'
+      { split($0, kv, "="); c[kv[1]] = kv[2] }
+      END {
+        t = ratio(c["foreground"], c["background"]); a = ratio(c["accent"], c["background"]); q = ratio(c["muted"], c["background"])
+        if (t < 4.5) printf "text %.2f:1 at %s, under 4.5:1\n", t, p
+        if (credited == "yes" && p == "day" && (t < 7 || a < 3 || q < 3)) printf "day palette: text %.2f:1, accent %.2f:1, quiet text %.2f:1, under 7, 3 and 3\n", t, a, q
+      }')
+    [[ -z "$r" ]] || { echo "$t: $r"; status=1; }
+  done
+done
+# Render every theme in every phase into a scratch HOME and check the output.
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+for t in themes/*/; do
+  n=$(basename "$t")
+  for p in dawn day dusk night; do
+    HOME=$tmp PATH="$PWD/bin:$PATH" commands/theme/render "$n" "$p" >/dev/null || { echo "render failed: $n $p"; status=1; }
+    for rf in "$tmp/.local/state/takumi/look/"*; do
+      [[ -f "$rf" && ! -L "$rf" ]] || continue
+      if grep -q '{{' "$rf"; then echo "unrendered token in $n/$p ($(basename "$rf"))"; status=1; fi
+    done
+    # The palette is written whole and last (the shell reacts to it): no temporary left, this theme in it.
+    look=$tmp/.local/state/takumi/look
+    [[ ! -e "$look/palette.toml.tmp" ]] || { echo "a half-written palette was left for $n/$p"; status=1; }
+    grep -qx "name = \"$n\"" "$look/palette.toml" || { echo "the palette does not name $n after rendering it ($p)"; status=1; }
+  done
+done
+echo "   $(ls -d themes/*/ | wc -l | tr -d ' ') themes rendered in 4 phases"
+exit $status

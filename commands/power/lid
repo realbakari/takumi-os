@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: What closing the lid does: sleep, hibernate, or nothing (it keeps running and the screen locks)
+usage: <sleep|hibernate|nothing> [on-charger]
+example: takumi power lid hibernate
+example: takumi power lid nothing on-charger
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; . "$l/core.sh"; break; }; done
+declare -F power_logind_conf >/dev/null && declare -F core_sudo >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# Without on-charger the choice holds on battery, and plugged in too unless plugged in has a choice of its own;
+# with it, only plugged in. logind does it (takumi-lid.conf, docs/power.md). A conversation for the password.
+# Exit status: 0 done · 2 usage · 3 the password was not given · 5 hibernate, while hibernation is off · 1 else.
+usage() { echo "usage: takumi power lid <sleep|hibernate|nothing> [on-charger]" >&2; exit 2; }
+want=${1:-}; where=${2:-}
+case "$want" in sleep | hibernate | nothing) ;; *) usage ;; esac
+case "$where" in "" | on-charger) ;; *) usage ;; esac
+if [[ $want == hibernate ]] && ! power_hibernate_ready; then
+  core_fail 5 "Hibernation is off. Turn it on first, then the lid can use it"
+fi
+b=$(power_lid_choice battery); c=""
+if power_lid_own_charger; then c=$(power_lid_choice power); fi
+if [[ -z "$where" ]]; then b=$want; else c=$want; fi
+conf=$(power_logind_conf "$b" "$c" "$(power_hibernate_after)")
+if [[ "$conf" != "$(cat "$power_lid_conf" 2>/dev/null || true)" ]]; then
+  admin() { core_sudo "Changing what the lid does needs your password" "$@"; }
+  admin mkdir -p "${power_lid_conf%/*}" >/dev/null 2>&1 || core_fail 3 "Nothing changed: the password was not given"   # /etc/systemd/logind.conf.d
+  printf '%s\n' "$conf" | admin tee "$power_lid_conf" >/dev/null || core_fail 1 "What the lid does could not be changed"   # /etc/systemd/logind.conf.d/takumi-lid.conf
+  admin systemctl kill -s HUP systemd-logind.service >/dev/null 2>&1 || true   # logind reads /etc/systemd/logind.conf.d/takumi-lid.conf again
+fi
+case "$want" in
+  sleep) said="the computer sleeps" ;;
+  hibernate) said="the computer hibernates" ;;
+  nothing) said="the computer keeps running and the screen locks" ;;
+esac
+if [[ -n "$where" ]]; then core_done "Plugged in, when the lid closes $said"
+elif [[ -n "$c" && "$c" != "$want" ]]; then core_done "On battery, when the lid closes $said"
+else core_done "When the lid closes $said"; fi

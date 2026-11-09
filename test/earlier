@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Contract checks for the Palette's earlier rows (commands/palette/earlier) against a written history:
+# newest first, only when asked for, narrowed by words, today's last three in the empty Palette.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; earlier checks skipped)"; exit 0; }
+repo=$PWD; status=0; n=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-earlier.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export HOME=$t PATH="$repo/bin:$PATH"; mkdir -p "$t/.local/state/takumi"
+now=$(date +%s); f="$t/.local/state/takumi/notices.jsonl"
+{
+  printf '{"ts":%s,"app":"Calendar","icon":"calendar","summary":"Standup","body":"In 10 minutes","urgency":"normal"}\n' $(( now - 3 * 86400 ))
+  printf '{"ts":%s,"app":"Mail","icon":"mail","summary":"Invoice from Ada","body":"Your invoice is ready\\nSecond line","urgency":"normal"}\n' $(( now - 600 ))
+  printf '{"ts":%s,"app":"Bank","icon":"/opt/bank.png","summary":"Sign in","body":"Your code is 482913","urgency":"critical"}\n' $(( now - 60 ))
+  printf '{"ts":%s,"app":"Text Editor","icon":"","summary":"Text Editor quit unexpectedly","body":"","urgency":"normal"}\n' $(( now - 30 ))
+  printf '{"ts":%s,"app":"Reminder","icon":"","summary":"Stretch","body":"Reminder · press for again in 10 min","urgency":"critical"}\n' $(( now - 20 ))
+} > "$f"
+check() { n=$((n + 1)); if ! eval "$2"; then echo "   FAIL: $1"; status=1; fi; }
+rows=$(takumi palette earlier earlier)
+check "newest first" '[[ "$(jq -r .title <<< "$rows" | head -n 3 | tr "\n" "|")" == "Stretch|Text Editor quit unexpectedly|Sign in|" ]]'
+check "a message says its app and when" '[[ "$(jq -r "select(.title==\"Invoice from Ada\") | .subtitle" <<< "$rows")" == Mail\ ·\ *:*\ ·\ Your\ invoice\ is\ ready ]]'
+sub=$(jq -r 'select(.title=="Text Editor quit unexpectedly") | .subtitle' <<< "$rows")
+check "no body: no dangling dot ($sub)" '[[ "$sub" == "Text Editor · "*:* && "$sub" != *" · " && "$sub" != *"·" ]]'
+check "a body that repeats the app's name says it once" '[[ "$(jq -r "select(.title==\"Stretch\") | .subtitle" <<< "$rows")" == Reminder\ ·\ *:*\ ·\ press\ for\ again\ in\ 10\ min ]]'
+check "older days read as a date" 'jq -r "select(.title==\"Standup\") | .subtitle" <<< "$rows" | grep -qE "^Calendar · [0-9]{1,2} [A-Z][a-z]{2} · In 10 minutes$"'
+check "an icon given as a path is not passed as an app icon" '[[ "$(jq -r "select(.title==\"Sign in\") | .icon" <<< "$rows")" == "" ]]'
+check "Enter copies the message" '[[ "$(jq -r "select(.title==\"Sign in\") | .run[-1]" <<< "$rows")" == "Sign in"$'"'"'\n'"'"'"Your code is 482913" ]]'
+check "clearing asks first" '[[ "$(jq -r "select(.id==\"earlier:clear\") | .risk" <<< "$rows")" == 1 ]]'
+check "more words narrow it" '[[ "$(takumi palette earlier "earlier invoice" | jq -r .title | head -n 1)" == "Invoice from Ada" && $(takumi palette earlier "earlier invoice" | grep -vc earlier:clear) -eq 1 ]]'
+check "other searches leave it quiet" '[[ -z "$(takumi palette earlier firefox)" ]]'
+check "the empty Palette shows today's last three" '[[ "$(takumi palette earlier "" | jq -r .title | tr "\n" "|")" == "Stretch|Text Editor quit unexpectedly|Sign in|" ]]'
+: > "$f"
+check "an empty history says so when asked" '[[ "$(takumi palette earlier earlier | jq -r .id)" == earlier:none ]]'
+echo "   $n earlier checks against a written history"
+exit $status

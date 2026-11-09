@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Connect a paired Bluetooth device
+usage: <address>
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/bluetooth.sh" ]] && { . "$l/bluetooth.sh"; . "$l/core.sh"; break; }; done
+declare -F bt_valid >/dev/null || { echo "takumi: the Bluetooth library is missing" >&2; exit 1; }
+mac=${1:-}; bt_valid "$mac" || core_fail 2 "usage: takumi bluetooth connect <address>"
+name=$(bt_field "$mac" Name); name=${name:-$mac}
+core_note "Connecting to $name…"
+if [[ "$(bluetoothctl --timeout 20 connect "$mac" 2>/dev/null || true)" == *"Connection successful"* ]]; then
+  takumi notice bt "Connected to $name" "" -1
+  core_done "Connected to $name"; exit 0
+fi
+core_fail 1 "$name did not connect: is it on, nearby and not in use by another device?"

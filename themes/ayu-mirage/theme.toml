@@ -1,0 +1,34 @@
+# Ayu Mirage: Ayu softened onto blue-grey
+# Colours after Ayu by dempfi (https://github.com/ayu-theme/ayu-colors); phases by Takumi.
+
+[meta]
+name = "ayu-mirage"
+mode = "dark"
+title = "Ayu Mirage"
+about = "Ayu softened onto blue-grey"
+credit = "Ayu by dempfi (https://github.com/ayu-theme/ayu-colors)"
+
+[palette]
+accent     = "#ffcc66"
+background = "#1f2430"
+surface    = "#242936"
+foreground = "#cccac2"
+muted      = "#707a8c"
+red        = "#f28779"
+yellow     = "#ffcc66"
+green      = "#d5ff80"
+cyan       = "#95e6cb"
+blue       = "#73d0ff"
+magenta    = "#dfbfff"
+
+[phase.dawn]
+accent     = "#ffad66"
+
+[phase.dusk]
+accent     = "#faa06d"
+
+[phase.night]
+accent     = "#64b1da"
+background = "#14171f"
+surface    = "#191d26"
+foreground = "#b7b6b0"

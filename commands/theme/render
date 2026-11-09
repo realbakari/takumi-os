@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Render a theme and phase into ~/.local/state/takumi/look
+usage: <name> <phase>
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/theme.sh" ]] && { . "$l/theme.sh"; . "$l/font.sh"; break; }; done
+declare -F theme_merged >/dev/null && declare -F font_ui >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+name=${1:?theme}; phase=${2:-day}
+theme_dir=$(theme_find "$name") || { echo "no theme $name" >&2; exit 1; }
+out=${TAKUMI_RENDER_OUT:-$HOME/.local/state/takumi/look}; mkdir -p "$out"
+
+# theme.toml flattened: [palette] keys with [phase.<phase>] over them, then mode, name, phase and glass.
+merged=$(theme_merged "$theme_dir/theme.toml" "$phase")
+# The shell watches palette.toml and reads the sky picture when it changes, so the palette is written
+# last and whole (a temporary file moved over it): the shell never sees half a palette, nor a new palette
+# with the old picture.
+write_palette() {
+  { echo "# rendered by takumi theme render, do not edit"; echo "[look]"
+    while IFS='=' read -r k v; do printf '%s = "%s"\n' "$k" "$v"; done <<< "$merged"; } > "$out/palette.toml.tmp"
+  mv -f "$out/palette.toml.tmp" "$out/palette.toml"
+}
+
+# The greeter only needs the palette.
+[[ -n "${TAKUMI_RENDER_PALETTE_ONLY:-}" ]] && { write_palette; echo "rendered $name/$phase palette -> $out"; exit 0; }
+
+# A template's tokens: every key above, then what the theme does not hold: the opacity glass asks for
+# (glass = true in [meta]) and your fonts (takumi font): both families, the Core's text size and the point
+# size apps take for it. {{name}} is the value as written; {{name:bare}} is a colour without its #, for
+# apps that take RRGGBB (foot).
+opacity=1.0; [[ "$(sed -n 's/^glass=//p' <<< "$merged")" == true ]] && opacity=0.92
+size=$(font_size)
+tokens="$merged
+opacity=$opacity
+font_ui=$(font_ui)
+font_mono=$(font_mono)
+font_size=$size
+font_pt=$(font_points "$size")"
+expr=""
+while IFS='=' read -r k v; do
+  v=$(printf '%s' "$v" | sed 's/[\\&|]/\\&/g')
+  expr+="s|{{$k}}|$v|g;s|{{$k:bare}}|${v#\#}|g;"
+done <<< "$tokens"
+
+# A file is replaced only when it changes, so apps that watch one (fontconfig, starship) are not woken
+# for nothing at every phase.
+render_tmpl() {
+  local target
+  target="$out/$(basename "$1")"
+  sed "$expr" "$1" > "$target.tmp"
+  if cmp -s "$target.tmp" "$target"; then rm -f "$target.tmp"; else mv -f "$target.tmp" "$target"; fi
+}
+rendered=" "
+for d in "$HOME/.config/takumi/app-colours" /usr/share/takumi/app-colours "$here/../../default/app-colours"; do
+  [[ -d "$d" ]] || continue
+  for t in "$d"/*; do
+    [[ -f "$t" ]] || continue
+    case "$(basename "$t")" in README*) continue ;; esac
+    b=$(basename "$t"); [[ "$rendered" == *" $b "* ]] && continue
+    rendered+="$b "; render_tmpl "$t"
+  done
+done
+
+bg=""
+for cand in "$theme_dir/skies/$phase".* "$theme_dir/skies/default".*; do
+  [[ -f "$cand" ]] || continue
+  case "$cand" in
+    *.[Pp][Nn][Gg]|*.[Jj][Pp][Gg]|*.[Jj][Pp][Ee][Gg]|*.[Ww][Ee][Bb][Pp]|*.[Bb][Mm][Pp]) bg=$cand; break ;;
+  esac
+done
+if [[ -n "$bg" ]]; then
+  ln -sfn "$bg" "$out/sky"
+else
+  rm -f "$out/sky"
+fi
+write_palette
+echo "rendered $name/$phase -> $out"

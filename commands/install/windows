@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set up Windows 11 in a window, for the programs that only run on Windows
+usage: [--memory GB] [--cores N] [--disk GB]
+example: takumi install windows --memory 8
+risk: 2
+converse: yes
+title: Set up Windows
+words: windows microsoft exe office program programs virtual machine vm
+glyph: display
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; . "$l/core.sh"; break; }; done
+declare -F apps_windows_image >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh, docs/apps.md). Windows runs in a container under rootless Podman, as you
+# (https://github.com/dockur/windows): the container downloads Windows from Microsoft and installs it by
+# itself. Its screen reaches you over RDP on 127.0.0.1 only, and ~/Windows is the Shared folder on its
+# desktop. The account's password is made here, kept in a file only you can read, and handed to Podman and
+# FreeRDP through files and pipes, never on a command line. Exit status: 0 ready · 2 usage · 3 an answer was
+# needed and none came, or no · 5 this computer cannot run it (no virtualization, too little memory or
+# space, another kind of processor) · 1 anything else. The last line says it in words.
+mem="" cores="" disk=""
+while (( $# )); do
+  case "$1" in
+    --memory | --cores | --disk)
+      [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || core_fail 2 "usage: takumi install windows [--memory GB] [--cores N] [--disk GB]"
+      case "$1" in --memory) mem=$2 ;; --cores) cores=$2 ;; *) disk=$2 ;; esac
+      shift 2 ;;
+    *) core_fail 2 "usage: takumi install windows [--memory GB] [--cores N] [--disk GB]" ;;
+  esac
+done
+log="$apps_state/windows.log"; mkdir -p "$apps_state"
+admin() { core_sudo "Setting up Windows needs your password" "$@"; }
+run() { if core_in_core; then "$@" >> "$log" 2>&1; else "$@"; fi; }
+
+image=$(apps_windows_image) || core_fail 5 "Windows in a window needs an Intel, AMD or Arm processor, and this one is $(uname -m)"
+label="Windows 11"; [[ "$image" != *-arm ]] || label="Windows 11 for Arm"
+if apps_windows_exists; then core_done "Windows is already set up: type Windows in the Core to open it"; exit 0; fi
+kvm=${TAKUMI_KVM:-/dev/kvm}   # the tests point this at a file of their own
+[[ -e "$kvm" && -r "$kvm" && -w "$kvm" ]] ||
+  core_fail 5 "This computer cannot run Windows in a window: its processor's virtualization is off or missing. It can be turned on in the firmware settings, where it is called Intel VT-x or AMD-V."
+
+# Sized to the computer: half its memory (4 to 8 GB) and half its cores (2 to 8), a 64 GB disk that only
+# takes the space Windows fills, and 40 GB free for Windows to download and fill.
+total=$(free -m 2>/dev/null | awk '/^Mem:/ { print int(($2 + 1023) / 1024) }'); total=${total:-0}
+cpus=$(nproc 2>/dev/null || echo 2)
+space=$(df -Pk "$HOME" 2>/dev/null | awk 'NR == 2 { print int($4 / 1048576) }'); space=${space:-0}
+(( total >= 8 )) || core_fail 5 "Windows needs 4 GB of memory of its own, and this computer has $total GB in all"
+if [[ -z "$mem" ]]; then mem=$(( total / 2 )); if (( mem > 8 )); then mem=8; fi; fi
+if [[ -z "$cores" ]]; then cores=$(( cpus / 2 )); if (( cores > 8 )); then cores=8; fi; if (( cores < 2 )); then cores=2; fi; fi
+[[ -n "$disk" ]] || disk=64
+(( mem >= 4 && mem < total )) || core_fail 2 "Give Windows at least 4 GB of memory, and less than this computer's $total GB"
+(( cores >= 1 && cores <= cpus )) || core_fail 2 "Give Windows between 1 and $cpus cores"
+(( disk >= 32 )) || core_fail 2 "Windows needs a disk of at least 32 GB"
+(( space >= 40 )) || core_fail 5 "Windows needs about 40 GB free, and your home folder has $space GB"
+
+core_confirm "Set up $label with $mem GB of memory, $cores cores and a $disk GB disk? It downloads about 7 GB from Microsoft, then installs itself, which takes 20 to 40 minutes." ||
+  core_fail 3 "Nothing changed"
+
+# Podman runs the container as you; FreeRDP shows Windows. One password for both, asked in the Core.
+need=() names=()
+if ! command -v podman >/dev/null; then need+=(podman); names+=(Podman); fi
+if ! apps_freerdp >/dev/null; then need+=(freerdp); names+=(FreeRDP); fi
+if (( ${#need[@]} )); then
+  said=$(printf '%s\n' "${names[@]}" | paste -sd '/' - | sed 's#/# and #g')
+  core_note "Installing $said…"
+  # pacman: the packages' files under /usr and their entries in /var/lib/pacman
+  run admin pacman -S --needed --noconfirm "${need[@]}" || core_fail 1 "$said did not install. What happened is in $log"
+fi
+# Rootless containers need a range of user IDs of your own.
+user=$(id -un)
+if ! apps_subids_have; then
+  range=$(apps_subids_range)
+  # usermod: adds the range to /etc/subuid and /etc/subgid
+  run admin usermod --add-subuids "$range" --add-subgids "$range" "$user" ||
+    core_fail 1 "Containers could not be set up for you. What happened is in $log"
+  run podman system migrate || true
+fi
+
+# The account: your name and a password made here, in a file only you can read. Windows speaks your
+# language and keyboard when the image knows them.
+mkdir -p "$apps_windows_conf" && chmod 700 "$apps_windows_conf"
+raw=$(head -c 256 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9'); pass=${raw:0:20}
+[[ ${#pass} -eq 20 ]] || core_fail 1 "A password could not be made"
+loc=${LC_ALL:-${LANG:-}}; loc=${loc%%.*}
+case "${loc%%_*}" in
+  en) lang=English ;; de) lang=German ;; fr) lang=French ;; es) lang=Spanish ;; it) lang=Italian ;; pt) lang=Portuguese ;;
+  nl) lang=Dutch ;; sv) lang=Swedish ;; da) lang=Danish ;; fi) lang=Finnish ;; nb | no) lang=Norwegian ;; pl) lang=Polish ;;
+  cs) lang=Czech ;; tr) lang=Turkish ;; ru) lang=Russian ;; uk) lang=Ukrainian ;; ja) lang=Japanese ;; ko) lang=Korean ;; zh) lang=Chinese ;;
+  *) lang="" ;;
+esac
+was=$(umask); umask 077
+{ printf '%s\n' "VERSION=11" "RAM_SIZE=${mem}G" "CPU_CORES=$cores" "DISK_SIZE=${disk}G" "USERNAME=$user" "PASSWORD=$pass"
+  if [[ -n "$lang" ]]; then printf 'LANGUAGE=%s\n' "$lang"; fi
+  if [[ "$loc" =~ ^[a-z][a-z]_[A-Z][A-Z]$ ]]; then printf 'REGION=%s\nKEYBOARD=%s\n' "${loc/_/-}" "${loc/_/-}"; fi
+} > "$apps_windows_env.new"
+umask "$was"
+mv "$apps_windows_env.new" "$apps_windows_env"
+
+mkdir -p "$apps_windows_disk" "$apps_windows_share"
+chattr +C "$apps_windows_disk" >/dev/null 2>&1 || true   # Btrfs: no copy-on-write for a disk that changes in place
+core_note "Getting the Windows helper…"
+run podman pull "$image" || core_fail 1 "The Windows helper did not download. What happened is in $log"
+run podman create --name "$apps_windows_name" --env-file "$apps_windows_env" \
+  --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN \
+  -p 127.0.0.1:8006:8006 -p 127.0.0.1:3389:3389/tcp -p 127.0.0.1:3389:3389/udp \
+  -v "$apps_windows_disk:/storage" -v "$apps_windows_share:/shared" --stop-timeout 120 "$image" ||
+  core_fail 1 "Windows could not be set up. What happened is in $log"
+apps_windows_entry
+run podman start "$apps_windows_name" || core_fail 1 "Windows did not start. What happened is in $log"
+
+# Follow it: the download's progress from the container's log, then Windows installing itself, until it lets
+# the account in. Closing the Core leaves it working; the Core then says how it ended. Two hours at most.
+n=0 last="" phase=download
+while :; do
+  n=$((n + 1))
+  if ! apps_windows_running; then
+    core_fail 1 "Windows stopped while setting up: $(podman logs --tail 1 "$apps_windows_name" 2>&1 | sed 's/^[^A-Za-z]*//'). What happened is in $log"
+  fi
+  out=$(podman logs --tail 40 "$apps_windows_name" 2>&1 || true)
+  case "$out" in *"Booting Windows"* | *"started successfully"*) phase=install ;; esac
+  if [[ $phase == download ]]; then
+    pct=$(printf '%s\n' "$out" | grep -o '[0-9]\{1,3\}\([.][0-9]\)\{0,1\}%' | tail -n 1 || true)
+    line="Downloading $label from Microsoft…${pct:+ $pct}"
+  else
+    line="$label is installing itself, which takes 15 to 30 minutes. You can close this: the Core says when it is ready."
+  fi
+  if [[ "$line" != "$last" ]]; then core_note "$line"; last=$line; fi
+  # Whatever the log says, Windows is ready once it lets the account in; asked every half minute.
+  if (( n % 6 == 0 )) && apps_windows_answers; then break; fi
+  (( n < 1440 )) || core_fail 1 "$label is still setting up. Type Windows in the Core later to open it."
+  sleep 5
+done
+touch "$apps_windows_conf/ready"
+core_note "$label is ready. Shutting it down until you open it…"
+podman stop -t 120 "$apps_windows_name" >/dev/null 2>&1 || true
+core_done "$label is ready: type Windows in the Core to open it"

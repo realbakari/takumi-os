@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Remove a web app made with takumi app web
+usage: <name>
+example: takumi app web-remove whatsapp
+risk: 1
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; break; }; done
+declare -F apps_web_remove >/dev/null || { echo "takumi: the apps library is missing" >&2; exit 1; }
+
+# The web app by its short name ("google-calendar"), its entry's ID ("takumi-web-google-calendar") or its
+# name ("Google Calendar"). What you signed in to stays in the browser. Exit status: 0 · 2 · 4 no such web app.
+w=${1:-}
+[[ -n "$w" ]] || { echo "usage: takumi app web-remove <name>" >&2; exit 2; }
+slug=${w%.desktop}; slug=${slug#takumi-web-}
+if [[ ! -f "$apps_web_dir/takumi-web-$slug.desktop" ]]; then
+  slug=$(apps_web_list | W="$(printf '%s' "$w" | tr '[:upper:]' '[:lower:]')" awk -F '\t' '!f && tolower($2) == ENVIRON["W"] { print $1; f = 1 }')
+fi
+[[ -n "$slug" && -f "$apps_web_dir/takumi-web-$slug.desktop" ]] || { echo "No web app called $w"; exit 4; }
+name=$(apps_key "$apps_web_dir/takumi-web-$slug.desktop" Name)
+apps_web_remove "$slug"
+takumi notice cross "Removed ${name:-$slug}" "what you signed in to stays in the browser" >/dev/null 2>&1 || true
+echo "Removed ${name:-$slug}"

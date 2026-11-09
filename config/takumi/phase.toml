@@ -1,0 +1,9 @@
+# The clock that drives phase themes and night light. See docs/phase-themes.md.
+[schedule]
+dawn  = "05:30"
+day   = "08:00"
+dusk  = "17:30"
+night = "20:30"
+
+[override]
+# phase = "night"     # dawn | day | dusk | night | auto

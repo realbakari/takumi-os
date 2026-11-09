@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Install optional software by name
+usage: <name>
+example: takumi install docker
+example: takumi install agents
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; . "$l/apps.sh"; break; }; done
+declare -F core_note >/dev/null && declare -F apps_agent_bin >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# A conversation in the Core (the password asked there, pacman's own output kept in the log), plain at a
+# terminal. Apps people open come from the Shelf ("Get Spotify"); Windows and Steam have commands of their
+# own (takumi install windows, takumi install gaming); this is the rest.
+name=${1:-}; [[ -n "$name" ]] || core_fail 2 "usage: takumi install <name>"
+log="$HOME/.local/state/takumi/install.log"; mkdir -p "${log%/*}"
+admin() { core_sudo "Installing $name needs your password" "$@"; }
+run() { if core_in_core; then "$@" >> "$log" 2>&1; else "$@"; fi; }
+case "$name" in
+  docker | podman | containers)
+    # Containers come as rootless Podman with the docker command and Compose (docs/development.md).
+    exec takumi dev containers ;;
+  backup)
+    core_note "Installing restic…"
+    # pacman: restic's files under /usr
+    run admin pacman -S --needed --noconfirm restic || core_fail 1 "restic did not install: $log"
+    core_done "Installed restic." ;;
+  agents)
+    # Claude Code, Codex and OpenCode, each the way takumi agent open gets it (docs/development.md).
+    missing=()
+    for a in $apps_agents; do apps_agent_bin "$a" >/dev/null || missing+=("$a"); done
+    if (( ${#missing[@]} == 0 )); then core_done "Claude Code, Codex and OpenCode are already here. Type claude, codex or opencode in the Core to open one."; exit 0; fi
+    for a in "${missing[@]}"; do
+      core_note "Installing $(apps_agent_label "$a")…"
+      run apps_agent_install "$a" || core_fail 1 "$(apps_agent_label "$a") did not install. What happened is in $log"
+    done
+    core_done "Claude Code, Codex and OpenCode are installed. Type claude, codex or opencode in the Core to open one." ;;
+  *)
+    core_note "Installing $name…"
+    # pacman: the package's files under /usr and its entry in /var/lib/pacman
+    if core_in_core; then run admin pacman -S --needed --noconfirm "$name" || core_fail 1 "$name did not install; is that its package name? $log"
+    else sudo pacman -S --needed "$name"; fi
+    core_done "Installed $name." ;;
+esac

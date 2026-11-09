@@ -1,0 +1,333 @@
+#!/usr/bin/env bash
+# Contract checks for sending and the phone (lib/share.sh, commands/share/*, commands/phone/*, the Palette's phone and
+# nearby rows) against fake LocalSend (flatpak, its list of what arrived), a fake clipboard, and a fake KDE Connect
+# (kdeconnect-cli and its D-Bus through busctl): getting LocalSend only after asking, files handed over through the
+# document portal, what arrives said with Open, pairing with the code both screens show, ringing, sending, the rows,
+# and that nothing copied reaches a command line.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; sharing checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-share.XXXXXX")
+t=$(cd "$t" && pwd -P)
+export FAKE=$t/fake HOME=$t/home XDG_RUNTIME_DIR=$t/run TAKUMI_SHARE_POLL=0.2
+mkdir -p "$t/bin" "$t/stubs" "$FAKE/kc" "$HOME" "$XDG_RUNTIME_DIR" "$t/commands/notice" "$t/commands/app"
+finish() {   # followers of LocalSend stop when it does
+  rm -f "$FAKE/localsend-running"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -f "$XDG_RUNTIME_DIR/takumi/share-receive.pid" ]] || break; sleep 0.3; done
+  rm -rf "${t:?}"
+}
+trap finish EXIT
+jqdir=$(dirname "$(command -v jq)")
+export PATH="$t/bin:$repo/bin:/usr/bin:/bin:$jqdir"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"
+unset TAKUMI_CORE
+
+fake() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$t/bin/$1"; chmod +x "$t/bin/$1"; }
+fake flatpak '
+printf "flatpak %s\n" "$*" >> "$FAKE/calls"
+case "$1" in
+  info) [[ -f "$FAKE/localsend-installed" ]] ;;
+  run) touch "$FAKE/localsend-running" ;;
+esac'
+fake pgrep '[[ -f "$FAKE/localsend-running" ]]'
+fake setsid 'exec "$@"'
+fake qs 'printf "qs %s\n" "$*" >> "$FAKE/calls"'
+fake wl-paste '
+printf "wl-paste %s\n" "$*" >> "$FAKE/calls"
+case "$*" in --list-types) cat "$FAKE/clip-types" 2>/dev/null ;; *text/uri-list*) cat "$FAKE/clip-uris" 2>/dev/null ;; esac'
+fake systemctl '
+printf "systemctl %s\n" "$*" >> "$FAKE/calls"
+case "$*" in
+  *"is-enabled --quiet takumi-phone.service"*) [[ -f "$FAKE/kc-enabled" ]]; exit $? ;;
+  *"enable takumi-phone.service"*) touch "$FAKE/kc-enabled" ;;
+  *"start takumi-phone.service"*) touch "$FAKE/kc-up" ;;
+  *"disable --now takumi-phone.service"*) rm -f "$FAKE/kc-up" "$FAKE/kc-enabled" ;;
+esac
+exit 0'
+fake sudo 'printf "sudo %s\n" "$*" >> "$FAKE/calls"; case " $* " in *" kdeconnect "*) cp "$(dirname "$0")/../stubs/"* "$(dirname "$0")/" ;; esac'
+# KDE Connect: a folder per device in $FAKE/kc (name, reachable, asks, requested, type, key, charge, charging). A phone that
+# was asked to pair has accepted by the next look, unless $FAKE/kc-refuse.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$t/stubs/kdeconnectd"
+cat > "$t/stubs/kdeconnect-cli" <<'FAKE'
+#!/usr/bin/env bash
+printf "kdeconnect-cli %s\n" "$*" >> "$FAKE/calls"
+id=""; prev=""; for a; do [[ "$prev" == -d ]] && id=$a; prev=$a; done
+case " $* " in
+  *" --pair "*) echo 1 > "$FAKE/kc/$id/requested" ;;
+  *" --unpair "*) echo 0 > "$FAKE/kc/$id/paired"; echo 0 > "$FAKE/kc/$id/requested" ;;
+esac
+exit 0
+FAKE
+cat > "$t/bin/busctl" <<'FAKE'
+#!/usr/bin/env bash
+printf "busctl %s\n" "$*" >> "$FAKE/calls"
+[[ -f "$FAKE/kc-up" ]] || exit 1
+args=(); for a; do case "$a" in --*) ;; *) args+=("$a") ;; esac; done
+dev() { cat "$FAKE/kc/$1/$2" 2>/dev/null; }
+paired() { [[ "$(dev "$1" paired)" == 1 ]] || { [[ "$(dev "$1" requested)" == 1 && ! -f "$FAKE/kc-refuse" ]]; }; }
+b() { if "$@"; then echo true; else echo false; fi; }
+case "${args[0]}" in
+  call)
+    if [[ "${args[2]}" == /modules/kdeconnect ]]; then
+      ids=""
+      for d in "$FAKE"/kc/*/; do
+        [[ -d "$d" ]] || continue; id=$(basename "$d")
+        [[ "${args[6]}" == true && "$(dev "$id" reachable)" != 1 ]] && continue
+        [[ "${args[7]}" == true ]] && ! paired "$id" && continue
+        ids+="$id"$'\n'
+      done
+      case "${args[4]}" in
+        devices) printf '%s' "$ids" | jq -Rsc '{type: "as", data: [split("\n") | map(select(length > 0))]}' ;;
+        deviceNames) printf '%s' "$ids" | while read -r id; do printf '%s\t%s\n' "$id" "$(dev "$id" name)"; done |
+                       jq -Rsc '{type: "a{ss}", data: [split("\n") | map(select(length > 0) | split("\t") | {(.[0]): .[1]}) | add // {}]}' ;;
+      esac
+    else
+      id=${args[2]##*/}
+      echo "${args[4]}" >> "$FAKE/kc/$id/calls"
+      case "${args[4]}" in acceptPairing) echo 1 > "$FAKE/kc/$id/paired"; echo 0 > "$FAKE/kc/$id/asks" ;; cancelPairing) echo 0 > "$FAKE/kc/$id/requested" ;; esac
+    fi ;;
+  get-property)
+    path=${args[2]}; id=${path#/modules/kdeconnect/devices/}; id=${id%%/*}
+    case "${args[4]}" in
+      isPaired) echo "{\"type\":\"b\",\"data\":$(b paired "$id")}" ;;
+      isPairRequestedByPeer) echo "{\"type\":\"b\",\"data\":$( [[ "$(dev "$id" asks)" == 1 ]] && echo true || echo false )}" ;;
+      verificationKey|type) jq -cn --arg v "$(dev "$id" "$( [[ "${args[4]}" == type ]] && echo type || echo key )")" '{type: "s", data: $v}' ;;
+      charge) echo "{\"type\":\"i\",\"data\":$(dev "$id" charge)}" ;;
+      isCharging) echo "{\"type\":\"b\",\"data\":$(dev "$id" charging)}" ;;
+    esac ;;
+esac
+FAKE
+chmod +x "$t/bin/busctl" "$t/stubs/"*
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+printf '#!/bin/sh\nprintf "app get %%s\\n" "$*" >> "$FAKE/calls"; [ -f "$FAKE/flathub-down" ] && exit 1; touch "$FAKE/localsend-installed"\n' > "$t/commands/app/get"
+mkdir -p "$t/commands/firewall"
+printf '#!/bin/sh\ncat "$FAKE/fw" 2>/dev/null || echo "{\\"state\\":\\"off\\",\\"apps\\":[]}"\n' > "$t/commands/firewall/main"
+printf '#!/bin/sh\nprintf "firewall allow %%s\\n" "$*" >> "$FAKE/calls"; [ ! -f "$FAKE/fw-no" ]\n' > "$t/commands/firewall/allow"
+chmod +x "$t/commands/notice/main" "$t/commands/app/get" "$t/commands/firewall/"*
+
+phone() {  # <id> <name> <reachable> <asks> [paired]
+  mkdir -p "$FAKE/kc/$1"
+  echo "$2" > "$FAKE/kc/$1/name"; echo "$3" > "$FAKE/kc/$1/reachable"; echo "$4" > "$FAKE/kc/$1/asks"; echo "${5:-0}" > "$FAKE/kc/$1/paired"
+  echo 0 > "$FAKE/kc/$1/requested"; echo smartphone > "$FAKE/kc/$1/type"; echo 1A2B3C4D > "$FAKE/kc/$1/key"
+  echo 82 > "$FAKE/kc/$1/charge"; echo true > "$FAKE/kc/$1/charging"
+}
+reset() {
+  rm -f "$FAKE/localsend-running"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -f "$XDG_RUNTIME_DIR/takumi/share-receive.pid" ]] || break; sleep 0.3; done
+  rm -rf "${FAKE:?}"/* "${HOME:?}"/.config "${HOME:?}"/.local "${HOME:?}"/.var "${XDG_RUNTIME_DIR:?}"/*
+  cp "$t/stubs/"* "$t/bin/"   # KDE Connect is installed, unless a check takes it away
+  mkdir -p "$FAKE/kc" "$HOME/Pictures"
+  : > "$FAKE/calls"; : > "$FAKE/notices"
+}
+n=0
+check() { n=$((n + 1)); if eval "$2"; then :; else echo "share: $1"; status=1; fi; }
+talk() { local answers=$1 rc=0; shift; printf '%b' "$answers" | TAKUMI_CORE=1 takumi "$@" 2>&1 || rc=$?; echo "rc=$rc"; }
+lib() { bash -c '. lib/share.sh; "$@"' _ "$@"; }
+waitfor() { local _; for _ in $(seq 1 25); do eval "$1" && return 0; sleep 0.2; done; return 1; }
+copy() {  # the files given, as Files puts them on the clipboard
+  printf 'text/uri-list\nx-special/gnome-copied-files\n' > "$FAKE/clip-types"
+  : > "$FAKE/clip-uris"; local u; for u; do printf '%s\r\n' "$u" >> "$FAKE/clip-uris"; done
+}
+
+reset
+touch "$HOME/Pictures/My Photo.jpg" "$HOME/Pictures/café.txt"
+copy "file://$HOME/Pictures/My%20Photo.jpg" "file://$HOME/Pictures/caf%C3%A9.txt" "https://example.com/page"
+check "copied files: full paths, decoded, links left out" '[[ "$(lib share_copied | tr "\n" "|")" == "$HOME/Pictures/My Photo.jpg|$HOME/Pictures/café.txt|" ]]'
+printf 'text/plain;charset=utf-8\n' > "$FAKE/clip-types"
+check "copied text is not a file" '[[ -z "$(lib share_copied)" ]]'
+
+# --- Send to…: LocalSend only after asking ---
+said=$(talk 'no\n' share "$HOME/Pictures/My Photo.jpg")
+check "LocalSend is got only after asking, naming it and Flathub" '[[ "$(grep "^confirm" <<< "$said")" == "confirm Sending to phones and computers nearby uses LocalSend, a free app from Flathub (org.localsend.localsend_app). Get it? No password needed." && "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "Nothing changed. Sending needs LocalSend.|rc=3|" ]] && ! grep -q "^app get" "$FAKE/calls"'
+said=$(talk 'yes\n' share "$HOME/Pictures/My Photo.jpg" "$HOME/Pictures/café.txt")
+check "yes gets it from Flathub through the Shelf, for you only ($(tail -n 2 <<< "$said" | head -n 1))" 'grep -qx "app get org.localsend.localsend_app LocalSend" "$FAKE/calls" && [[ "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "done LocalSend is open with 2 files: choose who gets them.|rc=0|" ]]'
+check "the files reach LocalSend through the document portal" 'waitfor "grep -qx \"flatpak run --file-forwarding org.localsend.localsend_app @@ $HOME/Pictures/My Photo.jpg $HOME/Pictures/café.txt @@\" \"\$FAKE/calls\""'
+check "Files gets right-click › Scripts › Send to…" '[[ -x "$HOME/.local/share/nautilus/scripts/Send to…" ]] && grep -q "^exec takumi share \"\$@\"$" "$HOME/.local/share/nautilus/scripts/Send to…"'
+mkdir -p "$t/rec" "$HOME/Pictures/sub"; touch "$HOME/Pictures/sub/a b.png"
+printf '#!/bin/sh\nprintf "%%s|" "$@" > "%s/args"\n' "$t/rec" > "$t/rec/takumi"; chmod +x "$t/rec/takumi"
+(cd "$HOME/Pictures/sub" && PATH="$t/rec:$PATH" "$HOME/.local/share/nautilus/scripts/Send to…" "a b.png" "$HOME/Pictures/café.txt")
+check "the script hands over full paths, names with spaces intact" '[[ "$(cat "$t/rec/args")" == "share|$HOME/Pictures/sub/a b.png|$HOME/Pictures/café.txt|" ]]'
+: > "$FAKE/calls"
+copy "file://$HOME/Pictures/My%20Photo.jpg"
+said=$(talk '' share)
+check "no files named: the one copied in Files, handed to the LocalSend already open" '[[ "$(tail -n 2 <<< "$said" | head -n 1)" == "done LocalSend is open with My Photo.jpg: choose who gets it." ]] && waitfor "grep -qx \"flatpak run --file-forwarding org.localsend.localsend_app @@ $HOME/Pictures/My Photo.jpg @@\" \"\$FAKE/calls\""'
+check "nothing copied ever goes on a command line but its file names" '! grep -q "file://" "$FAKE/calls"'
+said=$(talk '' share "$HOME/nope.pdf")
+check "a file that is not there: 2" '[[ "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "nope.pdf is not there.|rc=2|" ]]'
+printf 'text/plain\n' > "$FAKE/clip-types"; : > "$FAKE/calls"
+said=$(talk '' share --receive)
+check "receive: LocalSend waits in the background, without a window" '[[ "$(tail -n 2 <<< "$said" | head -n 1)" == "done Ready to receive." ]]'
+check "with the firewall off, nothing is asked of it" '! grep -q "^firewall allow" "$FAKE/calls"'
+echo '{"state":"on","apps":["SSH"]}' > "$FAKE/fw"; touch "$FAKE/fw-no"
+said=$(talk '' share --receive)
+check "with the firewall on, LocalSend is let in first; refused, nothing can arrive (1)" 'grep -qx "firewall allow LocalSend" "$FAKE/calls" && [[ "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "Nothing can arrive while the firewall blocks LocalSend.|rc=1|" ]]'
+: > "$FAKE/calls"; said=$(talk '' share "$HOME/Pictures/café.txt")
+check "sending goes on even when the firewall keeps LocalSend out" '[[ "$(tail -n 1 <<< "$said")" == rc=0 ]]'
+echo '{"state":"on","apps":["LocalSend"]}' > "$FAKE/fw"; rm -f "$FAKE/fw-no"; : > "$FAKE/calls"
+talk '' share --receive >/dev/null
+check "once let in, never asked again" '! grep -q "^firewall allow" "$FAKE/calls"'
+rm -f "$FAKE/fw"
+reset
+out=$(takumi share "$HOME/Pictures" </dev/null) && rc=0 || rc=$?
+check "from Files without LocalSend: the Core opens on Send to… to ask there (3)" '[[ $rc == 3 ]] && grep -qx "qs -c takumi ipc --any-display call core search send" "$FAKE/calls" && grep -q "^down|Sending needs LocalSend|" "$FAKE/notices"'
+
+# --- What arrives: said in the Core, with Open ---
+reset; touch "$FAKE/localsend-installed" "$FAKE/localsend-running"
+prefs="$HOME/.var/app/org.localsend.localsend_app/data/org.localsend.localsend_app/shared_preferences.json"; mkdir -p "$(dirname "$prefs")"
+entry() { jq -cn --arg id "$1" --arg m "$2" --arg who "$3" --arg p "$4" --arg n "$5" '{id: $id, fileName: $n, fileType: "image", path: (if $p == "" then null else $p end),
+  savedToGallery: false, isMessage: ($m == "message"), fileSize: 10, senderAlias: $who, timestamp: "2026-11-09T10:00:00.000Z"}'; }
+history() { jq -sc '{"flutter.ls_alias": "Quiet Fox", "flutter.ls_receive_history": map(tojson | tojson)}' > "$prefs"; }
+entry old file "Mira's iPhone" "$HOME/Downloads/old.jpg" old.jpg | history
+check "the name this computer shows nearby, from LocalSend's settings" '[[ "$(lib share_alias)" == "Quiet Fox" ]]'
+takumi share receive --hidden & watcher=$!
+waitfor '[[ -s "$HOME/.local/state/takumi/share/seen" ]]'
+{ entry old file "Mira's iPhone" "$HOME/Downloads/old.jpg" old.jpg; entry e1 file "Mira's iPhone" "$HOME/Downloads/beach.jpg" beach.jpg
+  entry e2 message "Mira's iPhone" "" "see you at six"; } | history
+touch -t 203001010000 "$prefs"
+check "a file arrives: Received, from whom, pressed to open it" 'waitfor "grep -q \"^--open|$HOME/Downloads/beach.jpg|down|Received beach.jpg|from Mira'"'"'s iPhone|\" \"\$FAKE/notices\""'
+check "a message arrives: what it says" 'grep -q "^down|Message from Mira'"'"'s iPhone|see you at six|" "$FAKE/notices"'
+check "what arrived before is not news" '! grep -q old.jpg "$FAKE/notices"'
+: > "$FAKE/notices"
+{ entry old file "Mira's iPhone" "$HOME/Downloads/old.jpg" old.jpg; entry e1 file "Mira's iPhone" "$HOME/Downloads/beach.jpg" beach.jpg
+  entry e2 message "Mira's iPhone" "" "see you at six"
+  for i in 1 2 3; do entry "p$i" file "Studio PC" "$HOME/Downloads/scan $i.pdf" "scan $i.pdf"; done; } | jq -sc '{"flutter.ls_receive_history": map(tojson)}' > "$prefs"
+touch -t 203001010100 "$prefs"
+check "several files at once: one notice, opening their folder (and entries kept as plain JSON too)" 'waitfor "grep -q \"^--open|$HOME/Downloads|down|Received 3 files|from Studio PC|\" \"\$FAKE/notices\""'
+takumi share receive --hidden; second=$?
+check "one follower at a time" '[[ $second == 0 && "$(cat "$XDG_RUNTIME_DIR/takumi/share-receive.pid")" == "$watcher" ]]'
+rm -f "$FAKE/localsend-running"
+check "the follower stops with LocalSend" 'waitfor "! kill -0 $watcher 2>/dev/null"'
+wait "$watcher" 2>/dev/null || true
+
+# --- Your phone: pairing with the code both screens show ---
+reset; phone dev1 "Pixel 8" 1 0
+# Without KDE Connect on this machine, pairing installs it first; a machine that has it pairs without asking that.
+if PATH=/usr/bin:/bin command -v kdeconnect-cli >/dev/null; then installed=yes; else installed=no; rm -f "$t/bin/kdeconnect-cli" "$t/bin/kdeconnectd"; fi
+said=$(talk "$([[ $installed == no ]] && echo 'yes\n')yes\n" phone pair)
+want=$( [[ $installed == yes ]] || printf '%s\n' "confirm Your phone connects through KDE Connect, from Arch's packages. Install it? It asks for your password; the phone needs the KDE Connect app too." \
+  "note Installing KDE Connect…"; printf '%s\n' "note Starting KDE Connect…" "note Open KDE Connect on your phone, on the same Wi-Fi as this computer…" "note Asking Pixel 8 to pair…" \
+  "confirm Does Pixel 8 show 1A2B3C4D? Tap Accept there" "note Waiting for Pixel 8…" "done Paired with Pixel 8. Its notifications show here; type phone in the Core for the rest." "rc=0")
+check "pairing in the Core: install, start, find, ask, compare the code, done" '[[ "$said" == "$want" ]]'
+check "KDE Connect from Arch's packages, the password asked in the Core" '[[ $installed == yes ]] || grep -qx "sudo -A pacman -S --needed --noconfirm kdeconnect" "$FAKE/calls"'
+check "it runs only as takumi-phone.service: its own autostart is off for this account" 'grep -qx "systemctl --user enable takumi-phone.service" "$FAKE/calls" && grep -qx "Hidden=true" "$HOME/.config/autostart/org.kde.kdeconnect.daemon.desktop"'
+check "Files gets right-click › Scripts › Send to phone" 'grep -q "^exec takumi phone send \"\$@\"$" "$HOME/.local/share/nautilus/scripts/Send to phone"'
+check "nothing starts KDE Connect behind the service's back" '! grep -q "^busctl" <<< "$(grep "^busctl" "$FAKE/calls" | grep -v -- "--auto-start=no")"'
+said=$(talk '' phone pair dev1)
+check "already paired says so" '[[ "$(tail -n 2 <<< "$said" | head -n 1)" == "done Already paired with Pixel 8." ]]'
+echo '{"state":"on","apps":[]}' > "$FAKE/fw"; touch "$FAKE/fw-no"; : > "$FAKE/calls"
+said=$(talk '' phone pair dev1)
+check "with the firewall on, KDE Connect's ports are asked for first; refused, no phone (1)" 'grep -qx "firewall allow KDEConnect" "$FAKE/calls" && [[ "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "Your phone cannot reach this computer while the firewall blocks KDE Connect.|rc=1|" ]]'
+rm -f "$FAKE/fw" "$FAKE/fw-no"
+reset; phone dev1 "Pixel 8" 1 0
+said=$(talk 'no\n' phone pair)
+check "codes that do not match: cancelled, not paired (1)" '[[ "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "Not paired: the codes did not match, or you said no.|rc=1|" ]] && grep -qx cancelPairing "$FAKE/kc/dev1/calls"'
+reset; phone dev2 "Galaxy S24" 1 1
+said=$(talk 'yes\n' phone pair)
+check "a phone that asked first: the same code, then accepted" 'grep -qx "confirm Galaxy S24 asks to pair. Does it show 1A2B3C4D?" <<< "$said" && grep -qx acceptPairing "$FAKE/kc/dev2/calls" && [[ "$(tail -n 1 <<< "$said")" == rc=0 ]] && ! grep -q -- "--pair" "$FAKE/calls"'
+reset; phone dev1 "Pixel 8" 1 0; phone dev3 "Old Tablet" 1 0; touch "$FAKE/kc-up"
+said=$(talk 'old\nyes\n' phone pair)
+check "two phones nearby: asked which, by name" 'grep -qx "ask Pair with Pixel 8 or Old Tablet?" <<< "$said" && grep -q -- "-d dev3 --pair" "$FAKE/calls"'
+
+# --- Ringing, sending, the clipboard ---
+reset; phone dev1 "Pixel 8" 1 0 1; touch "$FAKE/kc-up" "$FAKE/kc-enabled"
+out=$(takumi phone ring)
+check "find my phone rings it ($out)" '[[ "$out" == "Ringing Pixel 8: it rings even on silent" ]] && grep -qx "kdeconnect-cli -d dev1 --ring" "$FAKE/calls" && grep -q "^bell|Ringing Pixel 8|" "$FAKE/notices"'
+touch "$HOME/Pictures/a.jpg" "$HOME/Pictures/b c.jpg"
+out=$(takumi phone send "$HOME/Pictures/a.jpg" "$HOME/Pictures/b c.jpg")
+check "sending files, each to the phone ($out)" '[[ "$out" == "Sent 2 files to Pixel 8" ]] && grep -qx "kdeconnect-cli -d dev1 --share $HOME/Pictures/b c.jpg" "$FAKE/calls"'
+copy "file://$HOME/Pictures/b%20c.jpg"; : > "$FAKE/calls"
+out=$(takumi phone send)
+check "without files: the one copied in Files ($out)" '[[ "$out" == "Sent b c.jpg to Pixel 8" ]] && grep -qx "kdeconnect-cli -d dev1 --share $HOME/Pictures/b c.jpg" "$FAKE/calls"'
+printf 'text/plain\n' > "$FAKE/clip-types"
+out=$(takumi phone send) && rc=0 || rc=$?
+check "nothing to send: 2, and how to choose files" '[[ $rc == 2 && "$out" == "Nothing to send: copy files in Files first, or right-click them: Scripts, Send to phone" ]]'
+out=$(takumi phone clipboard)
+check "the clipboard: KDE Connect reads it itself ($out)" '[[ "$out" == "Sent the clipboard to Pixel 8: paste it there" ]] && grep -qx "kdeconnect-cli -d dev1 --send-clipboard" "$FAKE/calls"'
+check "status: connected, battery" '[[ "$(takumi phone status)" == "Pixel 8 · connected · battery 82%, charging" ]]'
+echo 0 > "$FAKE/kc/dev1/reachable"
+out=$(takumi phone ring) && rc=0 || rc=$?
+check "a phone away: 1, and how to bring it back ($out)" '[[ $rc == 1 && "$out" == "Pixel 8 is not connected: open KDE Connect on it, on the same Wi-Fi" ]]'
+echo 1 > "$FAKE/kc/dev1/reachable"
+
+# --- The rows ---
+copy "file://$HOME/Pictures/a.jpg" "file://$HOME/Pictures/b%20c.jpg"
+phone dev3 "Old Tablet" 1 0
+r=$(takumi palette phone phone)
+check "phone, by score: the phone, find it, send to it, the clipboard, Send to…, pair another, receiving" '[[ "$(jq -sr "sort_by(-.score) | map(.title) | join(\"|\")" <<< "$r")" == "Pixel 8|Find my phone|Send to Pixel 8|Send the clipboard to Pixel 8|Send to…|Pair with Old Tablet|Receive from nearby" ]]'
+check "the phone row: connected, battery, charging" '[[ "$(jq -r "select(.title == \"Pixel 8\") | .subtitle" <<< "$r")" == "Connected · battery 82%, charging" ]]'
+check "send rows count what you copied" '[[ "$(jq -r "select(.id == \"phone:send:dev1\" or .id == \"nearby:send\") | .subtitle" <<< "$r" | tr "\n" "|")" == "The 2 files you copied|The 2 files you copied, to a phone or computer nearby, through LocalSend|" ]]'
+check "rows are JSON with an id, a title and a kind" 'jq -e "select(.id and .title and .kind) | true" <<< "$r" >/dev/null'
+check "find my phone finds one row" '[[ "$(takumi palette phone "find my phone" | jq -r .id)" == "phone:ring:dev1" ]]'
+check "airdrop finds Send to… and receiving" '[[ "$(takumi palette phone airdrop | jq -r .id | tr "\n" " ")" == "nearby:send nearby:receive " ]]'
+check "forget asks first" '[[ "$(takumi palette phone "forget phone" | jq -r "[.title, .risk] | join(\"/\")")" == "Forget Pixel 8/1" ]]'
+check "other words list nothing" '[[ -z "$(takumi palette phone firefox)" && -z "$(takumi palette phone ph)" ]]'
+check "a phone asking to pair comes first" 'echo 1 > "$FAKE/kc/dev3/asks"; [[ "$(takumi palette phone phone | jq -r .title | head -n 1)" == "Old Tablet asks to pair" ]]'
+rm -f "$FAKE/kc-up"
+check "KDE Connect not running: connect your phone" '[[ "$(takumi palette phone phone | jq -r .title | head -n 1)" == "Connect your phone" ]]'
+touch "$FAKE/kc-up"
+
+# --- Forgetting the last phone ---
+rm -rf "$FAKE/kc/dev3"; : > "$FAKE/calls"
+out=$(takumi phone forget)
+check "forgetting the last phone stops KDE Connect and takes Send to phone out of Files ($out)" '[[ "$out" == "Forgot Pixel 8" ]] && grep -qx "systemctl --user disable --now takumi-phone.service" "$FAKE/calls" && [[ ! -e "$HOME/.local/share/nautilus/scripts/Send to phone" ]]'
+out=$(takumi phone ring) && rc=0 || rc=$?
+check "no phone: 2, and where to connect one; KDE Connect is not started for nothing" '[[ $rc == 2 && "$out" == "No phone is paired: type phone in the Core to connect one" ]] && [[ ! -f "$FAKE/kc-up" ]]'
+
+# --- Making photos and videos smaller (takumi share shrink), against fake ImageMagick and ffmpeg ---
+reset
+mkdir -p "$HOME/Pictures/Trip"
+head -c 4000000 /dev/zero > "$HOME/Pictures/Trip/IMG_0042.HEIC"; head -c 3000000 /dev/zero > "$HOME/Pictures/Trip/beach.jpg"
+head -c 9000000 /dev/zero > "$HOME/Pictures/Trip/clip.MOV"; head -c 20000 /dev/zero > "$HOME/Pictures/Trip/tiny.jpg"; : > "$HOME/Pictures/Trip/notes.txt"
+check "shrink: what counts as a photo or a video, and where the copy goes" '[[ "$(lib share_kind a.HEIC) $(lib share_kind b.mov) $(lib share_kind c.txt)|$(lib share_kind "d (small).jpg")|$(lib share_small_name /p/IMG_1.HEIC)|$(lib share_small_name "/p/my clip.mov")" == "photo video ||/p/IMG_1 (small).jpg|/p/my clip (small).mp4" ]]'
+check "shrink: counted in words" '[[ "$(lib share_counted 3 0)|$(lib share_counted 1 1)|$(lib share_counted 0 2)" == "3 photos|a photo and a video|2 videos" ]]'
+copy "file://$HOME/Pictures/Trip/IMG_0042.HEIC" "file://$HOME/Pictures/Trip/beach.jpg" "file://$HOME/Pictures/Trip/clip.MOV" "file://$HOME/Pictures/Trip/notes.txt"
+check "shrink row: what was copied, in words" '[[ "$(takumi palette drives shrink | jq -c "[.title, .converse, .run]")" == "[\"Shrink 2 photos and a video for email\",true,[\"takumi\",\"share\",\"shrink\"]]" ]]'
+said=$(talk 'no\n' share shrink)
+check "shrink: asks before installing what it needs ($(grep confirm <<< "$said"))" '[[ "$said" == *"confirm Making 2 photos and a video smaller needs imagemagick libjpeg-turbo libheif ffmpeg from Arch"*"rc=3" ]] && ! grep -q "^sudo" "$FAKE/calls"'
+: > "$FAKE/calls"
+out=$(takumi share shrink "$HOME/Pictures/Trip/beach.jpg" </dev/null) && rc=0 || rc=$?
+check "shrink from Files, tools missing: the Core opens on the row, the files remembered" '[[ $rc -eq 3 ]] && grep -qx "qs -c takumi ipc --any-display call core search shrink" "$FAKE/calls" && [[ "$(cat "$XDG_RUNTIME_DIR/takumi/shrink-files")" == "$HOME/Pictures/Trip/beach.jpg" ]]'
+rm -f "$XDG_RUNTIME_DIR/takumi/shrink-files"
+cat > "$t/bin/magick" <<'FAKE'
+#!/usr/bin/env bash
+printf 'magick %s\n' "$*" >> "$FAKE/calls"
+[[ "$1" == -list ]] && { echo "     HEIC  HEIC      rw+   High Efficiency Image Format"; exit 0; }
+in=${1%\[0\]}; for a; do out=$a; done
+[[ -f "$FAKE/magick-fails" ]] && exit 1
+case "$in" in *tiny*) head -c 30000 /dev/zero > "$out" ;; *) head -c 500000 /dev/zero > "$out" ;; esac
+FAKE
+cat > "$t/bin/ffprobe" <<'FAKE'
+#!/bin/sh
+echo 10.000000
+FAKE
+cat > "$t/bin/ffmpeg" <<'FAKE'
+#!/usr/bin/env bash
+printf 'ffmpeg %s\n' "$*" >> "$FAKE/calls"
+for a; do out=$a; done
+for us in 1000000 2500000 5000000 7600000 10000000; do printf 'frame=1\nout_time_us=%s\nprogress=continue\n' "$us"; done
+head -c 1200000 /dev/zero > "$out"
+FAKE
+chmod +x "$t/bin/magick" "$t/bin/ffprobe" "$t/bin/ffmpeg"
+said=$(talk '' share shrink)
+check "shrink: the copied photos and the video, one sentence with the sizes ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$said" == *"done 2 photos and a video are smaller: 16 MB became 2.2 MB, next to the originals"*"rc=0" ]]'
+check "shrink: copies next to the originals, the originals untouched" '[[ -s "$HOME/Pictures/Trip/IMG_0042 (small).jpg" && -s "$HOME/Pictures/Trip/beach (small).jpg" && -s "$HOME/Pictures/Trip/clip (small).mp4" && $(wc -c < "$HOME/Pictures/Trip/beach.jpg") -eq 3000000 ]]'
+check "shrink: photos turned upright, at most 2560 pixels, as JPEG" 'grep -qF "magick $HOME/Pictures/Trip/IMG_0042.HEIC[0] -auto-orient -resize 2560x2560> -background white -flatten -quality 82" "$FAKE/calls"'
+check "shrink: video as H.264 and AAC in an MP4, 1080 on the short side" 'grep -q "^ffmpeg .*-i $HOME/Pictures/Trip/clip.MOV .*min(1080.*-c:v libx264 .*-c:a aac .*-movflags +faststart" "$FAKE/calls"'
+check "shrink: how far the video got, in notes" '[[ "$said" == *"note Making clip.MOV smaller · 20%"* && "$said" == *"note Making clip.MOV smaller · 70%"* ]]'
+check "shrink: the (small) copies are never shrunk again" '[[ "$(takumi palette drives shrink | jq -r .title)" == "Shrink 2 photos and a video for email" ]] && [[ -z "$(lib share_kind "$HOME/Pictures/Trip/beach (small).jpg")" ]]'
+said=$(talk '' share shrink "$HOME/Pictures/Trip/tiny.jpg")
+check "shrink: a photo small already stays as it was" '[[ "$said" == *"done It is small enough to send already"*"rc=0" && ! -e "$HOME/Pictures/Trip/tiny (small).jpg" ]]'
+touch "$FAKE/magick-fails"
+said=$(talk '' share shrink "$HOME/Pictures/Trip/beach.jpg")
+check "shrink: one that fails says where to look, 1" '[[ "$said" == *"A photo could not be made smaller"*"rc=1" ]]'
+rm -f "$FAKE/magick-fails"; : > "$FAKE/notices"
+takumi share shrink "$HOME/Pictures/Trip/beach.jpg" </dev/null >/dev/null
+check "shrink from Files: said in the Core, pressed to open the folder" 'grep -qx -- "--open|$HOME/Pictures/Trip|picture|A photo is smaller: 3.0 MB became 500 kB, next to the original||-1|10|" "$FAKE/notices"'
+said=$(talk '' share shrink "$HOME/Pictures/Trip/notes.txt")
+check "shrink: nothing to shrink, 2" '[[ "$said" == *"No photo or video to make smaller"*"rc=2" ]]'
+rm -f "$FAKE/clip-types"
+check "shrink row with nothing copied: how to pick them" '[[ "$(takumi palette drives "make smaller" | jq -r "select(.id == \"share:shrink\") | .title")" == "Make photos smaller to send" ]]'
+
+echo "   $n sharing checks against fake LocalSend, a fake clipboard and a fake KDE Connect"
+exit $status

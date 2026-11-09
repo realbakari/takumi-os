@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Cancel a reminder or a timer by its number, from takumi remind list
+usage: <number>
+example: takumi remind cancel 3
+risk: 1
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; break; }; done
+declare -F remind_get >/dev/null || { echo "takumi: the clock library is missing" >&2; exit 1; }
+id=${1:-}
+[[ "$id" =~ ^[0-9]+$ ]] || { echo "usage: takumi remind cancel <number>" >&2; exit 2; }
+line=$(remind_get "$id")
+[[ -n "$line" ]] || { echo "There is no reminder $id"; exit 4; }
+IFS=$'\t' read -r _ kind at made text <<< "$line"
+remind_unschedule "$id" "$kind"
+remind_drop "$id"
+if [[ $kind == timer ]]; then said="Timer stopped"; what=${text:-$(clock_length $(( at - made ))) timer}; else said="Reminder cancelled"; what=$text; fi
+takumi notice bell "$said" "$what" >/dev/null 2>&1 || true
+echo "$said: $what"

@@ -1,0 +1,18 @@
+# ASUS ROG and TUF laptops: asusctl (Arch's extra repository) drives what ASUS's own Windows app does: the
+# keyboard's lights, fan curves, the battery's charge limit and the GPU's MUX switch; asusd starts by itself
+# from asusctl's own udev rule once the keyboard is there and follows power-profiles-daemon, which the Core's
+# power modes already use. ROG Control Center (rog-control-center) is its window, left for you to add.
+# asus-linux: https://asus-linux.org/guides/arch-guide/
+title = "ASUS ROG laptop"
+part = "computer"
+says = "asusctl for its lights, fans and battery"
+
+[match]
+dmi_vendor = "^ASUSTeK"
+dmi_family = "(ROG|TUF)"
+laptop = true
+arch = ["x86_64"]
+
+[apply]
+packages = ["asusctl"]
+note = "ASUS's own controls for this laptop: the keyboard's lights, the fans and the battery's charge limit, through asusctl in a terminal (asusctl --help). The Core's power modes switch the laptop's own fan and power profiles."

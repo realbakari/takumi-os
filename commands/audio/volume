@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set, raise, lower or mute the output's volume: 5% steps, 1% with --fine, the end with --max or --min
+usage: <0-100|up|down|mute|unmute> [--fine|--max|--min]
+example: takumi audio volume 30
+example: takumi audio volume up --fine
+risk: 0
+ABOUT
+set -euo pipefail
+# The volume keys run this (Alt for --fine, Shift for --max and --min), so it asks wpctl and never reads the
+# whole graph. Any change of level also unmutes: a person who turns it up wants to hear it. Exit 1 when sound
+# is not running, 2 for words it does not know.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/audio.sh" ]] && { . "$l/audio.sh"; break; }; done
+declare -F audio_level >/dev/null || { echo "takumi: the sound library is missing" >&2; exit 1; }
+usage() { echo "usage: takumi audio volume <0-100|up|down|mute|unmute> [--fine|--max|--min]" >&2; exit 2; }
+what=${1:-}; how=${2:-}
+case "$how" in '' | --fine | --max | --min) ;; *) usage ;; esac
+[[ -z "${3:-}" ]] || usage
+step=5; [[ $how == --fine ]] && step=1
+sink=@DEFAULT_AUDIO_SINK@
+set_level() { wpctl set-volume -l 1.0 "$sink" "$1" >/dev/null 2>&1 && wpctl set-mute "$sink" 0 >/dev/null 2>&1; }
+case "$what" in
+  up | down)
+    if [[ $how == --max ]]; then level=100%
+    elif [[ $how == --min ]]; then level=0%
+    elif [[ $what == up ]]; then level="$step%+"
+    else level="$step%-"; fi
+    set_level "$level" || audio_fail 1 "Sound is not running" ;;
+  mute) wpctl set-mute "$sink" toggle >/dev/null 2>&1 || audio_fail 1 "Sound is not running" ;;
+  unmute) wpctl set-mute "$sink" 0 >/dev/null 2>&1 || audio_fail 1 "Sound is not running" ;;
+  *)
+    [[ "$what" =~ ^[0-9]+$ && "$what" -le 100 && -z "$how" ]] || usage
+    set_level "$what%" || audio_fail 1 "Sound is not running" ;;
+esac
+now=$(audio_level sink) || audio_fail 1 "Sound is not running"
+read -r pct muted <<< "$now"
+if [[ $muted == yes ]]; then
+  takumi notice mute "Muted" "" 0 >/dev/null 2>&1 || true; echo "Muted"
+else
+  takumi notice vol "Volume" "" "$pct" >/dev/null 2>&1 || true; echo "Volume $pct%"
+fi

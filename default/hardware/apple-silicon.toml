@@ -1,0 +1,13 @@
+# Apple Silicon Macs (M1 and later), found by their device tree: they run Linux on Asahi Linux's kernel and
+# drivers, from Asahi's own repository, which Takumi does not set up.
+# Asahi Linux: https://asahilinux.org/
+title = "Apple Silicon Mac"
+part = "computer"
+works = "partly"
+says = "runs on Asahi Linux's drivers"
+
+[match]
+dt_compatible = ["apple,arm-platform"]
+
+[apply]
+note = "This Mac runs on Asahi Linux's kernel and graphics drivers, which come from Asahi's own repository, not Arch's. Takumi does not set them up; what works is what Asahi supports."

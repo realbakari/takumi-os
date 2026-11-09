@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Let someone you trust see this screen and use it from their computer, with a one-time password, until you stop it
+usage: <on|off|status>
+example: takumi screen remote on
+example: takumi screen remote off
+risk: 1
+sudo: yes
+converse: yes
+glyph: person
+ABOUT
+set -euo pipefail
+# Remote help (docs/capture.md): wayvnc (Arch's extra repository, installed the first time) shares the screen
+# you are on over VNC, for this session only, as a unit that ends with it (takumi-remote). The person helping
+# connects with a VNC viewer that speaks RSA-AES (TigerVNC 1.13 or later, RealVNC Viewer), with the name "help"
+# and a password made for this time alone, which the Core shows on a card. The firewall lets VNC in (port 5900,
+# ufw's "Remote help" profile) only while it is on. While it runs the Core shows a mark, red while someone is
+# connected; off stops it, closes the firewall again and forgets the password.
+# wayvnc needs niri's wlr-screencopy for the picture and its virtual pointer and virtual keyboard for the other
+# person's hands; niri has all three.
+# Exit status: 0 done · 1 it would not start · 2 usage · 3 no password · 4 you said no.
+self=$(readlink -f "$0")
+for l in /usr/share/takumi/lib "$(dirname "$self")/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; . "$l/firewall.sh"; break; }; done
+declare -F core_card >/dev/null && declare -F firewall_state >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+run=${XDG_RUNTIME_DIR:-$HOME/.local/state/takumi}
+marker="$run/takumi-remote"        # <wayvnc pid> <started, epoch seconds>
+dir="$run/takumi-remote.d"         # its settings, the key and the password: yours alone, in memory
+port=5900 user=help unit=takumi-remote
+
+running() { local pid=""; [[ -r "$marker" ]] && read -r pid _ < "$marker" && [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; }
+# The rule the firewall knows it by: Takumi's profile, or the port itself where the profile is not installed.
+rule() { if grep -qxF "Remote help" <<< "$(firewall_profiles)"; then echo "Remote help"; else echo "$port/tcp"; fi; }
+fw_guarded() { [[ "$(firewall_state)" == on || "$(firewall_state)" == restart ]]; }
+fw_open() { grep -qxE "app Remote help|rule $port/tcp" "$firewall_record" 2>/dev/null; }
+# Where the other person connects: this computer's addresses on its networks, and its Tailscale address.
+addresses() {
+  { ip -4 -o addr show scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4 }'
+    if command -v tailscale >/dev/null; then tailscale ip -4 2>/dev/null || true; fi; } | awk 'NF && !seen[$0]++'
+}
+refresh() { qs -c takumi ipc call poll refresh >/dev/null 2>&1 || true; }
+clients() { wayvncctl -S "$dir/ctl" -j client-list 2>/dev/null | jq 'if type == "array" then length else (.clients // [] | length) end' 2>/dev/null || echo 0; }
+
+stop() {
+  systemctl --user stop "$unit.service" >/dev/null 2>&1 || true
+  if running; then local pid; read -r pid _ < "$marker"; kill "$pid" 2>/dev/null || true; fi
+  rm -rf "$marker" "$dir"
+  refresh
+  if fw_open; then
+    core_note "Closing the firewall again…"
+    core_sudo "Closing the firewall needs your password" takumi firewall apply deny "$(rule)" >/dev/null 2>&1 ||   # /etc/ufw/user.rules, /etc/ufw/user6.rules, /etc/takumi/firewall
+      core_fail 3 "Remote help stopped, but the firewall still lets VNC in: type firewall in the Core to block it"
+  fi
+  core_done "Remote help stopped: no one can see or use this screen"
+}
+
+case "${1:-}" in
+  status)
+    if running; then
+      read -r _ since < "$marker"
+      echo "on $since $(clients)"
+    else echo "off"; fi
+    exit 0 ;;
+  off) stop; exit 0 ;;
+  on) ;;
+  *) echo "usage: takumi screen remote <on|off|status>" >&2; exit 2 ;;
+esac
+
+if running && [[ -r "$dir/card" ]]; then core_card "$(cat "$dir/card")"; exit 0; fi
+core_confirm "Someone you trust will see this screen and can use its mouse and keyboard until you stop it. Let them?" ||
+  core_fail 4 "Nothing was shared"
+if ! command -v wayvnc >/dev/null || ! command -v ssh-keygen >/dev/null; then
+  core_note "Installing what remote help needs…"
+  core_sudo "Remote help needs wayvnc, which your password installs" pacman -S --needed --noconfirm wayvnc openssh >/dev/null 2>&1 ||   # /usr/bin/wayvnc, /usr/bin/ssh-keygen
+    core_fail 3 "Remote help needs wayvnc, which could not be installed"
+fi
+
+core_note "Starting remote help…"
+rm -rf "$dir"; (umask 077; mkdir -p "$dir")
+# A password for this time alone: ten letters and digits, none that read alike.
+pass=$(LC_ALL=C tr -dc 'abcdefghjkmnpqrstuvwxyz23456789' < /dev/urandom 2>/dev/null | head -c 10 || true)
+[[ ${#pass} -eq 10 ]] || core_fail 1 "Remote help could not make a password"
+ssh-keygen -q -m pem -t rsa -N "" -f "$dir/rsa_key.pem" >/dev/null 2>&1 || core_fail 1 "Remote help could not make its key"
+(umask 077; printf '%s\n' "# Remote help (takumi screen remote, docs/capture.md): made for this time, removed when it stops." \
+  "address=0.0.0.0" "port=$port" "enable_auth=true" "username=$user" "password=$pass" \
+  "use_relative_paths=true" "rsa_private_key_file=rsa_key.pem" > "$dir/config")
+
+output=$(niri msg --json focused-output 2>/dev/null | jq -r '.name // empty' 2>/dev/null || true)
+args=(wayvnc -C "$dir/config" -S "$dir/ctl")
+[[ -n "$output" ]] && args+=(-o "$output")
+systemctl --user reset-failed "$unit.service" >/dev/null 2>&1 || true
+systemd-run --user --unit="$unit" --collect --quiet -p PartOf=graphical-session.target -p After=graphical-session.target "${args[@]}" >/dev/null 2>&1 ||
+  { rm -rf "$dir"; core_fail 1 "Remote help would not start"; }
+pid=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  pid=$(systemctl --user show -p MainPID --value "$unit.service" 2>/dev/null || true)
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 ]] && wayvncctl -S "$dir/ctl" version >/dev/null 2>&1 && break
+  pid=""; sleep 0.5
+done
+if [[ -z "$pid" ]]; then
+  systemctl --user stop "$unit.service" >/dev/null 2>&1 || true
+  rm -rf "$dir"
+  core_fail 1 "Remote help would not start: journalctl --user -u $unit says why"
+fi
+printf '%s %s\n' "$pid" "$(date +%s)" > "$marker"
+
+if fw_guarded && ! fw_open; then
+  core_note "Opening the firewall for remote help…"
+  if ! core_sudo "Letting the helper in through the firewall needs your password" takumi firewall apply allow "$(rule)" >/dev/null 2>&1; then   # /etc/ufw/user.rules, /etc/ufw/user6.rules, /etc/takumi/firewall
+    systemctl --user stop "$unit.service" >/dev/null 2>&1 || true
+    rm -rf "$marker" "$dir"
+    core_fail 3 "Remote help stopped: the firewall needs your password to let the helper in"
+  fi
+fi
+refresh
+
+where=$(addresses | paste -sd ' ' - | sed 's/ / or /g')
+[[ -n "$where" ]] || where="this computer's address"
+card=$(W=$where U=$user P=$pass jq -cn '{kicker: "Remote help is on", title: ("Connect to " + env.W),
+  detail: ("In a VNC viewer such as TigerVNC or RealVNC Viewer, as " + env.U + " · press the mark in the Core to stop"),
+  secretLabel: "Password", secret: env.P}')
+(umask 077; printf '%s\n' "$card" > "$dir/card")
+core_in_core || takumi notice person "Remote help is on" "press its mark in the Core to stop" >/dev/null 2>&1 || true
+core_card "$card"

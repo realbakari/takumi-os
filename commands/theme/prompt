@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Starship's prompt in the theme's colours, or the plain prompt again
+usage: [on|off]
+example: takumi theme prompt on
+risk: 1
+sudo: yes
+title: Terminal prompt in the theme's colours
+words: prompt terminal shell starship bash zsh fish colours colors theme
+glyph: term
+converse: yes
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; break; }; done
+declare -F core_sudo >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh). On: starship (installed first, which asks for your password), its settings
+# ~/.config/starship.toml linked to the look's starship.toml, so it follows every theme and phase, and one
+# line in each shell's start file (bash always, zsh and fish when you use them) that starts it. A
+# starship.toml of your own is moved aside to starship.toml.before-takumi and comes back with off.
+# Without a word it turns the prompt on when it is off and off when it is on.
+# Exit status: 0 done · 1 starship did not install · 2 usage.
+flag="$HOME/.config/takumi/prompt"
+conf="$HOME/.config/starship.toml"
+mine="$conf.before-takumi"
+look="$HOME/.local/state/takumi/look/starship.toml"
+mark="# takumi theme prompt"
+what=${1:-}
+[[ -n "$what" ]] || { if [[ -f "$flag" ]]; then what=off; else what=on; fi; }
+case "$what" in on|off) ;; *) echo "usage: takumi theme prompt [on|off]" >&2; exit 2 ;; esac
+
+# The start files: bash's, and zsh's and fish's when they are in use here.
+rcs() {
+  echo "$HOME/.bashrc"
+  [[ -f "$HOME/.zshrc" || "${SHELL:-}" == */zsh ]] && echo "$HOME/.zshrc"
+  [[ -d "$HOME/.config/fish" || "${SHELL:-}" == */fish ]] && echo "$HOME/.config/fish/conf.d/takumi-prompt.fish"
+  return 0
+}
+unhook() {  # Takumi's line goes; the rest of the file stays, written in place (a link stays a link)
+  local f rest
+  for f in "$HOME/.bashrc" "$HOME/.zshrc"; do
+    [[ -f "$f" ]] && grep -qF "$mark" "$f" || continue
+    rest=$(grep -vF "$mark" "$f" || true)
+    printf '%s\n' "$rest" > "$f"
+  done
+  rm -f "$HOME/.config/fish/conf.d/takumi-prompt.fish"
+}
+
+if [[ $what == off ]]; then
+  unhook
+  if [[ -L "$conf" && "$(readlink "$conf")" == "$look" ]]; then rm -f "$conf"; fi
+  [[ -e "$conf" || ! -f "$mine" ]] || mv "$mine" "$conf"
+  rm -f "$flag"
+  core_done "The plain prompt is back in new terminals"
+  exit 0
+fi
+
+if ! command -v starship >/dev/null; then
+  core_note "Getting starship…"
+  log="$HOME/.local/state/takumi/install.log"; mkdir -p "${log%/*}"
+  # sudo: pacman installs starship (/usr/bin/starship) from Arch's extra repository.
+  if core_in_core; then core_sudo "Getting the prompt needs your password" pacman -S --needed --noconfirm starship >> "$log" 2>&1 || core_fail 1 "starship did not install: $log"
+  else sudo pacman -S --needed starship || core_fail 1 "starship did not install"; fi
+fi
+if [[ ! -f "$look" ]]; then
+  theme=$(cat "$HOME/.config/takumi/theme" 2>/dev/null || true)
+  takumi theme render "${theme:-ion}" "$(takumi phase current)" >/dev/null
+fi
+mkdir -p "${conf%/*}"
+if [[ -e "$conf" && ! ( -L "$conf" && "$(readlink "$conf")" == "$look" ) ]]; then
+  [[ -e "$mine" ]] && mv "$mine" "$mine.$(date +%Y%m%d%H%M%S)"
+  mv "$conf" "$mine"
+fi
+ln -sfn "$look" "$conf"
+unhook
+while IFS= read -r f; do
+  mkdir -p "${f%/*}"
+  case "$f" in
+    *.fish) printf 'command -q starship; and starship init fish | source  %s\n' "$mark" > "$f" ;;
+    *zshrc) printf 'command -v starship >/dev/null && eval "$(starship init zsh)"  %s\n' "$mark" >> "$f" ;;
+    *) printf 'command -v starship >/dev/null && eval "$(starship init bash)"  %s\n' "$mark" >> "$f" ;;
+  esac
+done < <(rcs)
+mkdir -p "${flag%/*}"; echo on > "$flag"
+core_done "The prompt wears the theme in new terminals"

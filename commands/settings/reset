@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Put Takumi's settings back under ~/.config, keeping what you chose (screens, overrides, phases, text size); or one app's
+usage: [app]
+example: takumi settings reset
+example: takumi settings reset foot
+risk: 1
+interactive: yes
+title: Reset settings to Takumi defaults
+words: reset defaults factory settings
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; break; }; done
+declare -F core_done >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+src=""; for d in /usr/share/takumi/config "$here/../../config"; do [[ -d "$d" ]] && { src=$d; break; }; done
+# With no app: niri, Takumi's own settings, the terminal and the shell, as always. With one: the folder of that
+# name Takumi ships in config/ (`gtk` is gtk-3.0 and gtk-4.0 together). The Palette's "Reset Terminal settings"
+# rows come from commands/palette/settings and run this in the Core.
+# yes_or_no <question>: the Core asks with Enter for yes; a terminal defaults to no.
+yes_or_no() {
+  if core_in_core; then core_confirm "$1"; return; fi
+  local a; read -r -p "$1 [y/N] " a; [[ "$a" == [yY] ]]
+}
+reset_app() {  # <folder>: yours aside as <folder>.bak-<stamp>, then Takumi's over it, keeping what you chose
+  [[ -d "$src/$1" ]] || return 0
+  [[ -d "$HOME/.config/$1" ]] && cp -r "$HOME/.config/$1" "$HOME/.config/$1.bak-$stamp"
+  # What a person chose stays: niri overrides, the screens kept from the Core, the sky's clock, text size and night light.
+  mkdir -p "$HOME/.config/$1"
+  rsync -a --exclude 'takumi/overrides.kdl' --exclude 'takumi/outputs.kdl' --exclude 'phase.toml' --exclude 'display.toml' "$src/$1/" "$HOME/.config/$1/"
+}
+
+app=${1:-}
+if [[ -z "$app" ]]; then
+  yes_or_no "Put Takumi's settings back under ~/.config? Your current ones are kept aside." || exit 1
+  stamp=$(date +%s)
+  for a in niri takumi foot quickshell; do reset_app "$a"; done
+  takumi phase tick --force
+  core_done "settings reset; your earlier ones end in .bak-$stamp"
+  exit 0
+fi
+
+folders=$app; [[ "$app" == gtk ]] && folders="gtk-3.0 gtk-4.0"
+for f in $folders; do
+  [[ "$f" =~ ^[a-z0-9][a-z0-9.-]*$ && -d "$src/$f" ]] || core_fail 2 "Takumi has no settings for $app. These can be reset: $(cd "$src" && find . -mindepth 1 -maxdepth 1 -type d | sed 's|^\./||' | sort | paste -sd ' ' -)"
+done
+yes_or_no "Put Takumi's settings for $app back? Yours are kept aside." || core_fail 1 "Nothing changed."
+stamp=$(date +%s)
+for f in $folders; do reset_app "$f"; done
+takumi phase tick --force
+core_done "Takumi's settings for $app are back; yours are in ~/.config/${folders%% *}.bak-$stamp"
+exit 0

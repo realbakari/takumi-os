@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for sound as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# Where sound goes and comes from, the volume, what each app plays, the microphone, which app the media
+# keys control, the sound quality and the speaker tuning (docs/sound.md). Every row carries the topic
+# words, so "sound" or "volume" lists them all. A device's own name is never a search word on another row:
+# "headphones" must rank the Headphones row first, not the output in use.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/audio.sh" ]] && { . "$l/audio.sh"; . "$l/palette.sh"; break; }; done
+declare -F audio_devices >/dev/null || exit 0
+q=${1:-}
+palette_short "$q" && exit 0
+command -v jq >/dev/null || exit 0
+words="sound audio volume output"
+if ! dump=$(audio_dump) || [[ -z "$dump" ]]; then
+  jq -cn --arg w "$words" '{id:"sound:none",title:"Sound is not running",subtitle:"Something is wrong? can look at it",glyph:"mute",kind:"Sound",keywords:$w,run:["true"],score:0.9}' | palette_filter "$q"
+  exit 0
+fi
+devices=$(audio_devices <<< "$dump"); streams=$(audio_streams <<< "$dump")
+{
+  # Outputs and inputs: the one in use says so; Enter on any other switches to it. A Bluetooth device says
+  # how its sound travels ("AAC, good quality").
+  jq -c --arg w "$words" '
+    (if .codecWords != "" then " · " + (.codecWords | sub(" · "; ", ")) else "" end) as $how |
+    {id: ("sound:" + .dir + ":" + .name), title: .plain, glyph: .glyph, kind: "Sound", steady: true, refresh: 4,
+     keywords: ((if .dir == "in" then $w + " input microphone mic" else $w end) + (if .bluetooth then " codec quality" else "" end)),
+     subtitle: ((if .dir == "out" then (if .default then "Sound goes here · " + (if .muted then "muted" else (.percent | tostring) + "%" end) else "Enter to send sound here" end)
+                 else (if .default then "Your microphone" + (if .muted then " · muted" else "" end) else "Enter to use this microphone" end) end) + $how),
+     run: (if .default then ["true"] else ["takumi", "audio", (if .dir == "out" then "output" else "input" end), (.id | tostring)] end),
+     score: (if .dir == "out" then (if .default then 0.99 else 0.9 end) else (if .default then 0.8 else 0.75 end) end)}' <<< "$devices"
+  # Mute, and four volumes, for the output in use; mute for the microphone in use.
+  jq -cn --arg w "$words" --argjson d "$(jq -cn 'first(inputs | select(.dir == "out" and .default)) // {}' <<< "$devices")" '
+    if $d == {} then empty else
+      {id: "sound:mute", title: (if $d.muted then "Unmute" else "Mute" end), subtitle: ($d.plain + (if $d.muted then " is muted" else " · " + ($d.percent | tostring) + "%" end)),
+       glyph: (if $d.muted then "vol" else "mute" end), kind: "Sound", keywords: $w, run: ["takumi", "audio", "volume", "mute"], score: 0.85},
+      ([25, 50, 75, 100][] as $v | {id: ("sound:vol:" + ($v | tostring)), title: ("Volume " + ($v | tostring) + "%"),
+       subtitle: (if $d.percent == $v then "Now" else "From " + ($d.percent | tostring) + "%" end), glyph: "vol", kind: "Sound", keywords: $w,
+       run: ["takumi", "audio", "volume", ($v | tostring)], steady: true, score: (0.6 - $v / 10000)})
+    end'
+  jq -cn --arg w "$words" --argjson m "$(jq -cn 'first(inputs | select(.dir == "in" and .default)) // {}' <<< "$devices")" '
+    if $m == {} then empty
+    elif $m.muted then {id: "sound:mic:mute", title: "Unmute the microphone", subtitle: ($m.plain + " is muted"), glyph: "mic", kind: "Sound",
+      keywords: ($w + " microphone mic mute unmute input"), run: ["takumi", "audio", "mic", "unmute"], score: 0.82}
+    else {id: "sound:mic:mute", title: "Mute the microphone", subtitle: ($m.plain + " · apps hear nothing until you unmute it"), glyph: "micOff",
+      kind: "Sound", keywords: ($w + " microphone mic mute input"), run: ["takumi", "audio", "mic", "mute"], score: 0.7} end'
+  # Apps playing now, each with its own volume; Enter steps it down, and the subtitle says to what.
+  jq -c --arg w "$words" '
+    select(.dir == "out" and .running) |
+    (if .muted then 100 elif .percent > 75 then 75 elif .percent > 50 then 50 elif .percent > 25 then 25 else "mute" end) as $next |
+    {id: ("sound:app:" + (.id | tostring)), title: (.app + " · " + (if .muted then "muted" else (.percent | tostring) + "%" end)),
+     subtitle: ((if .what != "" then .what + " · " else "" end) + "Enter for " + (if $next == "mute" then "mute" else ($next | tostring) + "%" end)),
+     glyph: "vol", kind: "Sound", keywords: ($w + " app apps playing"), steady: true, refresh: 4,
+     run: ["takumi", "audio", "app", (.id | tostring), ($next | tostring)], score: 0.7}' <<< "$streams"
+  # Who is listening: an app recording the microphone, named so it is never a secret.
+  jq -c --arg w "$words" '
+    select(.dir == "in" and .running and (.monitor | not)) |
+    {id: ("sound:rec:" + (.id | tostring)), title: (.app + " is using the microphone"), subtitle: "Mute the microphone from its row below",
+     glyph: "mic", kind: "Sound", keywords: ($w + " microphone mic recording listening privacy"), steady: true, refresh: 4, run: ["true"], score: 0.95}' <<< "$streams"
+
+  # Which app the media keys control, when more than one could be: the one they reach now says so.
+  if command -v playerctl >/dev/null && players=$(audio_players) && [[ "$players" == *$'\n'* ]]; then
+    now=$(audio_player_now || true)
+    while IFS= read -r p; do
+      track=$(playerctl -p "$p" metadata title 2>/dev/null || true)
+      P=$p NAME=$(audio_player_name "$p") TRACK=$track NOW=$now W=$words jq -cn '
+        (if env.TRACK != "" then env.TRACK + " · " else "" end) as $t |
+        {id: ("sound:player:" + env.P), title: ("Media keys: " + env.NAME), glyph: "play", kind: "Sound", steady: true, refresh: 4,
+         keywords: (env.W + " media keys player playing music play pause next previous"),
+         subtitle: (if env.P == env.NOW then $t + "The media keys control it" else $t + "Enter to control it with the media keys" end),
+         run: (if env.P == env.NOW then ["true"] else ["takumi", "audio", "player", env.P] end),
+         score: (if env.P == env.NOW then 0.58 else 0.57 end)}'
+    done <<< "$players"
+  fi
+
+  # Sound quality: Studio or Balanced, the one in use first.
+  QUALITY=$(audio_quality_now) W=$words jq -cn '
+    [{q: "studio", t: "Sound: Studio quality", s: "Songs at their own sample rate, a short delay", f: "for hi-res music, recording and instruments"},
+     {q: "balanced", t: "Sound: Balanced", s: "One sample rate, a longer buffer", f: "less battery, never crackles"}][] |
+    {id: ("sound:quality:" + .q), title: .t, glyph: "pulse", kind: "Sound", steady: true,
+     keywords: (env.W + " quality studio balanced sample rate hi-res hifi lossless delay latency buffer battery crackle"),
+     subtitle: (if .q == env.QUALITY then "In use · " + .s else .s + " · " + .f end),
+     run: (if .q == env.QUALITY then ["true"] else ["takumi", "audio", "quality", .q] end),
+     score: (if .q == env.QUALITY then 0.56 else 0.55 end)}'
+
+  # The speaker tuning: on, and how to hear the speakers as they are; or on offer where there are
+  # built-in speakers to tune.
+  want=$(audio_tuning_wanted); computer=$(audio_tuning_computer)
+  running=no; if audio_tuning_running <<< "$dump"; then running=yes; fi
+  offer=""; [[ -n "$want" ]] || offer=${computer:-laptop-speakers}
+  if [[ -n "$want" || -n "$(audio_speakers <<< "$dump")" ]]; then
+    name=${want:-$offer}; title=""
+    if f=$(audio_tuning_file "$name"); then title=$(audio_tuning_meta "$f" title); fi
+    if [[ -n "$want" || -n "$f" ]]; then
+      WANT=$want NAME=$name TITLE=${title:-$name} COMPUTER=$computer RUNNING=$running W=$words jq -cn '
+        {id: "sound:tuning", glyph: "vol", kind: "Sound", steady: true,
+         keywords: (env.W + " speakers speaker tuning tune tuned equalizer eq bass louder laptop raw")} +
+        if env.WANT != "" and env.RUNNING == "yes" then
+          {title: (if env.WANT == env.COMPUTER then "Speakers tuned for this laptop" else "Speakers tuned: " + env.TITLE end),
+           subtitle: (env.TITLE + " · Enter to hear them as they are"), run: ["takumi", "audio", "tuning", "off"], score: 0.66}
+        elif env.WANT != "" then
+          {title: "The speaker tuning is not running", subtitle: (env.TITLE + " · Enter to start it again"),
+           run: ["takumi", "audio", "tuning", "on", env.WANT], score: 0.66}
+        elif env.COMPUTER != "" then
+          {title: "Tune the speakers for this laptop", subtitle: (env.TITLE + " · Enter to turn it on"),
+           run: ["takumi", "audio", "tuning", "on", env.NAME], score: 0.64}
+        else
+          {title: "Tune the speakers", subtitle: "A general tuning for laptop speakers · Enter to try it",
+           run: ["takumi", "audio", "tuning", "on", env.NAME], score: 0.62}
+        end'
+    fi
+  fi
+} | palette_filter "$q"

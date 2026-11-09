@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Copy the words in an area of the screen you draw
+risk: 0
+title: Copy text from the screen
+words: ocr text recognise recognize read screen copy words
+glyph: quote
+ABOUT
+set -euo pipefail
+# Text recognition with tesseract, in English unless TAKUMI_OCR_LANGS names others ("eng+jpn").
+command -v tesseract >/dev/null || { takumi notice warn "Copying text needs tesseract" "it comes with Takumi's desktop packages" -1; exit 1; }
+geo=$(slurp 2>/dev/null) || exit 0
+text=$(grim -g "$geo" - | tesseract - - -l "${TAKUMI_OCR_LANGS:-eng}" 2>/dev/null | sed -e 's/[[:space:]]*$//' | cat -s || true)
+[[ -n "${text//[[:space:]]/}" ]] || { takumi notice quote "No words found there" "" -1; exit 0; }
+printf '%s' "$text" | wl-copy
+first=$(tr '\n' ' ' <<< "$text" | cut -c1-60)
+takumi notice quote "Copied the text" "$first…" -1
+printf '%s\n' "$text"

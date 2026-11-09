@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: List shipped and user themes
+risk: 0
+ABOUT
+set -euo pipefail
+for d in /usr/share/takumi/themes "$(dirname "$(readlink -f "$0")")/../../themes" "$HOME/.config/takumi/themes"; do
+  [[ -d "$d" ]] || continue
+  for t in "$d"/*/theme.toml; do [[ -f "$t" ]] || continue; basename "$(dirname "$t")"; done
+done | sort -u
+exit 0

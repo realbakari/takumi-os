@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Open the browser, files, terminal or another app you chose, in a new window
+usage: <browser|mail|terminal|editor|pdf|images|video|music|files> [file, link or command...]
+example: takumi app open browser
+example: takumi app open terminal btop
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; break; }; done
+declare -F apps_default >/dev/null || { echo "takumi: the apps library is missing" >&2; exit 1; }
+
+# Super+B, Super+E and Super+Return run this, so they open the apps you chose (takumi app default). The
+# terminal runs the words after it as a command; any other app opens them as files or links. Exit status:
+# 0 · 2 not a kind · 3 no app is there for it.
+kind=${1:-}
+apps_kind_ok "$kind" || { echo "usage: takumi app open <$(echo "$apps_kinds" | tr ' ' '|')> [file, link or command...]" >&2; exit 2; }
+shift
+
+if [[ $kind == terminal ]]; then
+  # xdg-terminal-exec follows xdg-terminals.list, which takumi app default terminal writes. Without that
+  # list, Takumi's own terminal.
+  if [[ -f "$apps_terminals" ]] && command -v xdg-terminal-exec >/dev/null; then exec xdg-terminal-exec "$@"; fi
+  if command -v foot >/dev/null; then exec foot "$@"; fi
+  if command -v xdg-terminal-exec >/dev/null; then exec xdg-terminal-exec "$@"; fi
+  takumi notice term "No terminal is installed" "" >/dev/null 2>&1 || true
+  echo "No terminal is installed" >&2; exit 3
+fi
+if ! id=$(apps_default "$kind"); then
+  takumi notice "$(apps_kind_glyph "$kind")" "No app opens $(apps_kind_what "$kind")" "type default in the Core to choose one" >/dev/null 2>&1 || true
+  echo "No app opens $(apps_kind_what "$kind"). Type default in the Core to choose one." >&2; exit 3
+fi
+exec gio launch "$(apps_path "$id")" "$@"

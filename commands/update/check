@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Look for updates and remember how many are waiting; by itself once a day, on a network that is not metered
+usage: [--auto | --local]
+example: takumi update check
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/rooms.sh"; . "$l/core.sh"; break; }; done
+declare -F updates_ready >/dev/null && declare -F rooms_current >/dev/null && declare -F core_done >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# checkupdates (pacman-contrib) syncs a copy of the package lists in /tmp and compares it with what is
+# installed, so nothing changes on the computer and no password is needed. It only asks the mirrors pacman
+# already uses. What it finds goes to ~/.local/state/takumi/updates.json, which the Core, Today and the Palette
+# read: {count, checked (epoch), important (names a person knows), ready (a new system is staged), room (the
+# one running when it was counted)}. See docs/updates.md.
+#   (none)    look now, as a conversation: "42 updates are waiting, Firefox and Linux among them"
+#   --auto    takumi-update-check.timer, every hour: looks when a day has passed since the last look, only
+#             online and not on a metered connection, and says "Updates are ready: 42" once a day at most
+#   --local   no network: what is ready, a count gone stale because the running system changed, and what is
+#             left after an update made in place
+# Exit status: 0 · 1 it could not look (no pacman-contrib, no answer from the mirrors) · 2 usage.
+mode=manual
+case "${1:-}" in "") ;; --auto) mode=auto ;; --local) mode=local ;; *) echo "usage: takumi update check [--auto|--local]" >&2; exit 2 ;; esac
+state="$HOME/.local/state/takumi"; told="$state/updates-told"
+now=$(clock_now); cur=$(rooms_current 2>/dev/null || true)
+ready=false; if updates_ready >/dev/null; then ready=true; fi
+
+# The packages a person would know by name, from checkupdates' lines ("firefox 132.0-1 -> 133.0-1").
+important() {
+  awk '{ print $1 }' | while read -r p; do
+    case "$p" in
+      linux|linux-lts|linux-zen|linux-hardened) echo Linux ;;
+      firefox) echo Firefox ;; chromium) echo Chromium ;;
+      mesa|vulkan-radeon|vulkan-intel) echo "graphics drivers" ;; nvidia|nvidia-open|nvidia-utils|nvidia-open-dkms) echo "NVIDIA drivers" ;;
+      linux-firmware) echo "device firmware" ;; libreoffice-fresh) echo LibreOffice ;; niri|quickshell) echo "the desktop" ;;
+    esac
+  done | awk '!seen[$0]++' | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+write() {  # <count> <important as JSON> <checked>
+  mkdir -p "$state"
+  jq -cn --argjson count "$1" --argjson important "$2" --argjson checked "$3" --argjson ready "$ready" --arg room "$cur" \
+    '{count: $count, checked: $checked, important: $important, ready: $ready, room: $room}' > "$updates_file.tmp"
+  mv "$updates_file.tmp" "$updates_file"
+}
+# "Firefox and Linux among them"
+among() {
+  jq -r 'if length == 0 then "" elif length == 1 then .[0] + " among them" else (.[0:-1] | join(", ")) + " and " + .[-1] + " among them" end' <<< "$1"
+}
+count=$(updates_get count); count=${count:-0}
+checked=$(updates_get checked); checked=${checked:-0}
+imp=$(jq -c '.important // []' "$updates_file" 2>/dev/null || echo '[]')
+# The running room is not the one counted against: an update was used or undone, so the count is stale.
+if [[ -n "$(updates_get room)" && "$(updates_get room)" != "$cur" ]]; then count=0; checked=0; imp='[]'; fi
+
+if [[ $mode == local ]]; then
+  # Recounted against the package lists the last look fetched (checkupdates --nosync, no network): after an
+  # update made in place, what is left; with rooms, the same until the restart.
+  if (( checked > 0 )) && command -v checkupdates >/dev/null; then
+    rc=0; out=$(checkupdates --nosync 2>/dev/null) || rc=$?
+    if (( rc == 0 || rc == 2 )); then list=$(grep -e ' -> ' <<< "$out" || true); count=$(grep -c . <<< "$list" || true); imp=$(important <<< "$list"); fi
+  fi
+  write "$count" "$imp" "$checked"; exit 0
+fi
+if [[ $mode == auto ]]; then
+  if (( now - checked < 72000 )) || ! updates_online || updates_metered || ! command -v checkupdates >/dev/null; then
+    [[ -s "$updates_file" ]] && write "$count" "$imp" "$checked"
+    exit 0
+  fi
+  mkdir -p "$clock_cache"; exec 8> "$clock_cache/takumi-update-check.lock"
+  command -v flock >/dev/null && { flock -n 8 || exit 0; }
+else
+  command -v checkupdates >/dev/null || core_fail 1 "Looking for updates needs pacman-contrib"
+  core_note "Looking for updates…"
+fi
+rc=0; out=$(checkupdates 2>/dev/null) || rc=$?
+case $rc in
+  0|2) ;;
+  *) [[ $mode == auto ]] && exit 0; core_fail 1 "The package mirrors did not answer: try again when the internet works" ;;
+esac
+list=$(grep -e ' -> ' <<< "$out" || true)
+n=$(grep -c . <<< "$list" || true)
+imp=$(important <<< "$list")
+write "$n" "$imp" "$now"
+
+if [[ $mode == manual ]]; then
+  w=$(among "$imp"); w=${w:+, $w}
+  if [[ $ready == true ]]; then core_done "An update is ready: restart to use it"
+  elif (( n == 0 )); then core_done "Takumi is up to date"
+  elif (( n == 1 )); then core_done "1 update is waiting$w"
+  else core_done "$n updates are waiting$w"; fi
+  exit 0
+fi
+# Once a day at most, and not when a new system is already staged (prepare says that itself).
+if (( n == 0 )) || [[ $ready == true ]]; then exit 0; fi
+[[ "$(cat "$told" 2>/dev/null || true)" != "$(clock_today)" ]] || exit 0
+clock_today > "$told"
+if command -v notify-send >/dev/null; then
+  act=$(timeout 60 notify-send -a Takumi -i system-software-update -A "default=Update" "Updates are ready: $n" "Press to update" 2>/dev/null || true)
+  if [[ "$act" == default ]]; then qs -c takumi ipc --any-display call core search update >/dev/null 2>&1 || true; fi
+else
+  takumi notice restart "Updates are ready: $n" "type update in the Core" -1 6 >/dev/null 2>&1 || true
+fi
+exit 0

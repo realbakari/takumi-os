@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Contract checks for firmware (commands/firmware/main, the Palette's firmware rows) against a fake
+# fwupd: only on the charger, never during an update, one question naming every device, and the answer.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; firmware checks skipped)"; exit 0; }
+command -v flock >/dev/null || { echo "   (flock not installed; firmware checks skipped)"; exit 0; }
+repo=$PWD; status=0; n=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-fw.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export HOME=$t FAKE=$t/state XDG_RUNTIME_DIR=$t/run TAKUMI_POWER_SUPPLY=$t/ps PATH="$t/bin:$repo/bin:$PATH"
+mkdir -p "$t/bin" "$FAKE" "$t/run" "$t/ps/AC"; echo 1 > "$t/ps/AC/online"
+printf '#!/bin/sh\nexit 0\n' > "$t/commands/notice/main"; chmod +x "$t/commands/notice/main"
+cat > "$t/bin/fwupdmgr" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  refresh) exit 0 ;;
+  get-updates) cat "$FAKE/updates" ;;
+  get-devices) echo '{"Devices":[{"Name":"System Firmware","DeviceId":"abc","Version":"1.2","Flags":["updatable","internal"]},{"Name":"Webcam","Version":"9","Flags":["internal"]}]}' ;;
+  update) echo "Successfully installed firmware"; [[ -f "$FAKE/reboot" ]] && echo "An update requires a reboot to complete."; exit 0 ;;
+esac
+FAKE
+chmod +x "$t/bin/fwupdmgr"
+echo '{"Devices":[{"Name":"System Firmware","Releases":[{"Version":"1.3"}]},{"Name":"Dock","Releases":[{"Version":"2.0"}]},{"Name":"Webcam","Releases":[]}]}' > "$FAKE/updates"
+check() { n=$((n + 1)); if ! eval "$2"; then echo "   FAIL: $1"; status=1; fi; }
+
+out=$(printf 'yes\n' | TAKUMI_CORE=1 takumi firmware 2>&1 || true)
+check "one question names every device with an update" 'grep -q "^confirm Update the firmware of System Firmware, Dock? Keep the computer on and plugged in until it is done.$" <<< "$out"'
+check "a yes updates and says what" 'grep -q "^done Firmware updated: System Firmware, Dock.$" <<< "$out"'
+touch "$FAKE/reboot"; out=$(printf 'yes\n' | TAKUMI_CORE=1 takumi firmware 2>&1 || true); rm -f "$FAKE/reboot"
+check "a restart to finish is said" 'grep -q "^done Firmware updated. Restart when it suits you to finish.$" <<< "$out"'
+out=$(printf 'no\n' | TAKUMI_CORE=1 takumi firmware 2>&1) && rc=0 || rc=$?
+check "a no changes nothing" '[[ $rc -ne 0 ]] && grep -q "^Nothing changed.$" <<< "$out"'
+echo '{"Devices":[]}' > "$FAKE/updates"
+check "nothing to do says so" '[[ "$(TAKUMI_CORE=1 takumi firmware < /dev/null 2>&1 | tail -n 1)" == "done The firmware is up to date." ]]'
+echo 0 > "$t/ps/AC/online"
+out=$(TAKUMI_CORE=1 takumi firmware < /dev/null 2>&1) && rc=0 || rc=$?
+check "never on battery" '[[ $rc -ne 0 ]] && grep -q "Plug in the charger first" <<< "$out"'
+echo 1 > "$t/ps/AC/online"
+exec 8> "$XDG_RUNTIME_DIR/takumi-update.lock"; flock -n 8
+out=$(TAKUMI_CORE=1 takumi firmware < /dev/null 2>&1) && rc=0 || rc=$?
+check "never while an update is being prepared" '[[ $rc -ne 0 ]] && grep -q "An update is being prepared" <<< "$out"'
+exec 8>&-
+rows=$(takumi palette firmware bios)
+check "bios finds the updatable devices only" '[[ "$(jq -r .title <<< "$rows")" == "System Firmware" ]]'
+check "other searches leave it quiet" '[[ -z "$(takumi palette firmware firefox)" ]]'
+echo "   $n firmware checks against a fake fwupd"
+exit $status

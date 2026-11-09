@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Connect to a VPN; asks for its username and password when it needs them
+usage: <name>
+example: takumi vpn on Work
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/vpn.sh" ]] && { . "$l/vpn.sh"; . "$l/core.sh"; break; }; done
+declare -F vpn_up >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh): in the Core a wrong password is asked for again. Exit status, for scripts: 0
+# connected · 3 an answer was needed and none came · 4 the username or password did not work · 5 no VPN by that
+# name · 1 anything else. The last line says it in words.
+name=${1:-}; [[ -n "$name" ]] || { echo "usage: takumi vpn on <name>" >&2; exit 2; }
+command -v nmcli >/dev/null || core_fail 1 "NetworkManager is not installed"
+uuid=$(vpn_uuid "$name"); [[ -n "$uuid" ]] || core_fail 5 "There is no VPN called $name"
+[[ "$(vpn_state "$uuid")" == activated ]] && { core_done "Already connected to VPN $name"; exit 0; }
+needs=$(vpn_needs "$uuid")
+# A profile that keeps no username or password yet (an OpenVPN import leaves the password to a keyring) asks first.
+if [[ "$needs" == *username* ]] || { [[ -n "$needs" ]] && ! vpn_keeps_password "$uuid"; }; then
+  vpn_ask "$uuid" "$name" no "VPN $name needs your password"
+fi
+tries=0
+while :; do
+  core_note "Connecting to VPN $name…"
+  rc=0; vpn_up "$uuid" || rc=$?
+  (( rc == 0 )) && { core_done "Connected to VPN $name"; exit 0; }
+  (( rc == 4 )) || core_fail 1 "Could not connect to VPN $name${vpn_reason:+: $vpn_reason}"
+  [[ -n "$needs" ]] || core_fail 4 "VPN $name asks for something Takumi cannot answer yet, such as a one-time code"
+  core_wrong "That username or password did not work"
+  tries=$((tries + 1))
+  (( tries == 1 )) || core_in_core || core_fail 4 "That username or password did not work"
+  vpn_ask "$uuid" "$name" yes "That username or password did not work"
+done

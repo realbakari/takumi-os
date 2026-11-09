@@ -1,0 +1,4 @@
+# Takumi: the microphone-mute light follows the microphone in use (takumi-micled.service, docs/laptop-keys.md). People
+# in the wheel group, which everyone Takumi's setup makes is in, may switch the light: this makes
+# /sys/class/leds/<name>::micmute/brightness and /sys/class/leds/<name>::micmute/trigger writable by that group.
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="*::micmute", RUN+="/usr/bin/chgrp wheel /sys%p/brightness /sys%p/trigger", RUN+="/usr/bin/chmod g+w /sys%p/brightness /sys%p/trigger"

@@ -1,0 +1,16 @@
+# Intel graphics, built in or Arc: Vulkan (Mesa's ANV) and Intel's video decoder for VA-API (iHD), which
+# covers Broadwell and later. libva tries iHD first and the older driver after it.
+# Intel: https://github.com/intel/media-driver (supported platforms), https://github.com/intel/libva
+# Mesa: https://docs.mesa3d.org/drivers/anv.html
+title = "Intel graphics"
+part = "graphics"
+says = "works, with video decoding"
+
+[match]
+pci = ["8086:*"]
+pci_class = ["03??"]
+arch = ["x86_64"]
+
+[apply]
+packages = ["vulkan-intel", "lib32-vulkan-intel", "intel-media-driver"]
+note = "Intel's graphics work with the drivers in Linux. This adds Vulkan for games and apps, and Intel's video decoder, so films play without warming the computer."

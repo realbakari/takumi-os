@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Arrows, boxes, words, highlights and blur on a screenshot; the result is copied and saved beside it
+usage: [file]
+example: takumi screen markup
+example: takumi screen markup ~/Pictures/Screenshots/receipt.png
+risk: 0
+title: Mark up the last screenshot
+words: markup mark up annotate draw arrow highlight blur redact crop edit screenshot snip sketch
+glyph: edit
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/capture.sh" ]] && { . "$l/capture.sh"; break; }; done
+declare -F capture_markup >/dev/null || { echo "takumi: the capture library is missing" >&2; exit 1; }
+
+# The newest screenshot, or the picture named, opens in satty (lib/capture.sh, capture_markup). Enter or Esc keeps
+# the work as "<name> marked.png" beside the picture and on the clipboard; closing the window keeps nothing.
+# Exit status: 0 marked up, or closed without keeping anything · 1 satty is not here · 2 usage · 3 no picture.
+usage() { echo "usage: takumi screen markup [file]" >&2; exit 2; }
+(( $# <= 1 )) || usage
+file=${1:-}
+[[ "$file" != -* ]] || usage
+if [[ -z "$file" ]]; then
+  file=$(capture_newest_shot)
+  if [[ -z "$file" ]]; then
+    capture_notice shot "No screenshot to mark up yet" "take one with Super+Shift+4" -1
+    echo "No screenshot to mark up yet" >&2; exit 3
+  fi
+fi
+[[ -f "$file" && -r "$file" ]] || { echo "No picture at $file" >&2; exit 3; }
+if ! command -v satty >/dev/null; then
+  capture_notice warn "Marking up needs satty" "it comes with Takumi's desktop packages" -1
+  echo "Marking up needs satty" >&2; exit 1
+fi
+if out=$(capture_markup "$file"); then
+  capture_notice --open "$out" edit "Marked up and copied" "saved beside the screenshot · press to open" -1 5
+  printf '%s\n' "$out"
+else
+  echo "Nothing was kept"
+fi

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Block an app at the firewall again, so other devices cannot reach it
+usage: <app>
+example: takumi firewall deny LocalSend
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/firewall.sh" ]] && { . "$l/firewall.sh"; . "$l/core.sh"; break; }; done
+declare -F firewall_find >/dev/null && declare -F core_done >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh): blocking needs no question, only the password. It takes away the app's own rule;
+# the firewall's default, turning away whatever nobody allowed, does the rest. Exit status: 0 blocked · 1 nothing
+# changed · 2 usage · 5 no app by that name.
+word=${1:-}; [[ -n "$word" ]] || { echo "usage: takumi firewall deny <app>" >&2; exit 2; }
+firewall_installed || core_fail 1 "The firewall is not set up: takumi firewall on sets it up"
+app=$(firewall_find "$word") || core_fail 5 "The firewall knows no app called $word"
+core_note "Blocking $app…"
+out=$(core_sudo "Changing the firewall needs your password" takumi firewall apply deny "$app" 2>&1) ||   # /etc/ufw/user.rules, /etc/ufw/user6.rules, /etc/takumi/firewall
+  core_fail 1 "$app is not blocked: $(sed -e 's/^ERROR: //' -e 's/^sudo: //' <<< "$out" | sed '/^[[:space:]]*$/d' | tail -n 1)"
+core_done "$app is blocked again"

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Make a web app: a site in its own window, with its own icon, found in the Core like any app
+usage: <address> [name]
+example: takumi app web https://web.whatsapp.com WhatsApp
+risk: 0
+converse: yes
+words: web app website site pwa window
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; . "$l/core.sh"; break; }; done
+declare -F apps_web_write >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh, docs/apps.md). The site opens in a Chromium-family browser's app mode. When
+# the browsers here have no app mode (Firefox has none), it offers to get Chromium from Flathub, just for
+# you, or to open the site in GNOME Web, whose menu installs a site as an app. Exit status: 0 made · 2 not a
+# web address · 3 an answer was needed and none came, or no · 5 no browser could open it as an app · 1
+# anything else. The last line says it in words.
+url=${1:-}; name=${2:-}
+[[ -n "$url" ]] || core_fail 2 "usage: takumi app web <address> [name]"
+[[ "$url" == *://* ]] || url="https://$url"
+apps_url_ok "$url" || core_fail 2 "That is not a web address: $1"
+host=$(apps_url_host "$url")
+log="$apps_state/app-get.log"; mkdir -p "$apps_state"
+
+# get <flathub id> <name>: an app from Flathub, just for you, waited for.
+get() {
+  command -v flatpak >/dev/null || return 1
+  core_note "Getting $2 from Flathub…"
+  flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo >> "$log" 2>&1 &&
+    flatpak install --user --noninteractive -y flathub "$1" >> "$log" 2>&1
+}
+
+if ! browser=$(apps_web_browser); then
+  def=$(apps_default browser 2>/dev/null || true); defname=$(apps_name "${def:-firefox.desktop}")
+  if core_confirm "$defname has no app mode, so web apps open in Chromium. Get Chromium from Flathub, just for you?"; then
+    get org.chromium.Chromium Chromium || core_fail 5 "Chromium did not install. What happened is in $log"
+    browser=$(apps_web_browser) || core_fail 5 "Chromium is installed, but its entry cannot be found"
+  elif core_confirm "Open ${name:-$host} in GNOME Web instead? Its menu installs a site as an app."; then
+    if ! apps_path org.gnome.Epiphany.desktop >/dev/null; then
+      get org.gnome.Epiphany "GNOME Web" || core_fail 5 "GNOME Web did not install. What happened is in $log"
+    fi
+    web=$(apps_path org.gnome.Epiphany.desktop) || core_fail 5 "GNOME Web is installed, but its entry cannot be found"
+    gio launch "$web" "$url" >/dev/null 2>&1 || core_fail 1 "GNOME Web did not open"
+    core_done "In GNOME Web, open the menu and choose Install as Web App"
+    exit 0
+  else
+    core_fail 3 "Nothing changed"
+  fi
+fi
+bid=${browser%%$'\t'*}; prefix=${browser#*$'\t'}
+
+# A name: the one given, else the site's own short name, else one made from its address.
+if [[ -z "$name" ]]; then
+  core_note "Looking at $host…"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/takumi-web.XXXXXX")
+  final=$(apps_fetch "$url" "$tmp/page" || true)
+  if [[ -s "$tmp/page" ]] && apps_same_site "$host" "$(apps_url_host "${final:-$url}")"; then name=$(apps_page_name "$tmp/page"); fi
+  rm -rf "$tmp"
+  [[ -n "$name" ]] || name=$(apps_host_name "$host")
+fi
+slug=$(apps_slug "$name"); [[ -n "$slug" ]] || slug=$(apps_slug "$host")
+
+core_note "Making $name…"
+icon=$(apps_web_icon "$url" "$slug" "$name")
+apps_web_write "$slug" "$name" "$url" "$bid" "$prefix" "$icon" "$name on the web, in its own window" ||
+  core_fail 1 "$name could not be made: $(apps_name "$bid") cannot be started from here"
+core_done "$name is ready: find it in the Core"

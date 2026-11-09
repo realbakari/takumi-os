@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# Contract checks for the firewall (lib/firewall.sh, commands/firewall/*, install/steps/25-firewall.sh and the
+# Palette's firewall rows) against a fake ufw, sudo and systemd in a folder that stands in for /etc: what the step
+# sets in a chroot and on a running computer, the rows and their words, the question before an app is let in, one
+# password for each change, and the note the Core reads.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; firewall checks skipped)"; exit 0; }
+repo=$PWD; status=0; n=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-firewall.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home TAKUMI_FIREWALL_ETC=$t/etc TAKUMI_FIREWALL_UNITS=$t/units TAKUMI_PATH=$repo
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$t/commands/notice"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"   # fake takumi commands go in front of the real ones
+printf '#!/bin/sh\nexit 0\n' > "$t/commands/notice/main"
+
+# ufw answers from the stand-in /etc and keeps its rules in $FAKE/rules, one `ufw show added` line each.
+cat > "$t/ufw" <<'FAKE'
+#!/usr/bin/env bash
+printf 'ufw %s\n' "$*" >> "$FAKE/calls"
+e=$TAKUMI_FIREWALL_ETC
+profile() { grep -qxF "[$1]" "$e"/ufw/applications.d/* 2>/dev/null; }
+line() { if [[ "$1" == *" "* ]]; then printf "ufw allow '%s'\n" "$1"; else printf 'ufw allow %s\n' "$1"; fi; }
+set_key() { sed "s/^$2=.*/$2=$3/" "$1" > "$1.new" && mv "$1.new" "$1"; }
+case "$*" in
+  "show added") echo "Added user rules (see 'ufw status' for running firewall):"; if [[ -s "$FAKE/rules" ]]; then cat "$FAKE/rules"; else echo "(None)"; fi ;;
+  "default deny incoming") set_key "$e/default/ufw" DEFAULT_INPUT_POLICY '"DROP"' ;;
+  "default allow outgoing") set_key "$e/default/ufw" DEFAULT_OUTPUT_POLICY '"ACCEPT"' ;;
+  "--force enable") set_key "$e/ufw/ufw.conf" ENABLED yes; echo "Firewall is active and enabled on system startup" ;;
+  disable) set_key "$e/ufw/ufw.conf" ENABLED no; echo "Firewall stopped and disabled on system startup" ;;
+  "delete allow "*)
+    all="$*"; l=$(line "${all#delete allow }")
+    if grep -qxF "$l" "$FAKE/rules" 2>/dev/null; then grep -vxF "$l" "$FAKE/rules" > "$FAKE/rules.new" || true; mv "$FAKE/rules.new" "$FAKE/rules"; echo "Rule deleted"
+    else echo "Could not delete non-existent rule"; fi ;;
+  "allow "*)
+    all="$*"; a=${all#allow }
+    profile "$a" || { echo "ERROR: Could not find a profile matching '$a'"; exit 1; }
+    l=$(line "$a"); grep -qxF "$l" "$FAKE/rules" 2>/dev/null || echo "$l" >> "$FAKE/rules"; echo "Rule added" ;;
+  *) echo "fake ufw: unexpected: $*" >&2; exit 99 ;;
+esac
+FAKE
+# sudo says why it asked and runs the rest as given; GNU's sed -i is spelled out, for macOS.
+cat > "$t/bin/sudo" <<'FAKE'
+#!/usr/bin/env bash
+while [[ "${1:-}" == -* ]]; do shift; done
+printf 'sudo[%s] %s\n' "${TAKUMI_SUDO_WHY:-}" "$*" >> "$FAKE/calls"
+if [[ "$1" == sed && "$2" == -i ]]; then f=${!#}; sed "$3" "$f" > "$f.new" && mv "$f.new" "$f"; exit; fi
+exec "$@"
+FAKE
+cat > "$t/bin/systemctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "$FAKE/calls"
+case "$*" in
+  "is-enabled ufw.service") cat "$FAKE/unit"; [[ "$(cat "$FAKE/unit")" == enabled ]] ;;
+  "enable ufw.service") echo enabled > "$FAKE/unit" ;;
+esac
+FAKE
+printf '#!/bin/sh\n[ "$(cat "$FAKE/chroot")" = yes ]\n' > "$t/bin/systemd-detect-virt"
+printf '#!/bin/sh\ncat "$FAKE/flatpaks"\n' > "$t/bin/flatpak"
+printf '#!/bin/sh\nprintf "pacman %%s\\n" "$*" >> "$FAKE/calls"\ncp "%s/ufw" "%s/bin/ufw"\n' "$t" "$t" > "$t/bin/pacman"
+chmod +x "$t/ufw" "$t/bin/"* "$t/commands/notice/main"
+
+reset() {
+  rm -rf "${FAKE:?}"/* "${TAKUMI_FIREWALL_ETC:?}" "${TAKUMI_FIREWALL_UNITS:?}"
+  mkdir -p "$t/etc/ufw/applications.d" "$t/etc/default" "$t/units"
+  printf '# /etc/ufw/ufw.conf\nENABLED=no\nLOGLEVEL=low\n' > "$t/etc/ufw/ufw.conf"
+  printf 'IPV6=yes\nDEFAULT_INPUT_POLICY="ACCEPT"\nDEFAULT_OUTPUT_POLICY="ACCEPT"\n' > "$t/etc/default/ufw"
+  printf '[SSH]\ntitle=SSH server\ndescription=SSH server\nports=22/tcp\n\n[WWW Full]\ntitle=Web Server\ndescription=Web\nports=80,443/tcp\n' > "$t/etc/ufw/applications.d/ufw-loginserver"
+  cp "$repo/etc/ufw/applications.d/takumi" "$t/etc/ufw/applications.d/takumi"
+  touch "$t/units/ufw.service"
+  cp "$t/ufw" "$t/bin/ufw"
+  echo disabled > "$FAKE/unit"; echo no > "$FAKE/chroot"; echo org.localsend.localsend_app > "$FAKE/flatpaks"
+  : > "$FAKE/calls"; : > "$FAKE/rules"
+}
+check() { n=$((n + 1)); if ! eval "$2"; then echo "   FAIL: $1"; status=1; fi; }
+lib() { bash -c '. lib/firewall.sh; "$@"' _ "$@"; }
+rows() { commands/palette/vpn "$1"; }
+talk() { local answers=$1; shift; printf '%b' "$answers" | TAKUMI_CORE=1 "$@" 2>&1; echo "rc=$?"; }
+note() { sed '/^#/d' "$t/etc/takumi/firewall" 2>/dev/null | tr '\n' '|'; }
+turned_on() {  # the firewall on, turning away what nobody allowed
+  sed "s/^ENABLED=no/ENABLED=yes/" "$t/etc/ufw/ufw.conf" > "$t/c" && mv "$t/c" "$t/etc/ufw/ufw.conf"; echo enabled > "$FAKE/unit"
+  sed 's/^DEFAULT_INPUT_POLICY=.*/DEFAULT_INPUT_POLICY="DROP"/' "$t/etc/default/ufw" > "$t/d" && mv "$t/d" "$t/etc/default/ufw"
+}
+
+# The step, in the installer's chroot: everything set from files, nothing loaded into the running kernel, and SSH
+# kept reachable on a computer whose SSH server is on.
+reset; mkdir -p "$t/etc/systemd/system/multi-user.target.wants"; touch "$t/etc/systemd/system/multi-user.target.wants/sshd.service"
+said=$(TAKUMI_IN_CHROOT=1 bash install/steps/25-firewall.sh 2>&1)
+check "the step installs Takumi's apps for ufw" 'cmp -s "$repo/etc/ufw/applications.d/takumi" "$t/etc/ufw/applications.d/takumi" && grep -q "sudo\[\] install -Dm644 .*etc/ufw/applications.d/takumi" "$FAKE/calls"'
+check "the step turns away what other devices start and lets out what this computer starts" 'grep -q "^DEFAULT_INPUT_POLICY=\"DROP\"" "$t/etc/default/ufw" && grep -q "^DEFAULT_OUTPUT_POLICY=\"ACCEPT\"" "$t/etc/default/ufw"'
+check "the step lets SSH in when the SSH server is on, before the firewall is on" '[[ "$(grep -n "ufw allow SSH" "$FAKE/calls" | head -n 1 | cut -d: -f1)" -lt "$(grep -n "enable ufw.service" "$FAKE/calls" | head -n 1 | cut -d: -f1)" ]]'
+check "in a chroot: on from the first start, nothing loaded now" 'grep -qx "ENABLED=yes" "$t/etc/ufw/ufw.conf" && [[ "$(cat "$FAKE/unit")" == enabled ]] && ! grep -q "ufw --force enable" "$FAKE/calls"'
+check "the step says what it set" '[[ "$said" == *"(ufw: deny incoming, allow outgoing)"*"SSH is let in, because this computer'"'"'s SSH server is on"*"firewall: on from the first start"* ]]'
+check "the step writes the note the Core reads" '[[ "$(note)" == "app SSH|" ]]'
+reset; said=$(bash install/steps/25-firewall.sh 2>&1)
+check "on a running computer: on now, and no SSH rule without an SSH server" 'grep -q "ufw --force enable" "$FAKE/calls" && ! grep -q "sudo\[\] sed" "$FAKE/calls" && ! grep -q "allow SSH" "$FAKE/calls" && [[ "$said" == *"firewall: on" ]]'
+reset; rm "$t/units/ufw.service"; said=$(bash install/steps/25-firewall.sh 2>&1)
+check "no service to start it with: left off, and said so" '[[ "$said" == *"left off, because ufw has no service here"* ]] && ! grep -q "enable" "$FAKE/calls"'
+reset; rm "$t/bin/ufw"; said=$(bash install/steps/25-firewall.sh 2>&1)
+check "no ufw: said, and nothing done" '[[ "$said" == "firewall: ufw is not installed; this computer has no firewall" && ! -s "$FAKE/calls" ]]'
+check "every sudo line of the step says what it touches" '[[ -z "$(grep -E "^[^#]*sudo " install/steps/25-firewall.sh | grep -vE "# (/etc/|reads)")" ]]'
+
+# What the Core reads without root.
+reset
+check "no ufw: none" '[[ "$(rm "$t/bin/ufw"; lib firewall_state)" == none ]]'
+reset
+check "off, then on, then on until a restart" '[[ "$(lib firewall_state)" == off ]] && sed "s/^ENABLED=no/ENABLED=yes/" "$t/etc/ufw/ufw.conf" > "$t/c" && mv "$t/c" "$t/etc/ufw/ufw.conf" && [[ "$(lib firewall_state)" == restart ]] && echo enabled > "$FAKE/unit" && [[ "$(lib firewall_state)" == on ]]'
+check "what comes in by default" '[[ "$(lib firewall_incoming)" == allow ]]'
+check "a word finds its app; ufw's own profiles by name; other words nothing" '[[ "$(lib firewall_find ssh)" == SSH && "$(lib firewall_find localsend)" == LocalSend && "$(lib firewall_find Steam)" == "Steam Remote Play" && "$(lib firewall_find "www full")" == "WWW Full" ]] && ! lib firewall_find zebra'
+# Written to a file: bash 3.2 misreads quotes inside $( ).
+cat > "$t/added" <<'ADDED'
+Added user rules (see 'ufw status' for running firewall):
+ufw allow LocalSend
+ufw allow 'Steam Remote Play' comment 'games'
+ufw limit SSH
+ufw allow 8080/tcp
+ufw allow out 53
+ufw route allow in on takumi-up
+ufw deny 23
+ufw allow LocalSend
+ADDED
+check "the note: apps by name, other rules in ufw's words, nothing outgoing, routed or denied" '[[ "$(lib firewall_parse_added < "$t/added" | tr "\n" "|")" == "app LocalSend|app Steam Remote Play|app SSH|rule 8080/tcp|" ]]'
+# SSH's profile comes with ufw and KDEConnect's with the kdeconnect package; the rest are Takumi's own.
+check "every app Takumi knows has a profile: its own, ufw's or the app's" '[[ "$(lib firewall_catalog | cut -d"|" -f1 | grep -vE "^(SSH|KDEConnect)$" | tr "\n" "|")" == "$(sed -n "s/^\[\(.*\)\]$/\1/p" etc/ufw/applications.d/takumi | tr "\n" "|")" ]]'
+check "every profile Takumi ships has a title, a description and ports" '[[ "$(grep -c "^title=" etc/ufw/applications.d/takumi)" == 4 && "$(grep -c "^description=" etc/ufw/applications.d/takumi)" == 4 && "$(grep -c "^ports=" etc/ufw/applications.d/takumi)" == 4 ]]'
+
+# The rows.
+reset; turned_on
+mkdir -p "$t/etc/takumi"; printf '# note\napp SSH\n' > "$t/etc/takumi/firewall"
+r=$(rows firewall)
+check "rows are JSON with an id, a title and a kind" '[[ -n "$r" ]] && jq -e "select(.id and .title and .kind) | true" <<< "$r" >/dev/null'
+check "Firewall · On · 1 app allowed" '[[ "$(jq -r "select(.id == \"firewall:status\") | .title + \" · \" + .subtitle" <<< "$r")" == "Firewall · On · 1 app allowed" ]]'
+check "an app let in can be blocked, one here can be let in, and one not here stays out" '[[ "$(jq -r "select(.id | startswith(\"firewall:app:\")) | .title + \" · \" + .subtitle" <<< "$r" | tr "\n" "|")" == "Allow LocalSend · Receives files from nearby devices · blocked now|Block SSH · Lets other computers log in to this one · allowed now|" ]]'
+check "app rows are conversations that ask" '[[ "$(jq -c "select(.id == \"firewall:app:LocalSend\") | [.converse, .risk, .run]" <<< "$r")" == "[true,1,[\"takumi\",\"firewall\",\"allow\",\"LocalSend\"]]" ]]'
+check "turning it off is there, and asks" '[[ "$(jq -c "select(.id == \"firewall:off\") | [.title, .risk]" <<< "$r")" == "[\"Turn the firewall off\",1]" ]]'
+check "an app's name finds its row, and only that" '[[ "$(rows localsend | jq -r .title)" == "Allow LocalSend" && -z "$(rows zebra)" ]]'
+check "two letters find nothing, nor a word about something else" '[[ -z "$(rows lo)" && -z "$(rows files)" ]]'
+printf 'app SSH\nrule 8080/tcp\n' > "$t/etc/takumi/firewall"
+check "other rules are counted too" '[[ "$(rows firewall | jq -r "select(.id == \"firewall:status\") | .subtitle")" == "On · 1 app and 1 more rule allowed" ]]'
+echo disabled > "$FAKE/unit"
+check "on only until a restart: Enter keeps it on" '[[ "$(rows firewall | jq -c "select(.id == \"firewall:status\") | [.subtitle, .run]")" == "[\"On until the computer restarts · Enter keeps it on\",[\"takumi\",\"firewall\",\"on\"]]" ]]'
+reset
+check "off: Enter turns it on, in the Core" '[[ "$(rows firewall | jq -c "select(.id == \"firewall:status\") | [.subtitle, .converse, .run]")" == "[\"Off · other devices can connect to this computer · Enter turns it on\",true,[\"takumi\",\"firewall\",\"on\"]]" && -z "$(rows firewall | jq -r "select(.id == \"firewall:off\")")" ]]'
+rm "$t/bin/ufw"
+check "no firewall: Enter sets it up, and no app rows" '[[ "$(rows firewall | jq -r ".title + \" · \" + .subtitle")" == "Firewall · Not set up · Enter sets it up" ]]'
+
+# The conversations: one question before letting an app in, one password for each change, and the note after.
+reset
+said=$(talk 'yes\n' commands/firewall/allow localsend)
+check "letting an app in asks what it does first" '[[ "$(head -n 1 <<< "$said")" == "confirm LocalSend receives files from nearby devices. Allow it?" ]]'
+check "a yes lets it in, with the password asked once, and says so" 'grep -qx "ufw allow LocalSend" "$FAKE/calls" && [[ "$(grep -c "^sudo\[Changing the firewall needs your password\] takumi firewall apply allow LocalSend$" "$FAKE/calls")" == 1 ]] && [[ "$(tail -n 2 <<< "$said" | tr "\n" "|")" == "done LocalSend may be reached through the firewall now|rc=0|" ]]'
+check "the note says LocalSend is let in" '[[ "$(note)" == "app LocalSend|" ]]'
+said=$(talk 'no\n' commands/firewall/allow steam)
+check "a no changes nothing" '[[ "$said" == "confirm Steam Remote Play streams your games to other devices on this network. Allow it?"*"Nothing changed"*"rc=1" ]] && ! grep -q "allow Steam" "$FAKE/calls"'
+said=$(talk 'yes\n' commands/firewall/allow steam)
+check "a name with spaces is one app" '[[ "$(note)" == "app LocalSend|app Steam Remote Play|" ]]'
+said=$(talk '' commands/firewall/allow zebra)
+check "an app nobody knows: 5" '[[ "$said" == *"The firewall knows no app called zebra"*"rc=5" ]]'
+grep -v Sunshine "$t/etc/ufw/applications.d/takumi" > "$t/p"; mv "$t/p" "$t/etc/ufw/applications.d/takumi"
+said=$(talk 'yes\n' commands/firewall/allow sunshine)
+check "an app whose profile is missing: said, and nothing asked" '[[ "$said" == "The firewall does not know Sunshine on this computer yet"*"rc=1" ]]'
+said=$(talk '' commands/firewall/deny LocalSend)
+check "blocking asks nothing, takes the rule away and says so" 'grep -qx "ufw delete allow LocalSend" "$FAKE/calls" && [[ "$said" == *"done LocalSend is blocked again"*"rc=0" ]] && [[ "$(note)" == "app Steam Remote Play|" ]]'
+said=$(talk '' commands/firewall/deny LocalSend)
+check "blocking what is blocked is no failure" '[[ "$said" == *"done LocalSend is blocked again"*"rc=0" ]]'
+
+reset; rm "$t/bin/ufw"
+said=$(talk '' commands/firewall/on)
+check "on: installs ufw when missing, with the same password" 'grep -q "^pacman -S --needed --noconfirm ufw$" "$FAKE/calls" && [[ "$(grep -c "^sudo\[Turning the firewall on needs your password\]" "$FAKE/calls")" == 2 ]]'
+check "on: in from nobody, out for everything, on now and with the computer" 'grep -q "^DEFAULT_INPUT_POLICY=\"DROP\"" "$t/etc/default/ufw" && grep -qx "ENABLED=yes" "$t/etc/ufw/ufw.conf" && [[ "$(cat "$FAKE/unit")" == enabled ]] && [[ "$said" == *"done The firewall is on: other devices cannot connect unless you allow an app"*"rc=0" ]]'
+check "on: the state reads on" '[[ "$(lib firewall_state)" == on && "$(lib firewall_incoming)" == deny ]]'
+said=$(talk 'no\n' commands/firewall/off)
+check "off asks first; a no keeps it on" '[[ "$said" == "confirm Other devices on the network could then connect to anything this computer offers. Turn the firewall off?"*"Nothing changed"*"rc=1" ]] && [[ "$(lib firewall_state)" == on ]]'
+said=$(talk 'yes\n' commands/firewall/off)
+check "off: a yes turns it off" '[[ "$said" == *"done The firewall is off"*"rc=0" ]] && [[ "$(lib firewall_state)" == off ]]'
+
+# What takumi firewall says.
+reset; turned_on
+mkdir -p "$t/etc/takumi"; printf 'app LocalSend\nrule 8080/tcp\n' > "$t/etc/takumi/firewall"
+out=$(takumi firewall)
+check "takumi firewall in words" '[[ "$out" == "The firewall is on: other devices cannot connect to this computer, except as below.
+Allowed: LocalSend (receives files from nearby devices).
+Also let in: 8080/tcp." ]]'
+check "and as JSON" '[[ "$(takumi firewall --json)" == "{\"state\":\"on\",\"incoming\":\"deny\",\"apps\":[\"LocalSend\"],\"rules\":[\"8080/tcp\"]}" ]]'
+check "in the Core, one sentence" '[[ "$(TAKUMI_CORE=1 takumi firewall </dev/null)" == "done The firewall is on; LocalSend may be reached" ]]'
+check "every root change in the commands names its files" '[[ -z "$(grep -hE "core_sudo \"[^\"]*\" takumi|run admin " commands/firewall/* | grep -v "# ")" ]]'
+
+# Remote help (takumi screen remote): wayvnc for this session, a password made for it, the firewall open only while
+# it runs. wayvnc is a process that waits; systemd-run starts it and says its pid; wayvncctl answers while it runs.
+export XDG_RUNTIME_DIR=$t/run
+cat > "$t/bin/systemd-run" <<'FAKE'
+#!/usr/bin/env bash
+printf 'systemd-run %s\n' "$*" >> "$FAKE/calls"
+[[ -e "$FAKE/wayvnc-fail" ]] && exit 1
+sleep 300 > /dev/null 2>&1 & echo $! > "$FAKE/wayvnc-pid"
+FAKE
+cat > "$t/bin/systemctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "$FAKE/calls"
+case "$*" in
+  "is-enabled ufw.service") cat "$FAKE/unit"; [[ "$(cat "$FAKE/unit")" == enabled ]] ;;
+  "enable ufw.service") echo enabled > "$FAKE/unit" ;;
+  "--user show -p MainPID --value takumi-remote.service") cat "$FAKE/wayvnc-pid" 2>/dev/null || echo 0 ;;
+  "--user stop takumi-remote.service") kill "$(cat "$FAKE/wayvnc-pid" 2>/dev/null)" 2>/dev/null; rm -f "$FAKE/wayvnc-pid" ;;
+esac
+exit 0
+FAKE
+cat > "$t/bin/wayvncctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'wayvncctl %s\n' "$*" >> "$FAKE/calls"
+kill -0 "$(cat "$FAKE/wayvnc-pid" 2>/dev/null)" 2>/dev/null || exit 1
+case "${!#}" in version) echo "wayvnc: v0.10.2" ;; client-list) cat "$FAKE/clients" 2>/dev/null || echo "[]" ;; esac
+FAKE
+printf '#!/bin/sh\nexit 0\n' > "$t/bin/wayvnc"
+printf '#!/bin/sh\nfor a; do f=$a; done; printf "key" > "$f"\n' > "$t/bin/ssh-keygen"
+printf '#!/bin/sh\necho "2: wlp1s0    inet 192.168.1.20/24 brd 192.168.1.255 scope global dynamic noprefixroute wlp1s0"\n' > "$t/bin/ip"
+printf '#!/bin/sh\n[ "$*" = "msg --json focused-output" ] && echo "{\\"name\\":\\"eDP-1\\"}"\nexit 0\n' > "$t/bin/niri"
+printf '#!/bin/sh\nprintf "qs %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/bin/qs"
+chmod +x "$t/bin/"*
+remote_reset() { reset; rm -rf "${XDG_RUNTIME_DIR:?}"; mkdir -p "$XDG_RUNTIME_DIR"; }
+remote_reset; turned_on
+said=$(talk 'no\n' commands/screen/remote on)
+check "remote help asks first; a no shares nothing" '[[ "$said" == "confirm Someone you trust will see this screen and can use its mouse and keyboard until you stop it. Let them?"*"rc=4" ]] && ! grep -q "systemd-run" "$FAKE/calls" && [[ ! -e "$XDG_RUNTIME_DIR/takumi-remote" ]]'
+said=$(talk 'yes\n' commands/screen/remote on)
+card=$(sed -n 's/^card //p' <<< "$said")
+check "on: a card with where to connect and a password of its own ($card)" '[[ "$said" == *"rc=0" && "$(jq -r .title <<< "$card")" == "Connect to 192.168.1.20" && "$(jq -r .secretLabel <<< "$card")" == Password && "$(jq -r .secret <<< "$card")" =~ ^[a-z2-9]{10}$ ]]'
+cfg=$XDG_RUNTIME_DIR/takumi-remote.d/config
+check "wayvnc for this session, on the screen in use, with the password and its key in a folder only you can read" 'grep -q "^systemd-run --user --unit=takumi-remote --collect --quiet -p PartOf=graphical-session.target .* wayvnc -C $cfg -S $XDG_RUNTIME_DIR/takumi-remote.d/ctl -o eDP-1$" "$FAKE/calls" && grep -qx "enable_auth=true" "$cfg" && grep -qx "password=$(jq -r .secret <<< "$card")" "$cfg" && grep -qx "rsa_private_key_file=rsa_key.pem" "$cfg" && [[ "$(ls -ld "$XDG_RUNTIME_DIR/takumi-remote.d" | cut -c1-10)" == drwx------ && "$(ls -l "$cfg" | cut -c1-10)" == -rw------- ]]'
+check "the password never reaches a command line" '! grep -q "$(jq -r .secret <<< "$card")" "$FAKE/calls"'
+check "the firewall lets it in by its profile, asked in the Core, and the note says so" 'grep -q "^sudo\[Letting the helper in through the firewall needs your password\] takumi firewall apply allow Remote help" "$FAKE/calls" && [[ "$(note)" == "app Remote help|" ]]'
+check "the Core is told at once, and status says on with no one connected" 'grep -qx "qs -c takumi ipc call poll refresh" "$FAKE/calls" && [[ "$(commands/screen/remote status)" =~ ^on\ [0-9]+\ 0$ ]]'
+echo '[{"id":"1","address":"192.168.1.30"}]' > "$FAKE/clients"
+check "someone connected: status counts them" '[[ "$(commands/screen/remote status)" =~ ^on\ [0-9]+\ 1$ ]]'
+r=$(commands/palette/remote "remote help" | jq -r '.title + "|" + .subtitle'); r2=$(rows firewall | jq -r 'select(.title | test("Remote")) | .title')
+check "the rows: stop it, someone is connected; the firewall offers to block it while it is in ($r)" '[[ "$r" == "Stop remote help|Someone is connected now" && "$r2" == "Block Remote help" ]]'
+said=$(talk 'yes\n' commands/screen/remote on)
+check "on again: the same card, nothing started twice" '[[ "$(sed -n "s/^card //p" <<< "$said")" == "$card" && $(grep -c "^systemd-run" "$FAKE/calls") -eq 1 ]]'
+pid=$(cat "$FAKE/wayvnc-pid")
+said=$(talk '' commands/screen/remote off)
+check "off: wayvnc stops, the password is gone, the firewall is closed again" '[[ "$said" == *"done Remote help stopped: no one can see or use this screen"*"rc=0" ]] && ! kill -0 $pid 2>/dev/null && [[ ! -e "$XDG_RUNTIME_DIR/takumi-remote.d" && ! -e "$XDG_RUNTIME_DIR/takumi-remote" && "$(note)" == "" ]]'
+rm -f "$FAKE/clients"
+r=$(commands/palette/remote "let someone help me remotely" | jq -r .title); r2=$(rows firewall | jq -r 'select(.title | test("Remote")) | .title')
+check "then the row offers it again, and the firewall row is gone ($r)" '[[ "$r" == "Let someone help remotely" && -z "$r2" ]]'
+check "other words never bring it up" '[[ -z "$(commands/palette/remote "help")$(commands/palette/remote "screenshot")" ]]'
+remote_reset
+said=$(talk 'yes\n' commands/screen/remote on)
+check "the firewall off: nothing to open, no password" '[[ "$said" == *"rc=0" ]] && ! grep -q "^sudo" "$FAKE/calls"'
+talk '' commands/screen/remote off >/dev/null
+remote_reset; turned_on; touch "$FAKE/wayvnc-fail"
+said=$(talk 'yes\n' commands/screen/remote on)
+check "wayvnc would not start: 1, said, nothing left behind" '[[ "$said" == *"Remote help would not start"*"rc=1" && ! -e "$XDG_RUNTIME_DIR/takumi-remote.d" && "$(note)" == "" ]]'
+rm -f "$FAKE/wayvnc-fail"; rm "$t/bin/wayvnc"
+said=$(talk 'yes\n' commands/screen/remote on)
+check "no wayvnc: installed from Arch with the same question" 'grep -q "^sudo\[Remote help needs wayvnc, which your password installs\] pacman -S --needed --noconfirm wayvnc openssh" "$FAKE/calls"'
+talk '' commands/screen/remote off >/dev/null
+check "every root change in remote help names its files" '[[ -z "$(grep -E "core_sudo " commands/screen/remote | grep -v "# /")" ]]'
+said=$(commands/screen/remote sideways 2>&1; echo "rc=$?")
+check "a wrong word: 2" '[[ "$said" == *"rc=2" ]]'
+
+echo "   $n firewall checks against a fake ufw"
+exit $status

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Start the last system that worked, before your latest update
+risk: 2
+sudo: yes
+converse: yes
+title: Go back to the previous system
+words: undo rollback restore previous yesterday
+glyph: clock
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/rooms.sh" ]] && { . "$l/rooms.sh"; . "$l/core.sh"; break; }; done
+declare -F rooms_current >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+# A conversation in the Core from the Palette (lib/core.sh), plain questions at a terminal.
+# yes_or_no <question>: the Core asks with Enter for yes; a terminal keeps the old default of no.
+yes_or_no() {
+  if core_in_core; then core_confirm "$1"; return; fi
+  local a; read -r -p "$1 [y/N] " a; [[ "$a" == [yY] ]]
+}
+takumi room enabled || core_fail 1 "This computer is not using rooms, so there is nothing to go back to."
+cur=$(rooms_current); target=$(rooms_previous)
+[[ -n "$target" ]] || core_fail 1 "There is no earlier system to go back to."
+core_note "Your files stay as they are; the system you use now is kept, and takumi room use $cur brings it back."
+yes_or_no "Go back to the system from $(rooms_label "$target")?" || core_fail 1 "Nothing changed."
+core_sudo "Going back to an earlier system needs your password" takumi room use "$target" >/dev/null || core_fail 1 "It could not be chosen; nothing changed."
+if yes_or_no "Done. Restart now to start it?"; then systemctl reboot; fi
+core_done "The system from $(rooms_label "$target") starts the next time you restart."
+exit 0

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Every system you can go back to: updates and restore points
+risk: 0
+title: Show systems you can go back to
+words: rooms rollback history versions restore points snapshots
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_current >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+[[ -d "$TAKUMI_TOP/@rooms" ]] || { echo "This computer is not using rooms; updates happen in place." >&2; exit 1; }
+cur=$(rooms_current); def=$(rooms_default)
+# A restore point shows its name last ("restore point" when it has none).
+printf '%-17s %-17s %-12s %-6s %-22s %s\n' ROOM WHEN STATE PINNED KERNEL NAME
+for n in $(rooms_names | sort -r); do
+  st=$(state_get "$n" status); st=${st:-unknown}
+  [[ "$n" == "$cur" ]] && st="in use"
+  [[ "$n" == "$def" && "$n" != "$cur" ]] && st="$st, next"
+  k=$(find "$(rooms_path "$n")/usr/lib/modules" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | tail -n 1)
+  name=""; [[ "$(state_get "$n" point)" == yes ]] && { name=$(state_get "$n" name); name=${name:-restore point}; }
+  when=$(rooms_label "$n"); when=${when%% (*}
+  printf '%-17s %-17s %-12s %-6s %-22s %s\n' "$n" "$when" "$st" "$(state_get "$n" pinned || true)" "${k:-?}" "$name"
+done

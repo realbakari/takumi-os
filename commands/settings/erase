@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Erase this computer: every account and its files, saved Wi-Fi, pairings and fingerprints; then it starts like new
+risk: 2
+sudo: yes
+converse: yes
+title: Erase this computer
+words: reset factory erase wipe start over sell give away remove everything accounts
+glyph: warn
+ABOUT
+#
+# A conversation in the Core (lib/core.sh): a yes, the word "erase" typed out, your password, and on an
+# encrypted disk a password for the next start, typed twice. Then, as root:
+#   now                  the disk opens with the password for the next start instead of yours; the security
+#                        chip's key and the recovery code no longer open it; the login screen stops opening
+#                        a session by itself; the next start is this room; the first start is marked and the
+#                        computer restarts.
+#   at the next start    before anyone logs in (takumi-first-start.service, takumi setup owner prepare): every
+#                        person's account and home, saved Wi-Fi, Bluetooth pairings, fingerprints, the older
+#                        rooms and the logs go, and the setup screen asks who the computer is for.
+# Not erased: the apps and Takumi itself, printers, and the disk's own key. Deleted files are not
+# overwritten; only installing again from the setup disc gives the disk a new key. See docs/setup.md.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do
+  [[ -f "$l/setup.sh" ]] && { . "$l/core.sh"; . "$l/setup.sh"; . "$l/rooms.sh"; . "$l/disk.sh"; . "$l/security.sh"; break; }
+done
+declare -F core_ask >/dev/null && declare -F disk_change_password >/dev/null && declare -F security_sudo_stdin >/dev/null \
+  || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+unit=${TAKUMI_FIRST_START_UNIT:-/usr/lib/systemd/system/takumi-first-start.service}
+
+# As root, through sudo (below). stdin: sudo's own line is gone; then your password, then the one for the next
+# start (empty when the disk is not encrypted). Exit 3: your password does not open the disk.
+if [[ "${1:-}" == --root ]]; then
+  [[ "$(id -u)" == 0 ]] || exit 1
+  IFS= read -r pass || exit 1
+  IFS= read -r temp || true
+  dev=""
+  if rooms_encrypted; then
+    dev=$(disk_luks_device)
+    [[ -n "$dev" && ${#temp} -ge 6 ]] || exit 1
+    disk_opens_with "$dev" "$pass" 0 || exit 3
+    disk_change_password "$dev" "$pass" "$temp"                   # the disk's LUKS2 header, key slot 0
+  fi
+  # The marks first, so a start from here on always finishes the erase.
+  install -d -m 755 "$(dirname "$TAKUMI_FIRST_START")"
+  if ! ( umask 077; printf '%s\n' "$temp" > "$TAKUMI_FIRST_START" ); then   # /var/lib/takumi/first-start
+    [[ -z "$dev" ]] || disk_change_password "$dev" "$temp" "$pass"   # your password opens the disk again
+    exit 1
+  fi
+  : > "$TAKUMI_ERASE_MARK"                                         # /var/lib/takumi/erase
+  # From here the erase happens whatever else fails: the next start finishes it.
+  set +e
+  if [[ -n "$dev" ]]; then
+    uuid=$(cryptsetup luksUUID "$dev")
+    if [[ -n "$(disk_tpm_tokens "$dev")" ]] || disk_opens_by_itself; then
+      disk_tpm_remove "$dev" "$temp"                               # the disk's LUKS2 header: the chip's key
+      disk_cmdline_tpm off "$uuid"                                 # /etc/kernel/cmdline
+      takumi room kernel-sync >/dev/null 2>&1 || true              # this room's kernel and entry on the ESP
+    fi
+    while read -r id slots; do
+      [[ -n "$id" ]] || continue
+      for s in $slots; do
+        [[ "$s" == 0 ]] && continue   # never the password's own slot
+        cryptsetup luksKillSlot --batch-mode --key-file=<(printf '%s' "$temp") "$dev" "$s"   # the disk's LUKS2 header: the recovery code
+      done
+      cryptsetup token remove --token-id "$id" "$dev"
+    done <<< "$(disk_recovery_tokens "$dev")"
+  fi
+  disk_autologin off                                               # /usr/share/takumi/greetd/config.toml
+  # The next start is this room, not an update prepared for later: that one goes with the other rooms.
+  cur=$(rooms_current)
+  if [[ -n "$cur" ]]; then
+    bootctl set-default "takumi-$cur.conf" >/dev/null 2>&1         # the ESP's loader settings (LoaderEntryDefault)
+    bootctl set-oneshot "" >/dev/null 2>&1                         # the ESP's loader settings (LoaderEntryOneShot)
+  fi
+  systemctl enable takumi-first-start.service >/dev/null 2>&1      # /etc/systemd/system/graphical.target.wants/takumi-first-start.service
+  systemd-run --on-active=6 --unit=takumi-erase-restart systemctl reboot >/dev/null 2>&1 || systemctl reboot
+  exit 0
+fi
+
+[[ "$(id -u)" != 0 ]] || core_fail 1 "Run this as yourself, not as root."
+[[ -f "$unit" ]] || core_fail 1 "This computer's Takumi cannot erase itself yet: update it first."
+command -v unix_chkpwd >/dev/null || core_fail 1 "This computer cannot check passwords (unix_chkpwd is missing)."
+core_confirm "Every account and its files, saved Wi-Fi, pairings and fingerprints go; apps stay. Erase this computer?" \
+  || core_fail 3 "Nothing was erased."
+word=""
+core_ask word "Type erase to erase everything" || core_fail 3 "Nothing was erased."
+word=$(printf '%s' "$word" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+[[ "$word" == erase ]] || core_fail 3 "Nothing was erased: that was not the word erase."
+
+user=$(id -un)
+pw=""
+core_secret pw "Your password" || core_fail 3 "Nothing was erased."
+for try in 1 2 3; do
+  security_password_is "$user" "$pw" && break
+  pw=""
+  (( try < 3 )) || core_fail 3 "Nothing was erased: that password did not work."
+  core_wrong "That password did not work"
+  core_secret pw "Your password" || core_fail 3 "Nothing was erased."
+done
+
+temp="" again=""
+if rooms_encrypted; then
+  # Whoever sets the computer up next types it once, when it starts, and then chooses their own.
+  while :; do
+    core_secret temp "A password for the next start" || core_fail 3 "Nothing was erased."
+    if [[ ${#temp} -lt 6 ]]; then core_wrong "At least six characters"; continue; fi
+    core_secret again "Type it again" || core_fail 3 "Nothing was erased."
+    [[ "$again" == "$temp" ]] && break
+    core_wrong "The two are not the same"
+  done
+  again=""
+fi
+
+core_note "Erasing…"
+rc=0
+printf '%s\n%s\n' "$pw" "$temp" | security_sudo_stdin "$pw" "$(readlink -f "$0")" --root || rc=$?   # the disk's LUKS2 header, /etc/kernel/cmdline, /var/lib/takumi/first-start, /var/lib/takumi/erase, /usr/share/takumi/greetd/config.toml, the first start's unit
+pw="" temp=""
+case "$rc" in
+  0) ;;
+  3) core_fail 3 "Nothing was erased: that password does not open the disk." ;;
+  *) core_fail 1 "Nothing was erased: the computer could not be marked for erasing." ;;
+esac
+if rooms_encrypted; then
+  core_done "Restarting. Type the password for the next start when it asks; the rest is erased before anyone logs in."
+else
+  core_done "Restarting. Everything is erased before anyone logs in, and the computer asks who it is for."
+fi
+exit 0

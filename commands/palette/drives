@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for USB drives and memory cards as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "drive", "usb", "eject", "sd card" or a drive's name (docs/drives.md): each drive plugged in, Enter opening
+# it in Files (a locked one asks for its password in the Core), and "Eject SanDisk 64 GB", after which it can
+# be taken out. "format" or "erase" lists the three ways to erase each one, every one asking twice. "What
+# fills my disk" opens Disk Usage, when it is installed. "Check drive health" and "Write a disk image to a USB
+# stick" are conversations. "onedrive", "google drive", "dropbox" or "cloud": add each as a folder in your home,
+# open the ones added, disconnect them. "shrink", "smaller" or "email" with photos or videos copied in Files (or
+# picked there): "Shrink 3 photos for email" (docs/sharing.md).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/drive.sh" ]] && { . "$l/drive.sh"; . "$l/palette.sh"; . "$l/share.sh"; break; }; done
+declare -F drive_volumes >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+q=${1:-}; ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
+topic=no erase=no cloud=no unplug=no shrink=no image=no
+read -r -a words <<< "$ql"
+for word in ${words[@]+"${words[@]}"}; do
+  for w in drive drives usb eject disk disks storage stick card cards external health smart ssd; do
+    if [[ ${#word} -ge 3 && ( "$w" == "$word"* || "$word" == "$w"* ) ]]; then topic=yes; fi
+  done
+  for w in cloud onedrive dropbox gdrive google icloud sync; do
+    if [[ ${#word} -ge 3 && ( "$w" == "$word"* || "$word" == "$w"* ) ]]; then cloud=yes; fi
+  done
+  for w in shrink smaller compress resize email mail heic; do
+    if [[ ${#word} -ge 3 && ( "$w" == "$word"* || "$word" == "$w"* ) ]]; then shrink=yes; fi
+  done
+  for w in image iso img flash burn write etcher raspberry; do
+    if [[ ${#word} -ge 3 && ( "$w" == "$word"* || "$word" == "$w"* ) ]]; then image=yes; fi
+  done
+done
+case "$ql" in *format*|*erase*|*wipe*) erase=yes; topic=yes ;; esac
+case "$ql" in *"one drive"*) cloud=yes ;; esac
+case "$ql" in *disconnect*|*remove*|*"sign out"*|*unlink*) unplug=yes ;; esac
+if [[ $topic == no && $cloud == no && $shrink == no && $image == no ]]; then palette_short "$q" && exit 0; fi
+kw="drive drives usb disk storage stick external memory card sd"
+search="qs -c takumi ipc --any-display call core search"   # the Core searching for what follows
+{
+  if command -v udisksctl >/dev/null; then
+    vols=$(drive_volumes | awk -F "$drive_sep" '$12 == "yes" && $6 != "unlocked"')
+    while IFS= read -r v; do
+      [[ -n "$v" ]] || continue
+      drive_read "$v"
+      free=""; [[ $d_state == open ]] && free=$(drive_free "$d_mount")
+      # The label, when it says more than the brand already does.
+      named=""; lc=$(printf '%s' "$d_label" | tr '[:upper:]' '[:lower:]'); ls=$(printf '%s' "$d_short" | tr '[:upper:]' '[:lower:]')
+      [[ -n "$d_label" && "$lc" != "$ls" && "$d_name" != "$d_label on "* ]] && named="$d_label · "
+      D=$d_dev N=$d_name S=$d_state F=$([[ -n "$free" ]] && drive_human "$free") L=$named K="$kw" SEARCH=$search jq -cn '
+        {id: ("drive:" + env.D), title: env.N, kind: "Drive", glyph: "usb", keywords: env.K, steady: true, refresh: 5,
+         converse: true, run: ["takumi", "drive", "open", env.D], score: 0.95}
+        + (if env.S == "open" then {subtitle: (env.L + (if env.F != "" then env.F + " free · " else "" end) + "Enter opens it")}
+           elif env.S == "closed" then {subtitle: (env.L + "Not open · Enter opens it")}
+           elif env.S == "locked" then {subtitle: "Locked · Enter asks for its password"}
+           else {subtitle: "Nothing Takumi can read · Enter shows how to erase it for use", converse: false,
+                 run: ((env.SEARCH | split(" ")) + ["format " + env.N])} end)'
+    done <<< "$vols"
+    # One eject row per drive, and when asked, three ways to erase it.
+    drives=$(awk -F "$drive_sep" '!seen[$10]++ { print $1 "\t" $10 "\t" $15 }' <<< "$vols")
+    while IFS=$'\t' read -r dev whole dname; do
+      [[ -n "$dev" ]] || continue
+      D=$dev W=$whole N=$dname jq -cn '{id: ("drive-eject:" + env.W), title: ("Eject " + env.N), subtitle: "Then you can take it out",
+        kind: "Drive", glyph: "eject", keywords: "eject unplug remove safely take out drive usb disk memory card sd", converse: true,
+        run: ["takumi", "drive", "eject", env.D], score: 0.9}'
+      [[ $erase == yes ]] || continue
+      D=$dev W=$whole N=$dname K="$kw" jq -cn '
+        ["exfat", "Mac, Windows and Linux", "exFAT · files of any size · erases everything on it", 0.7],
+        ["fat32", "cameras and TVs", "FAT32 · older devices read it; no file over 4 GB · erases everything on it", 0.65],
+        ["ext4", "Linux only", "ext4 · keeps Linux owners and permissions · erases everything on it", 0.6]
+        | {id: ("drive-format:" + env.W + ":" + .[0]), title: ("Format " + env.N + " for " + .[1]), subtitle: .[2], kind: "Drive",
+           glyph: "drive", keywords: ("format erase wipe reformat clean " + .[0] + " " + env.K), risk: 2, converse: true,
+           run: ["takumi", "drive", "format", env.D, .[0]], score: .[3]}'
+    done <<< "$drives"
+    if [[ $topic == yes && -z "$vols" ]]; then
+      K="$kw" jq -cn '{id: "drive:none", title: "No drive plugged in", subtitle: "USB drives and memory cards show here, and open, when you plug them in",
+        kind: "Drive", glyph: "usb", keywords: (env.K + " eject"), steady: true, refresh: 5, run: ["true"], score: 0.9}'
+    fi
+  fi
+  # Clouds as folders (takumi drive cloud): added ones open, and say how to disconnect; the rest can be added.
+  if [[ $cloud == yes || $topic == yes ]]; then
+    states=$(takumi drive cloud list --json 2>/dev/null || true)
+    while IFS= read -r c; do
+      [[ -n "$c" ]] || continue
+      C=$c CLOUD=$cloud UNPLUG=$unplug jq -c '(env.C | fromjson) as $c
+        | ($c.name | ascii_downcase) as $k
+        | if $c.state == "connected" then
+            {id: ("cloud:" + $c.id), title: $c.name, subtitle: ("A folder in your home · Enter opens it"), kind: "Cloud", glyph: "globe",
+             keywords: ($k + " cloud folder files sync"), steady: true, run: ["gio", "open", $c.folder], score: 0.9},
+            (if env.UNPLUG == "yes" or env.CLOUD == "yes" then
+              {id: ("cloud:remove:" + $c.id), title: ("Disconnect " + $c.name), subtitle: "The folder goes; the files stay in the cloud",
+               kind: "Cloud", glyph: "cross", keywords: ($k + " cloud disconnect remove sign out unlink"), risk: 1, converse: true,
+               run: ["takumi", "drive", "cloud", "remove", $c.id], score: 0.8} else empty end)
+          elif env.CLOUD == "yes" then
+            {id: ("cloud:add:" + $c.id), title: ("Add " + $c.name),
+             subtitle: (if $c.state == "signed in" then "Signed in · Enter makes it a folder again" else "A folder in your home and in Files · signs in in your browser" end),
+             kind: "Cloud", glyph: "globe", keywords: ($k + " cloud add connect sign in folder sync files" + (if $c.id == "google" then " gdrive" else "" end)),
+             converse: true, run: ["takumi", "drive", "cloud", "add", $c.id], score: 0.88}
+          else empty end' <<< 'null'
+    done <<< "$states"
+  fi
+  # Health, and writing an image, for every disk and every stick.
+  if [[ $topic == yes ]]; then
+    jq -cn '{id: "drive:health", title: "Check drive health", subtitle: "Healthy or wearing out, how worn, how many hours · asks for your password",
+      kind: "Disk", glyph: "pulse", keywords: "drive disk ssd hdd health smart check wear worn failing dying errors", converse: true,
+      run: ["takumi", "drive", "health"], score: 0.82}'
+  fi
+  if [[ $topic == yes || $image == yes ]]; then
+    # The image: one picked in Files a moment ago, else one copied there, else the conversation finds one.
+    img=""; pick="$drive_run/takumi/write-image"
+    if [[ -f "$pick" && -n "$(find "$pick" -mmin -30 2>/dev/null)" ]]; then img=$(head -n 1 "$pick"); fi
+    if [[ -z "$img" ]]; then
+      while IFS= read -r f; do if [[ -n "$f" ]] && drive_is_image "$f"; then img=$f; break; fi; done <<< "$(share_copied)"
+    fi
+    I=$img B=$([[ -n "$img" ]] && basename "$img") jq -cn '{id: "drive:write", kind: "Drive", glyph: "usb", risk: 2, converse: true,
+      title: (if env.B != "" then "Write " + env.B + " to a USB stick" else "Write a disk image to a USB stick" end),
+      subtitle: "Or a memory card · erases it · you type its name first",
+      keywords: "write disk image iso img usb stick memory card sd flash burn bootable installer raspberry pi etcher",
+      run: (["takumi", "drive", "write"] + (if env.I != "" then [env.I] else [] end)), score: 0.8}'
+  fi
+  # Photos and videos copied in Files (or picked there), smaller to send.
+  if [[ $shrink == yes ]]; then
+    list=$(share_copied)
+    if [[ -z "$list" && -f "$share_picked" ]]; then list=$(cat "$share_picked"); fi
+    p=0; v=0
+    while IFS= read -r f; do
+      [[ -n "$f" ]] || continue
+      case "$(share_kind "$f")" in photo) p=$((p + 1)) ;; video) v=$((v + 1)) ;; esac
+    done <<< "$list"
+    W=$(share_counted "$p" "$v") jq -cn '{id: "share:shrink", kind: "Files", glyph: "picture",
+      keywords: "shrink smaller compress resize reduce email mail send photo photos picture video heic jpeg mp4 size",
+      title: (if env.W != "" then "Shrink " + env.W + " for email" else "Make photos smaller to send" end),
+      subtitle: (if env.W != "" then "Copies next to the originals: photos as JPEG, videos as 1080p MP4"
+                 else "Copy them in Files first, or right-click them: Scripts, Make smaller to send" end)}
+      + (if env.W != "" then {converse: true, run: ["takumi", "share", "shrink"], score: 0.9} else {run: ["true"], score: 0.6} end)'
+  fi
+  # What fills this computer's disk, when Disk Usage (baobab) is installed.
+  if command -v baobab >/dev/null; then
+    app=/usr/share/applications/org.gnome.baobab.desktop
+    F=$(drive_human "$(drive_free / || echo 0)") A=$([[ -f "$app" ]] && echo "$app") jq -cn '{id: "drive:usage", title: "What fills my disk",
+      subtitle: (env.F + " free on this computer · Disk Usage shows what takes the space"), kind: "Disk", glyph: "drive",
+      keywords: "disk space storage full usage size big files what fills room clean analyzer",
+      run: (if env.A != "" then ["gio", "launch", env.A] else ["baobab"] end), score: 0.85}'
+  fi
+} | palette_filter "$q"
+exit 0

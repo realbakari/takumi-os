@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for the apps that open at login as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "login", "startup" or "open at login" lists the apps that open when you log in; Enter on one stops it.
+# More words after it ("login spotify") offer those apps to add. docs/apps.md.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; break; }; done
+declare -F apps_login_list >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+q=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+case " $q " in *" login "*|*" log in "*|*" startup "*|*" start up "*|*" autostart "*|*" logon "*) ;; *) exit 0 ;; esac
+rest=" $q "
+for w in login log in startup start up autostart logon open opens at when i my apps app launch on add with; do rest=${rest// $w / }; done
+rest=$(printf '%s' "$rest" | sed 's/^ *//; s/ *$//')
+words="login log in startup start up autostart logon open at when apps"
+items=$(apps_login_list)
+{
+  while IFS=$'\t' read -r id name; do
+    [[ -n "$id" ]] || continue
+    jq -cn --arg id "$id" --arg name "${name:-$id}" --arg w "$words" \
+      '{id: ("login:" + $id), title: ($name + " opens at login"), subtitle: "Enter: stop opening it when you log in",
+        icon: $id, glyph: "play", kind: "Login", keywords: ($w + " " + $name), run: ["takumi", "app", "login", $id, "off"], score: 0.9}'
+  done <<< "$items"
+  if [[ -n "$rest" ]]; then
+    apps_table | R="$rest" awk -F '\t' 'n < 8 && index(tolower($2), ENVIRON["R"]) { sub(/\.desktop$/, "", $1); print $1 "\t" $2; n++ }' |
+    while IFS=$'\t' read -r id name; do
+      grep -qxF "$id" <<< "$(cut -f1 <<< "$items")" && continue
+      jq -cn --arg id "$id" --arg name "$name" --arg w "$words" \
+        '{id: ("login-add:" + $id), title: ("Open " + $name + " at login"), subtitle: "It opens by itself each time you log in",
+          icon: $id, glyph: "play", kind: "Login", keywords: ($w + " " + $name), run: ["takumi", "app", "login", $id, "on"], score: 0.85}'
+    done
+  elif [[ -z "$items" ]]; then
+    jq -cn --arg w "$words" '{id: "login:none", title: "Nothing opens at login", subtitle: "Type an app after “login” to add it: “login Spotify”",
+      glyph: "play", kind: "Login", keywords: $w, run: ["true"], score: 0.8}'
+  fi
+}

@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# Contract checks for keeping up to date (commands/update/check, commands/update/prepare, their user units and
+# the Palette's update rows) against fake checkupdates, NetworkManager, systemd and notification tools: the
+# count and the names a person knows, once a day and never on a metered network, one notice a day at most,
+# what is ready, and preparing on the charger only, stopped when unplugged.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; update checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-updates.XXXXXX"); trap 'touch "${t:?}/state/stopped" 2>/dev/null || true; rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run TAKUMI_TOP=$t/top TAKUMI_STATE=$t/rooms TAKUMI_POWER_SUPPLY=$t/supply
+export TAKUMI_UPDATE_BUILD_LOG=$t/build.log
+export TZ=Europe/Lisbon TAKUMI_NOW=1794218400 LC_ALL=C   # Monday 9 November 2026, 10:00 in Lisbon
+mkdir -p "$t/bin" "$t/fast" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR" "$t/top/@rooms" "$TAKUMI_STATE" "$t/supply/AC" \
+         "$t/commands/notice" "$t/commands/migrate" "$t/commands/update"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"   # fake takumi commands go in front of the real ones
+now=$TAKUMI_NOW; state=$HOME/.local/state/takumi
+
+cat > "$t/bin/checkupdates" <<'FAKE'
+#!/usr/bin/env bash
+# --nosync compares the lists fetched last time with what is installed: the same updates until something
+# is installed ($FAKE/nosync stands for what is left after an update made in place).
+if [[ "${1:-}" == --nosync && -f "$FAKE/nosync" ]]; then cat "$FAKE/nosync"; exit 0; fi
+[[ "${1:-}" == --nosync ]] || echo checkupdates >> "$FAKE/calls"
+cat "$FAKE/updates" 2>/dev/null || true
+exit "$(cat "$FAKE/checkupdates-rc" 2>/dev/null || echo 0)"
+FAKE
+cat > "$t/bin/nmcli" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in "-t -f STATE,CONNECTIVITY general") cat "$FAKE/net" ;; *) exit 0 ;; esac
+FAKE
+cat > "$t/bin/busctl" <<'FAKE'
+#!/usr/bin/env bash
+cat "$FAKE/metered"
+FAKE
+cat > "$t/bin/systemctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "$FAKE/calls"
+wants="$HOME/.config/systemd/user/timers.target.wants"
+case "$*" in
+  "cat takumi-update-build.service") [[ -f "$FAKE/build-unit" ]] ;;
+  "--user enable --now takumi-update-prepare.timer") mkdir -p "$wants"; : > "$wants/takumi-update-prepare.timer" ;;
+  "--user disable --now takumi-update-prepare.timer") rm -f "${wants:?}/takumi-update-prepare.timer" ;;
+  "start --no-ask-password takumi-update-build.service")
+    [[ -f "$FAKE/build-fails" ]] && exit 1
+    if [[ -f "$FAKE/build-slow" ]]; then for _ in $(seq 1 300); do [[ -f "$FAKE/stopped" ]] && exit 1; /bin/sleep 0.1; done; exit 1; fi
+    printf 'status=staged\nparent=20261101-000000\n' > "$TAKUMI_STATE/20261109-100000" ;;
+  "stop --no-ask-password takumi-update-build.service") : > "$FAKE/stopped" ;;
+  *) exit 0 ;;
+esac
+FAKE
+cat > "$t/bin/notify-send" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s|' "$@" >> "$FAKE/notify"; echo >> "$FAKE/notify"
+cat "$FAKE/action" 2>/dev/null || true
+FAKE
+cat > "$t/bin/flock" <<'FAKE'
+#!/usr/bin/env bash
+[[ ! -f "$FAKE/locked" ]]
+FAKE
+printf '#!/usr/bin/env bash\nprintf "qs %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/bin/qs"
+printf '#!/usr/bin/env bash\necho "rw,relatime,subvol=/@rooms/$(cat "$FAKE/current")"\n' > "$t/bin/findmnt"
+printf '#!/bin/sh\nexit 0\n' > "$t/fast/sleep"   # the build's watch loop, without waiting
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+printf '#!/bin/sh\necho "migrate $*" >> "$FAKE/calls"\n' > "$t/commands/migrate/main"
+printf '#!/bin/sh\n[ ! -f "$FAKE/space-low" ]\n' > "$t/commands/update/check-space"
+chmod +x "$t/bin/"* "$t/fast/sleep" "$t/commands/notice/main" "$t/commands/migrate/main" "$t/commands/update/check-space"
+
+reset() {
+  rm -rf "${FAKE:?}"/* "${HOME:?}"/.config "${HOME:?}"/.local "${TAKUMI_STATE:?}"/* "${XDG_RUNTIME_DIR:?}"/*
+  echo 20261101-000000 > "$FAKE/current"; echo connected:full > "$FAKE/net"; echo "u 4" > "$FAKE/metered"; echo 1 > "$t/supply/AC/online"
+  printf '%s\n' "firefox 132.0-1 -> 133.0-1" "linux 6.11.5-1 -> 6.11.6-1" "zlib 1.3.1-1 -> 1.3.1-2" > "$FAKE/updates"
+  : > "$FAKE/calls"; : > "$FAKE/notify"; : > "$FAKE/notices"
+}
+n=0
+check() { n=$((n + 1)); if eval "$2"; then :; else echo "updates: $1"; status=1; fi; }
+last() { "$@" | tail -n 1; }
+json() { jq -c "$1" "$state/updates.json"; }
+row() { takumi palette time "$1" | jq -r --arg id "$2" 'select(.id == $id) | [.title, .subtitle, ((.risk // 0) | tostring), ((.converse // false) | tostring), (.run | join(" "))] | join("|")'; }
+calls() { grep -c "^$1" "$FAKE/calls" || true; }
+reset
+
+# ---- Looking
+out=$(last takumi update check)
+check "the count and the names a person knows ($out)" '[[ "$out" == "3 updates are waiting, Firefox and Linux among them" ]] && [[ "$(json "[.count, .important, .ready, .room, .checked]")" == "[3,[\"Firefox\",\"Linux\"],false,\"20261101-000000\",$now]" ]]'
+check "the update row says how many and what (asks twice: it updates)" '[[ "$(row update update:main)" == "Update Takumi|3 waiting · Firefox and Linux among them · yours is not touched until you restart|2|true|takumi update" ]]'
+echo 2 > "$FAKE/checkupdates-rc"; : > "$FAKE/updates"
+out=$(last takumi update check)
+check "nothing new ($out)" '[[ "$out" == "Takumi is up to date" && "$(json .count)" == 0 ]]'
+check "the row then offers to look again" '[[ "$(row updates update:main)" == "Takumi is up to date|Looked at 10:00 · Enter to look again|0|true|takumi update check" ]]'
+echo 1 > "$FAKE/checkupdates-rc"; rc=0; out=$(last takumi update check) || rc=$?
+check "no answer from the mirrors: 1, in words, and what was known stays ($out)" '[[ $rc -eq 1 && "$out" == "The package mirrors did not answer: try again when the internet works" && "$(json .checked)" == "$now" ]]'
+reset; mv "$t/bin/checkupdates" "$t/checkupdates"; rc=0; out=$(last takumi update check) || rc=$?; mv "$t/checkupdates" "$t/bin/checkupdates"
+check "without pacman-contrib: 1, in words ($out)" '[[ $rc -eq 1 && "$out" == "Looking for updates needs pacman-contrib" ]]'
+check "never looked: update, or look first" '[[ "$(row update update:main | cut -d"|" -f1,3)" == "Update Takumi|2" && "$(row update update:check | cut -d"|" -f1,5)" == "Look for updates|takumi update check" ]]'
+
+# ---- Once a day, by itself
+reset
+takumi update check >/dev/null; : > "$FAKE/calls"
+takumi update check --auto
+check "looked less than a day ago: not again" '[[ $(calls checkupdates) -eq 0 ]]'
+later=$((now + 75600))   # 21 hours on: Tuesday, 07:00
+echo disconnected:none > "$FAKE/net"; TAKUMI_NOW=$later takumi update check --auto
+check "offline: not looked" '[[ $(calls checkupdates) -eq 0 ]]'
+echo connected:full > "$FAKE/net"; echo "u 1" > "$FAKE/metered"; TAKUMI_NOW=$later takumi update check --auto
+echo "u 3" > "$FAKE/metered"; TAKUMI_NOW=$later takumi update check --auto
+check "metered, set or guessed (a phone's hotspot): not looked" '[[ $(calls checkupdates) -eq 0 ]]'
+echo "u 4" > "$FAKE/metered"; TAKUMI_NOW=$later takumi update check --auto
+check "a day on, online, not metered: looked, and said once" '[[ $(calls checkupdates) -eq 1 && "$(json .checked)" == "$later" ]] && [[ "$(cat "$FAKE/notify")" == "-a|Takumi|-i|system-software-update|-A|default=Update|Updates are ready: 3|Press to update|" ]]'
+jq -c '.checked = 0' "$state/updates.json" > "$t/u" && mv "$t/u" "$state/updates.json"
+TAKUMI_NOW=$((later + 3600)) takumi update check --auto
+check "looked again the same day: not said again" '[[ $(calls checkupdates) -eq 2 && $(grep -c . "$FAKE/notify") -eq 1 ]]'
+jq -c '.checked = 0' "$state/updates.json" > "$t/u" && mv "$t/u" "$state/updates.json"; echo default > "$FAKE/action"
+TAKUMI_NOW=$((later + 86400)) takumi update check --auto
+check "the next day it is said again, and a press opens the Palette on update" 'grep -qx "qs -c takumi ipc --any-display call core search update" "$FAKE/calls"'
+
+# ---- What is ready, and a count gone stale
+reset; takumi update check >/dev/null
+printf 'status=staged\n' > "$TAKUMI_STATE/20261109-090000"; printf 'status=good\n' > "$TAKUMI_STATE/20261101-000000"
+takumi update check --local
+check "a new system staged: ready" '[[ "$(json .ready)" == true ]]'
+check "the row then restarts into it (asks first)" '[[ "$(row update update:ready)" == "Restart to use the update|A new system is ready; the one you use now stays one restart away|1|false|takumi power restart" && -z "$(row update update:main)" ]]'
+echo 20261109-090000 > "$FAKE/current"; takumi update check --local
+check "restarted into it: the count is stale, nothing is ready" '[[ "$(json "[.count, .ready, .room]")" == "[0,false,\"20261109-090000\"]" ]]'
+reset; takumi update check >/dev/null; echo "zlib 1.3.1-1 -> 1.3.1-2" > "$FAKE/nosync"; takumi update check --local
+check "updated in place: what is left, counted without the network" '[[ "$(json "[.count, .important, .checked]")" == "[1,[],$now]" && $(calls checkupdates) -eq 1 ]]'
+
+# ---- Preparing on the charger
+reset
+check "no build unit: no row for preparing" '[[ -z "$(row update update:prepare)" ]]'
+rc=0; out=$(last takumi update prepare on) || rc=$?
+check "on, without the build unit: 1, in words ($out)" '[[ $rc -eq 1 && "$out" == "This computer cannot prepare updates by itself yet: takumi-update-build.service is not installed" ]]'
+touch "$FAKE/build-unit"; rmdir "$t/top/@rooms"; rc=0; out=$(last takumi update prepare on) || rc=$?; mkdir "$t/top/@rooms"
+check "on, on a computer without rooms: 1, in words ($out)" '[[ $rc -eq 1 && "$out" == "This computer updates in place, so nothing can be prepared beside it" ]]'
+check "the row to turn it on asks first" '[[ "$(row update update:prepare)" == "Prepare updates on the charger|Off · builds the next system while plugged in; yours is not touched|1|true|takumi update prepare on" ]]'
+out=$(last takumi update prepare on)
+check "on: its half-hourly timer enabled for this person ($out)" '[[ "$out" == "Updates are prepared on the charger from now on · yours is not touched until you restart" ]] && grep -qx "systemctl --user enable --now takumi-update-prepare.timer" "$FAKE/calls"'
+auto() { : > "$FAKE/calls"; takumi update prepare --auto || true; }
+takumi update check >/dev/null
+echo 0 > "$t/supply/AC/online"; mkdir -p "$t/supply/BAT0"; echo 80 > "$t/supply/BAT0/capacity"; echo Discharging > "$t/supply/BAT0/status"; auto
+check "on battery: nothing built" '[[ $(calls "systemctl start") -eq 0 ]]'
+echo 1 > "$t/supply/AC/online"; echo "u 1" > "$FAKE/metered"; auto
+check "metered: nothing built" '[[ $(calls "systemctl start") -eq 0 ]]'
+echo "u 4" > "$FAKE/metered"; touch "$FAKE/space-low"; auto
+check "too little space: nothing built, and the reason kept" '[[ $(calls "systemctl start") -eq 0 ]] && grep -q "not built: the disk needs 8 GiB free" "$state/update-prepare.log"'
+rm -f "${FAKE:?}/space-low"; touch "$FAKE/locked"; auto
+check "an update already being prepared: nothing built" '[[ $(calls "systemctl start") -eq 0 ]]'
+rm -f "${FAKE:?}/locked"; touch "$FAKE/build-fails"; rc=0; takumi update prepare --auto || rc=$?
+check "a build that fails for a reason Takumi does not know: 1, and where to look kept" '[[ $rc -eq 1 ]] && grep -q "the build did not finish: $t/build.log says why" "$state/update-prepare.log" && [[ ! -s "$FAKE/notices" ]]'
+printf '%s\n' "error: Partition / too full: 63128 blocks needed, 21009 blocks free" "error: failed to commit transaction (not enough free disk space)" > "$t/build.log"
+rc=0; takumi update prepare --auto || rc=$?; takumi update prepare --auto || true
+check "a build that fails for want of space: said in words, in the log and once a day in the Core" '[[ $rc -eq 1 ]] && grep -q "the build did not finish: There is not enough space on the disk for the update. Free up space, then update again" "$state/update-prepare.log" && [[ "$(cat "$FAKE/notices")" == "warn|Update not prepared|There is not enough space on the disk for the update. Free up space, then update again|-1|10|" ]]'
+rm -f "$t/build.log"; : > "$FAKE/notices"
+rm -f "${FAKE:?}/build-fails"; auto
+check "on the charger, online, room to spare: built, staged, said" 'grep -qx "systemctl start --no-ask-password takumi-update-build.service" "$FAKE/calls" && grep -qx "migrate --stage" "$FAKE/calls" && [[ "$(json .ready)" == true ]] && grep -q "^restart|Update ready|restart to use it|-1|6|" "$FAKE/notices"'
+check "the prepare row then says it is ready" '[[ "$(row update update:prepare | cut -d"|" -f1,2)" == "Prepare updates on the charger: on|Ready · restart to use it" ]]'
+auto
+check "one ready already: not built again" '[[ $(calls "systemctl start") -eq 0 ]]'
+rm -f "${TAKUMI_STATE:?}"/*; touch "$FAKE/build-slow"; rm -f "${FAKE:?}/stopped"
+( /bin/sleep 0.5; echo 0 > "$t/supply/AC/online" ) &
+PATH="$t/fast:$PATH" takumi update prepare --auto; wait
+check "unplugged while building: stopped, and the half-built system thrown away" 'grep -qx "systemctl stop --no-ask-password takumi-update-build.service" "$FAKE/calls" && grep -q "unplugged: stopped, the half-built system is thrown away" "$state/update-prepare.log"'
+rm -f "${FAKE:?}/build-slow"; echo 1 > "$t/supply/AC/online"
+out=$(last takumi update prepare off)
+check "off: its timer disabled, a build waiting stopped ($out)" '[[ "$out" == "Updates are no longer prepared by themselves" ]] && grep -qx "systemctl --user disable --now takumi-update-prepare.timer" "$FAKE/calls" && grep -qx "systemctl --user stop takumi-update-prepare.service" "$FAKE/calls"'
+: > "$FAKE/calls"; auto
+check "off: the timer's run does nothing" '[[ $(calls "systemctl start") -eq 0 ]]'
+rc=0; takumi update prepare build >/dev/null 2>&1 || rc=$?
+check "building is root's, from its unit" '[[ $rc -eq 1 ]]'
+
+# ---- The units
+u=default/systemd/user
+check "the daily look: a timer every hour, the service looks when a day has passed" 'grep -qx "ExecStart=/usr/bin/takumi update check --auto" "$u/takumi-update-check.service" && grep -qx "OnUnitActiveSec=1h" "$u/takumi-update-check.timer"'
+check "preparing: a timer every half hour, enabled per person" 'grep -qx "ExecStart=/usr/bin/takumi update prepare --auto" "$u/takumi-update-prepare.service" && grep -qx "OnUnitActiveSec=30min" "$u/takumi-update-prepare.timer" && grep -qx "WantedBy=timers.target" "$u/takumi-update-prepare.timer"'
+
+echo "   $n update checks against fake checkupdates, NetworkManager and systemd"
+exit $status

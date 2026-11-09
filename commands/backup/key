@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Make a new backup key, shown once; the old key stops opening your backups
+risk: 1
+converse: yes
+title: New backup key
+words: backup backups key password lost card new code encryption
+glyph: key
+ABOUT
+set -euo pipefail
+# A conversation in the Core, for a key card that was lost while this computer still has the key. restic gives the
+# backups a second key, the keyring takes it, and the first key is removed; it ends on a card like setup's. Exit
+# status: 0 a new key · 1 not possible now · 2 backups are not set up · 3 the disk is not plugged in. See docs/backup.md.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/backup.sh" ]] && { . "$l/core.sh"; . "$l/backup.sh"; break; }; done
+declare -F backup_load >/dev/null && declare -F core_note >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+command -v jq >/dev/null || core_fail 1 "Backups need jq."
+backup_load
+[[ -n "$place_kind" ]] || core_fail 2 "Backups are not set up yet. Type backup in the Core to set them up."
+backup_key_have || core_fail 1 "This computer does not have the backup key. Set up backups again and type the key from your card."
+core_note "Opening the backups on $place_name…"
+rc=0; backup_locate ask || rc=$?
+(( rc != 3 )) || core_fail 3 "Plug in $place_name first."
+(( rc == 0 )) || core_fail 1 "$place_name could not be opened."
+trap '[[ $backup_we_mounted == yes ]] && backup_unmount "$place_disk"; true' EXIT
+old=$(backup_restic key list --json 2>/dev/null | jq -r 'map(select(.current)) | first | .id // empty' 2>/dev/null || true)
+[[ -n "$old" ]] || core_fail 1 "The key in your keyring does not open the backups on $place_name."
+core_note "Making a new key…"
+key=$(backup_new_key)
+backup_restic key add --new-password-file <(printf '%s' "$key") >/dev/null 2>&1 || core_fail 1 "restic did not add a new key; the old one still works."
+printf '%s' "$key" | backup_key_store || core_fail 1 "The keyring did not keep the new key; the old one still works."
+if ! backup_restic key remove "$old" >/dev/null 2>&1; then
+  core_card "$(backup_card "Backup key" "Your new backup key" "The old key could not be removed, so it still opens the backups too. This card is your only copy of the new one if the computer is lost." "$key")"
+  exit 0
+fi
+core_card "$(backup_card "Backup key" "Your new backup key" "The old key no longer opens your backups. This card is your only copy if the computer is lost: write it down or take a photo, and keep it away from this computer." "$key")"

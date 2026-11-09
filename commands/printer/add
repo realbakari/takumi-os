@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set up a printer from its address: driverless when it can be, else with the closest driver this computer has
+usage: <uri|address> [name]
+example: takumi printer add 192.168.1.20 "Office printer"
+example: takumi printer add "dnssd://HP%20LaserJet%20M110w._ipp._tcp.local/"
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/printer.sh" ]] && { . "$l/printer.sh"; . "$l/core.sh"; break; }; done
+declare -F printer_queues >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh). A printer on the network is set up driverless first (IPP Everywhere: CUPS
+# asks the printer what it can do and needs nothing else); one that cannot be, or one plugged in by USB,
+# gets the closest driver CUPS has, offered in words and taken only on yes. A bare address (192.168.1.20)
+# means the printer's standard IPP address there. The first printer becomes the default. Exit status, for
+# scripts: 0 set up, or it already was · 3 an answer (the address, the password) was needed and none came,
+# or no driver was chosen · 4 it needs a driver this computer does not have · 5 the printer did not answer
+# · 6 this account may not add printers · 2 not an address · 1 anything else. The last line says it in words.
+uri=${1:-}; name=${2:-}
+command -v lpadmin >/dev/null || core_fail 1 "Printing needs CUPS (the cups package)"
+if [[ -z "$uri" ]]; then core_ask uri "The printer's address, like 192.168.1.20" || core_fail 3 "A printer needs its address"; fi
+uri=$(printf '%s' "$uri" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+host_re='^[A-Za-z0-9._:-]+$'
+case "$uri" in
+  *://*) ;;
+  *) [[ "$uri" =~ $host_re ]] || core_fail 2 "That is not a printer's address"; uri="ipp://$uri/ipp/print" ;;
+esac
+case "$uri" in dnssd://*|ipp://*|ipps://*|http://*|https://*|usb://*|socket://*|lpd://*) ;; *) core_fail 2 "That is not a printer's address" ;; esac
+
+# What the search for printers learned about it, when it found it: its make and model, its device id.
+fname="" mm="" devid=""
+if [[ -f "$printer_found_file" ]]; then
+  rec=$(awk -F "$printer_sep" -v u="$uri" '$1 == u { print; exit }' "$printer_found_file")
+  [[ -z "$rec" ]] || IFS="$printer_sep" read -r _ fname mm _ devid <<< "$rec"
+fi
+[[ -n "$name" ]] || name=${fname:-$(printer_name_from_uri "$uri")}
+
+queues=$(printer_queues)
+here=$(awk -F "$printer_sep" -v u="$uri" '$6 == u { print $1; exit }' <<< "$queues")
+[[ -z "$here" ]] || { core_done "$name is already set up"; exit 0; }
+queue=$(printer_queue_name "$name")
+why="Adding a printer needs your password"
+# Keep trying when the printer is off rather than stopping the queue, and do not share it on the network.
+opts=(-o printer-error-policy=retry-job -o printer-is-shared=false)
+
+added() {
+  local more=""
+  if [[ -z "$(printer_default)" ]]; then lpoptions -d "$queue" >/dev/null 2>&1 && more=", and apps print to it"; fi
+  core_in_core || takumi notice printer "$name is ready" "${more:+apps print to it unless you choose another}" -1 >/dev/null 2>&1 || true
+  core_done "$name is ready to print$more"
+  exit 0
+}
+failed() {  # <the tool's words>
+  printer_unanswered "$1" && core_fail 3 "Without the password, $name was not set up"
+  printer_refused "$1" && core_fail 6 "Only an administrator of this computer can add printers"
+  core_fail 1 "Could not set up $name: $(printer_said "$1")"
+}
+
+core_note "Setting up $name…"
+case "$uri" in usb://*|socket://*|lpd://*) driverless=no ;; *) driverless=yes ;; esac
+if [[ $driverless == yes ]]; then
+  if out=$(printer_admin "$why" lpadmin -p "$queue" -D "$name" -E -v "$uri" -m everywhere "${opts[@]}"); then added; fi
+  if printer_refused "$out" || printer_unanswered "$out"; then failed "$out"; fi
+  case "$out" in
+    *"nable to create PPD"*|*"does not support"*|*"requires an IPP"*|*"ot supported"*) ;;   # it answered, but wants a driver
+    *"nable to resolve"*|*"nable to connect"*|*"nable to query"*|*"refused"*|*"timed out"*|*"No route"*|*"Host is down"*)
+      core_fail 5 "$name did not answer. Is it on, and on this network?" ;;
+    *"ot found"*|*"ot-found"*) core_fail 5 "Nothing at that address answers as a printer" ;;
+    *) failed "$out" ;;
+  esac
+fi
+
+# A driver: the closest ones CUPS has for this make and model, one question each.
+drivers=$(printer_drivers "${mm:-$name}" "$devid")
+[[ -n "$drivers" ]] || core_fail 4 "$name needs a driver this computer does not have"
+while IFS="$printer_sep" read -r -u 3 ppd desc; do
+  [[ -n "$ppd" ]] || continue
+  core_confirm "$name needs a driver. Use “$desc”?" || continue
+  core_note "Setting up $name…"
+  if out=$(printer_admin "$why" lpadmin -p "$queue" -D "$name" -E -v "$uri" -m "$ppd" "${opts[@]}"); then added; fi
+  failed "$out"
+done 3<<< "$drivers"
+core_fail 3 "No driver was chosen, so $name was not set up"

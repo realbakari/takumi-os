@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Warm the screen: on, off, or from dusk to dawn on the clock
+usage: <on|off|schedule|--restore>
+example: takumi display nightlight schedule
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/display.sh" ]] && { . "$l/display.sh"; . "$l/core.sh"; break; }; done
+declare -F display_screens >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+mode=${1:-}
+# --restore: at login, bring back whatever was chosen last.
+[[ "$mode" == --restore ]] && mode=$(display_nightlight_mode)
+case "$mode" in
+  on|schedule) command -v wlsunset >/dev/null || { echo "The night light needs wlsunset"; exit 1; }
+               display_nightlight_start "$mode" ;;
+  off) display_nightlight_stop ;;
+  *) echo "usage: takumi display nightlight <on|off|schedule>" >&2; exit 2 ;;
+esac
+[[ "${1:-}" == --restore ]] && exit 0
+display_save "$(display_text_size)" "$mode"
+case "$mode" in
+  on) takumi notice moon "Night light on" "warm until you turn it off" >/dev/null 2>&1 || true; echo "Night light on" ;;
+  schedule) takumi notice moon "Night light from $(display_clock dusk) to $(display_clock dawn)" "it follows the sky's clock" >/dev/null 2>&1 || true
+            echo "Night light from $(display_clock dusk) to $(display_clock dawn)" ;;
+  off) takumi notice moon "Night light off" >/dev/null 2>&1 || true; echo "Night light off" ;;
+esac

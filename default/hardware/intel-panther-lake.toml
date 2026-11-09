@@ -1,0 +1,17 @@
+# Intel Panther Lake (Core Ultra series 3) graphics: Linux drives them with Intel's newer xe driver only (i915 does
+# not know them), which loads Intel's GuC, HuC and display firmware from linux-firmware-intel. Device ids from
+# the kernel's list for Panther Lake (INTEL_PTL_IDS).
+# Kernel: https://github.com/torvalds/linux/blob/master/include/drm/intel/pciids.h  https://docs.kernel.org/gpu/xe/index.html
+title = "Intel Panther Lake graphics"
+part = "graphics"
+says = "Intel's xe driver"
+driver = "xe"
+
+[match]
+pci = ["8086:b08?", "8086:b090", "8086:b0a?", "8086:b0b0"]
+pci_class = ["03??"]
+arch = ["x86_64"]
+
+[apply]
+packages = ["linux-firmware-intel"]
+note = "Panther Lake's graphics run on Intel's newer xe driver, which Linux picks for them by itself. It needs Intel's graphics firmware, which this keeps on the computer."

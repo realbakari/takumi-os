@@ -1,0 +1,8 @@
+# Text size and the night light, as set from the Core. See docs/display.md.
+# Screens (scale, turn, arrangement) are in ~/.config/niri/takumi/outputs.kdl.
+
+[text]
+size = 13          # 11, 13, 15, 17 or 20; the Core and your apps follow
+
+[nightlight]
+mode = "off"       # off | on | schedule: warm from dusk to dawn, on the clock in phase.toml

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Turn the touchpad off or on, so a palm never moves the pointer while you type
+usage: [on|off]
+example: takumi switch touchpad off
+risk: 0
+title: Touchpad
+words: touchpad trackpad touch pad palm pointer mouse
+glyph: touchpad
+ABOUT
+set -euo pipefail
+# niri reads the touchpad's state from ~/.config/niri/takumi/touchpad.kdl, which config.kdl includes and only this
+# command writes (docs/laptop-keys.md). niri reads its config again when the file changes; asking it to load the
+# config at once makes the key feel instant. Without a word it switches: off when on, on when off.
+# Exit status: 0 done · 2 usage · 3 this home's niri config does not include the file yet.
+cfg="$HOME/.config/niri/config.kdl"
+file="$HOME/.config/niri/takumi/touchpad.kdl"
+off=no
+if grep -qE '^[[:space:]]*off;?[[:space:]]*$' "$file" 2>/dev/null; then off=yes; fi
+case "${1:-}" in
+  on | off) want=$1 ;;
+  "") if [[ $off == yes ]]; then want=on; else want=off; fi ;;
+  *) echo "usage: takumi switch touchpad [on|off]" >&2; exit 2 ;;
+esac
+grep -qF 'include "takumi/touchpad.kdl"' "$cfg" 2>/dev/null || { echo "The touchpad switch works after you log out and back in"; exit 3; }
+mkdir -p "${file%/*}"
+{
+  printf '%s\n' "// The touchpad, as you switched it with its key or from the Core (takumi switch touchpad, docs/laptop-keys.md)." \
+    "// Written whole by that command; your own touchpad settings go in overrides.kdl."
+  if [[ $want == off ]]; then printf '%s\n' "input {" "    touchpad {" "        off" "    }" "}"; fi
+} > "$file.new"
+mv "$file.new" "$file"
+niri msg action load-config-file >/dev/null 2>&1 || true
+if [[ $want == off ]]; then
+  takumi notice touchpad "Touchpad off" "press its key, or type touchpad in the Core, to turn it back on" >/dev/null 2>&1 || true
+  echo "Touchpad off"
+else
+  takumi notice touchpad "Touchpad on" >/dev/null 2>&1 || true
+  echo "Touchpad on"
+fi

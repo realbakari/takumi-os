@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Turn animations off or on: windows, workspaces and the Core appear and move at once
+usage: [on|off]
+example: takumi switch motion off
+risk: 0
+title: Animations
+words: accessibility a11y animations animation motion reduce movement effects still fast slow graphics
+glyph: pulse
+ABOUT
+set -euo pipefail
+# Two places move: niri (windows opening, workspaces sliding), turned off by ~/.config/niri/takumi/motion.kdl,
+# which defaults.kdl includes and only this command writes; and the shell (the Core, the Palette, notices), which
+# stills every motion with reduce_motion in ~/.config/takumi/shell.toml (docs/accessibility.md). One switch keeps
+# both the same. Without a word it switches over. Exit status: 0 done · 2 usage.
+file="$HOME/.config/niri/takumi/motion.kdl"
+shell_toml="$HOME/.config/takumi/shell.toml"
+off=no
+grep -qE '^animations[[:space:]]*\{[[:space:]]*off;?[[:space:]]*\}' "$file" 2>/dev/null && off=yes
+case "${1:-}" in
+  on | off) want=$1 ;;
+  "") if [[ $off == yes ]]; then want=on; else want=off; fi ;;
+  *) echo "usage: takumi switch motion [on|off]" >&2; exit 2 ;;
+esac
+
+mkdir -p "${file%/*}" "${shell_toml%/*}"
+if [[ $want == off ]]; then
+  printf '%s\n' "// Animations off (takumi switch motion, docs/accessibility.md). Written whole by that command." \
+    "animations { off; }" > "$file.new"
+  mv "$file.new" "$file"
+  value=true
+else
+  rm -f "$file"
+  value=false
+fi
+# The shell's file keeps your other settings; only its reduce_motion line changes. false is written, not left
+# out: the shell keeps the last value it read when the line goes.
+tmp=$(mktemp "$shell_toml.XXXXXX")
+grep -v '^reduce_motion[[:space:]]*=' "$shell_toml" > "$tmp" 2>/dev/null || true
+printf 'reduce_motion = %s\n' "$value" >> "$tmp"
+mv "$tmp" "$shell_toml"
+niri msg action load-config-file >/dev/null 2>&1 || true
+if [[ $want == off ]]; then
+  takumi notice pulse "Animations off" "type animations in the Core to turn them on" >/dev/null 2>&1 || true
+  echo "Animations off"
+else
+  takumi notice pulse "Animations on" >/dev/null 2>&1 || true
+  echo "Animations on"
+fi

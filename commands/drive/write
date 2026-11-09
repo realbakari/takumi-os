@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Write a disk image (.img or .iso, also .xz, .zst or .gz) to a USB stick or memory card, erasing it; you type its name to confirm
+usage: [image] [drive]
+example: takumi drive write ~/Downloads/archlinux-x86_64.iso
+example: takumi drive write raspios.img.xz SanDisk
+risk: 2
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/drive.sh" ]] && { . "$l/drive.sh"; . "$l/core.sh"; . "$l/share.sh"; break; }; done
+declare -F drive_removables >/dev/null && declare -F core_ask >/dev/null && declare -F share_copied >/dev/null ||
+  { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh). The image: the one named, else one copied in Files, else the one picked there
+# (right-click › Scripts › Write to a USB stick), else the newest in Downloads, asked about. The drive: only a
+# USB drive or memory card (lib/drive.sh drive_removables), never a disk this computer runs from; with several,
+# it asks which. Then the Core says what goes and wants the drive's name typed, the way a careful person erases
+# a disk. Every part of it is closed, the image is written whole with dd (decompressed on the way for .xz, .zst
+# and .gz), with notes of how far it got, flushed, and the drive powered off so it can be taken out. Writing
+# needs root: the password is asked once, in the Core. From Files, with no one to ask here, the image is
+# remembered and the Core opens on the row that writes it. Exit status: 0 written · 2 the image is not there or
+# not one · 3 not confirmed, nothing written · 5 no USB drive or memory card · 6 the image is bigger than the
+# drive · 1 anything else (what happened is in ~/.local/state/takumi/drive-write.log).
+log="$HOME/.local/state/takumi/drive-write.log"; mkdir -p "$(dirname "$log")"
+picked="$drive_run/takumi/write-image"   # the image picked in Files, for the Palette's row
+img=${1:-}; target=${2:-}
+case "$img" in "~/"*) img="$HOME/${img#\~/}" ;; esac
+[[ -z "$img" || "$img" == /* ]] || img="$PWD/$img"
+
+if [[ -n "$img" ]] && ! core_in_core && ! core_at_tty; then
+  # From Files: nobody can answer here, so the Core asks, on the row that writes this image.
+  [[ -f "$img" ]] && drive_is_image "$img" || { echo "$(basename "$img") is not a disk image" >&2; exit 2; }
+  mkdir -p "$(dirname "$picked")"; printf '%s\n' "$img" > "$picked"
+  qs -c takumi ipc --any-display call core search "write to usb" >/dev/null 2>&1 || true
+  echo "Choose the row in the Core to write $(basename "$img")"
+  exit 0
+fi
+
+if [[ -z "$img" ]]; then
+  while IFS= read -r f; do if [[ -n "$f" && -f "$f" ]] && drive_is_image "$f"; then img=$f; break; fi; done <<< "$(share_copied)"
+fi
+if [[ -z "$img" && -f "$picked" ]]; then
+  f=$(head -n 1 "$picked"); [[ -f "$f" ]] && img=$f
+fi
+if [[ -z "$img" ]]; then
+  newest=""
+  for f in "$HOME/Downloads"/*; do
+    [[ -f "$f" ]] && drive_is_image "$f" || continue
+    if [[ -z "$newest" || "$f" -nt "$newest" ]]; then newest=$f; fi
+  done
+  if [[ -n "$newest" ]] && core_confirm "Write $(basename "$newest") from Downloads? Esc for another image"; then img=$newest; fi
+fi
+while [[ -z "$img" ]]; do
+  core_ask answer "Which image? Copy it in Files first, or type where it is" || core_fail 3 "Nothing was written"
+  case "$answer" in "~/"*) answer="$HOME/${answer#\~/}" ;; esac
+  if [[ -f "$answer" ]] && drive_is_image "$answer"; then img=$answer
+  else core_wrong "That is not a disk image (.img or .iso, also .xz, .zst or .gz)"; core_in_core || core_fail 2 "That is not a disk image"; fi
+done
+[[ -f "$img" ]] || core_fail 2 "$(basename "$img") is not there"
+drive_is_image "$img" || core_fail 2 "$(basename "$img") is not a disk image (.img or .iso, also .xz, .zst or .gz)"
+base=$(basename "$img")
+case "$(printf '%s' "$img" | tr '[:upper:]' '[:lower:]')" in
+  *.xz) command -v xz >/dev/null || core_fail 1 "Opening $base needs xz" ;;
+  *.zst) command -v zstd >/dev/null || core_fail 1 "Opening $base needs zstd" ;;
+esac
+command -v udisksctl >/dev/null || core_fail 1 "Drives need udisks (the udisks2 package)"
+
+# --- The drive ---
+
+system=$(drive_system_disks)
+drives=$(drive_removables | awk -F '\t' -v s="$system" 'BEGIN { n = split(s, a, "\n"); for (i = 1; i <= n; i++) sys[a[i]] = 1 } !($1 in sys)')
+[[ -n "$drives" ]] || core_fail 5 "Plug in the USB stick or memory card to write $base to"
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+choose() {  # <words>: the drive's line, by device, name or brand
+  local w; w=$(lower "$1"); w=${w#/dev/}
+  awk -F '\t' -v w="$w" '{ d = $1; sub(/^\/dev\//, "", d); s = tolower($3); sub(/^the /, "", s) }
+    d == w || tolower($2) == w || s == w || tolower($3) == w { print; exit }' <<< "$drives"
+}
+if [[ -n "$target" ]]; then
+  line=$(choose "$target"); [[ -n "$line" ]] || core_fail 5 "No USB drive or memory card called $target is plugged in"
+elif [[ $(grep -c . <<< "$drives") -eq 1 ]]; then line=$drives
+else
+  line=""
+  names=$(cut -f2 <<< "$drives" | awk '{ w[NR] = $0 } END { for (i = 1; i <= NR; i++) printf "%s%s", (i == 1 ? "" : (i == NR ? " or " : ", ")), w[i] }')
+  while [[ -z "$line" ]]; do
+    core_ask answer "Write $base to which: $names?" || core_fail 3 "Nothing was written"
+    line=$(choose "$answer")
+    [[ -n "$line" ]] || { core_wrong "That is not one of them"; core_in_core || core_fail 3 "Nothing was written"; }
+  done
+fi
+IFS=$'\t' read -r whole dname short wsize <<< "$line"
+say=${short#the }
+
+need=$(drive_image_size "$img")
+if [[ -n "$need" && -n "$wsize" ]] && (( need > wsize )); then
+  core_fail 6 "$base needs $(drive_human "$need"), and $dname holds $(drive_human "$wsize")"
+fi
+
+# --- Typed, not pressed ---
+
+while :; do
+  core_ask answer "Everything on $dname is erased and $base is written there. Type $say to go on" || core_fail 3 "Nothing was written"
+  a=$(lower "$answer"); a=${a# }; a=${a% }
+  if [[ "$a" == "$(lower "$say")" || "$a" == "$(lower "$dname")" ]]; then break; fi
+  core_wrong "Type $say, or Esc to stop"
+  core_in_core || core_fail 3 "Nothing was written"
+done
+
+# The drive asked about is still the one plugged in.
+[[ -n "$(choose "$whole")" && "$(choose "$whole" | cut -f2)" == "$dname" ]] || core_fail 5 "$dname was taken out; nothing was written"
+grep -qxF -- "$whole" <<< "$system" && core_fail 1 "$dname is a disk this computer runs from; nothing was written"
+why=$(drive_release "$whole") || core_fail 1 "$why; nothing was written"
+
+# --- Writing ---
+
+prog="$drive_run/takumi/drive-write.progress"; mkdir -p "$(dirname "$prog")"; : > "$prog"
+{ printf '%s: %s to %s (%s)\n' "$(date '+%F %T')" "$img" "$whole" "$dname"; } >> "$log"
+core_note "Writing $base to $dname…"
+writer=""
+cleanup() { if [[ -n "$writer" ]]; then kill "$writer" 2>/dev/null || true; fi; rm -f "$prog"; }
+trap cleanup EXIT
+trap 'exit 143' TERM INT
+(
+  # writes the whole of $whole, the USB drive or memory card chosen and named above, and nothing else
+  drive_image_cat "$img" 2>>"$log" |
+    core_sudo "Writing $base to $dname needs your password" dd of="$whole" bs=4M iflag=fullblock oflag=direct conv=fsync status=progress 2>"$prog"
+) &
+writer=$!
+said=""
+while kill -0 "$writer" 2>/dev/null; do
+  sleep "${TAKUMI_WRITE_POLL:-3}"
+  done_bytes=$(tr '\r' '\n' < "$prog" 2>/dev/null | awk '/^[0-9]+ bytes/ { b = $1 } END { print b }')
+  [[ -n "$done_bytes" && "$done_bytes" != "$said" ]] || continue
+  said=$done_bytes
+  if [[ -n "$need" ]] && (( need > 0 )); then core_note "Writing $base · $(drive_human "$done_bytes") of $(drive_human "$need") ($(( done_bytes * 100 / need ))%)"
+  else core_note "Writing $base · $(drive_human "$done_bytes")"; fi
+done
+rc=0; wait "$writer" || rc=$?; writer=""
+tr '\r' '\n' < "$prog" >> "$log" 2>/dev/null || true
+if (( rc != 0 )); then
+  if grep -qiE 'incorrect password|a password is required|no askpass|authentication' "$prog" 2>/dev/null; then core_fail 1 "Writing was not allowed; nothing was written"; fi
+  core_fail 1 "$base was not written whole to $dname: try again, or another drive. What happened is in $log"
+fi
+core_note "Finishing…"
+sync
+# The new parts may be opened by the drive watch as they appear: close them again, then power the drive off.
+sleep "${TAKUMI_DRIVE_SETTLE:-2}"
+drive_release "$whole" >/dev/null 2>&1 || true
+rm -f "$picked"
+if LC_ALL=C udisksctl power-off -b "$whole" >/dev/null 2>&1; then
+  core_done "$base is on $dname. You can take it out"
+else
+  core_done "$base is on $dname. Eject it before you take it out"
+fi

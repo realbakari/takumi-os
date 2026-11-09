@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Copy the running room kernel to the boot partition
+risk: 1
+sudo: yes
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_current >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || { echo "run via sudo" >&2; exit 1; }
+cur=$(rooms_current); [[ -n "$cur" ]] || exit 0
+# Inside a room an update is building there is nothing to do: staging copies that room's kernel later.
+[[ "$(state_get "$cur" status)" == building ]] && exit 0
+# In an install's chroot the room is / and its state says good; elsewhere the top of Btrfs is mounted.
+rooms_in_chroot || rooms_mount_top
+rooms_write_entry "$cur" ""

@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Contract checks for takumi doctor (commands/doctor/main, the Palette's doctor rows) against a fake
+# computer: all fine says so in one sentence, Wi-Fi left off is switched back on, and what needs a person
+# is said in words, first thing first.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; doctor checks skipped)"; exit 0; }
+repo=$PWD; status=0; n=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-doctor.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export HOME=$t FAKE=$t/state TAKUMI_DOCTOR_WAIT=0 TAKUMI_POWER_SUPPLY=$t/ps TAKUMI_PACMAN_LOG=$t/pacman.log
+export TAKUMI_HW_LSPCI=/dev/null TAKUMI_HW_LSUSB=/dev/null TAKUMI_HW_SYS=$t/none TAKUMI_HW_KERNEL_LOG=/dev/null TAKUMI_HW_CPUINFO=/dev/null
+export PATH="$t/bin:$repo/bin:$PATH"; mkdir -p "$t/bin" "$FAKE" "$t/ps/BAT0"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice"   # fake takumi commands go in front of the real ones
+echo 40000 > "$t/ps/BAT0/energy_full"; echo 50000 > "$t/ps/BAT0/energy_full_design"
+fake() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$t/bin/$1"; chmod +x "$t/bin/$1"; }
+fake nmcli 'case "$*" in *CONNECTIVITY*) cat "$FAKE/conn" ;; "radio wifi") cat "$FAKE/radio" ;; "radio wifi on") echo enabled > "$FAKE/radio"; echo full > "$FAKE/conn" ;; esac'
+fake wpctl 'case "$1" in inspect) exit 0 ;; get-volume) cat "$FAKE/vol" ;; esac'
+fake df 'printf "Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 100000000 60000000 %s 60%% /\n" "$(cat "$FAKE/free")"'
+fake systemctl 'echo "systemctl $*" >> "$FAKE/calls"; case "$*" in *--failed*) cat "$FAKE/failed" 2>/dev/null ;; "--user cat takumi-shell.service") [[ -f "$FAKE/shell-unit" ]] || exit 1 ;; esac; exit 0'
+fake timedatectl 'echo yes'
+printf '#!/bin/sh\nexit 0\n' > "$t/commands/notice/main"; chmod +x "$t/commands/notice/main"
+reset() { echo full > "$FAKE/conn"; echo enabled > "$FAKE/radio"; echo "Volume: 0.40" > "$FAKE/vol"; echo 52428800 > "$FAKE/free"; : > "$FAKE/failed"
+  printf '[%s] [PACMAN] starting full system upgrade\n' "$(date -v-3d +%Y-%m-%dT%H:%M:%S%z 2>/dev/null || date -d '3 days ago' +%Y-%m-%dT%H:%M:%S%z)" > "$TAKUMI_PACMAN_LOG"; }
+check() { n=$((n + 1)); if ! eval "$2"; then echo "   FAIL: $1"; status=1; fi; }
+run() { TAKUMI_CORE=1 takumi doctor < /dev/null 2>&1; }
+
+reset; out=$(run)
+check "all fine says so in one sentence" '[[ "$(tail -n 1 <<< "$out")" == "done All fine: online, sound, space, updates, services and the clock" ]]'
+check "each check is a note" 'grep -q "^note Online$" <<< "$out" && grep -q "^note 50 GB free$" <<< "$out" && grep -q "^note Updated 3 days ago$" <<< "$out"'
+check "the battery's health is told" 'grep -q "^note The battery holds 80% of what it did when new$" <<< "$out"'
+check "the report is kept" 'grep -q "^ok    Online$" "$HOME/.local/state/takumi/doctor.txt"'
+
+reset; echo disabled > "$FAKE/radio"; echo none > "$FAKE/conn"; out=$(run)
+check "Wi-Fi left off is switched back on" 'grep -q "^note Wi-Fi was off; it is on again$" <<< "$out" && [[ "$(tail -n 1 <<< "$out")" == "done Fixed 1; the rest is fine" ]]'
+
+reset; echo "Volume: 0.40 [MUTED]" > "$FAKE/vol"; printf '[2020-01-01T09:00:00+0000] [PACMAN] starting full system upgrade\n' > "$TAKUMI_PACMAN_LOG"
+echo "bluetooth.service loaded failed failed Bluetooth service" > "$FAKE/failed"; out=$(run)
+check "what needs you is counted, the first said" '[[ "$(tail -n 1 <<< "$out")" == "done 3 need you: Sound works but is muted: the speaker mark in the Core, right button" ]]'
+check "an old update is told in days" 'grep -qE "^note Last updated [0-9]+ days ago" <<< "$out"'
+check "a failed service is named" 'grep -q "^note These stopped working: bluetooth " <<< "$out"'
+
+rows=$(takumi palette doctor "something is wrong")
+check "something is wrong finds the check, run in the Core" '[[ "$(jq -c "select(.id==\"doctor:run\") | [.converse, (.run[0:2] | join(\" \"))]" <<< "$rows")" == "[true,\"takumi doctor\"]" ]]'
+check "the last check is offered" 'jq -r .title <<< "$rows" | grep -q "^Last check: 3 needed you$"'
+check "other searches leave it quiet" '[[ -z "$(takumi palette doctor firefox)" ]]'
+
+# Fix-it rows: takumi doctor restart <wifi|bluetooth|sound|desktop>, against a fake /sys/class/net, sudo,
+# modprobe, NetworkManager, BlueZ and PipeWire. Nothing really restarts.
+export TAKUMI_NET_SYS=$t/net TAKUMI_DOCTOR_WAIT=1 TAKUMI_BT_WAIT=1
+mkdir -p "$t/net/lo" "$t/net/wlan0/wireless" "$t/net/wlan0/device/driver" "$t/mod/iwlwifi/holders/iwlmvm"
+ln -s "$t/mod/iwlwifi" "$t/net/wlan0/device/driver/module"
+fake sleep ':'
+fake sudo 'echo "sudo $*" >> "$FAKE/calls"; [[ $1 == -A ]] && shift; [[ -f "$FAKE/sudo-fails" ]] && exit 1; exec "$@"'
+fake modprobe 'echo "modprobe $*" >> "$FAKE/calls"; [[ "$1" == -r && -f "$FAKE/busy" ]] && exit 1; exit 0'
+fake nmcli 'echo "nmcli $*" >> "$FAKE/calls"; case "$*" in *RUNNING*) echo running ;; *"device show wlan0") [[ -f "$FAKE/joined" ]] && printf "100 (connected)\\nCorner Caf\\\\:e\\n" || printf "30 (disconnected)\\n\\n" ;; esac; exit 0'
+fake bluetoothctl 'echo "bluetoothctl $*" >> "$FAKE/calls"; case "$*" in list) echo "Controller 00:11:22:33:44:55 laptop [default]" ;; show) echo "Powered: yes" ;;
+  "devices Paired") printf "Device AA:AA:AA:AA:AA:01 AirPods\\nDevice AA:AA:AA:AA:AA:02 Old Mouse\\nDevice AA:AA:AA:AA:AA:03 Speaker\\n" ;;
+  "info AA:AA:AA:AA:AA:01") printf "\\tTrusted: yes\\n\\tConnected: yes\\n" ;; "info AA:AA:AA:AA:AA:02") printf "\\tTrusted: no\\n" ;;
+  "info AA:AA:AA:AA:AA:03") printf "\\tTrusted: yes\\n\\tConnected: no\\n" ;; esac; exit 0'
+fake wpctl 'case "$1" in inspect) [[ -f "$FAKE/nosink" ]] && exit 1; printf "id 52, type PipeWire:Interface:Node\\n  * node.description = \"Built-in Audio Analog Stereo\"\\n" ;; esac'
+fix() { : > "$FAKE/calls"; out=$(TAKUMI_CORE=1 takumi doctor restart "$@" < /dev/null 2>&1) && rc=0 || rc=$?; }
+
+touch "$FAKE/joined"; fix wifi
+check "Wi-Fi: the driver and what holds it come out, then go back, through sudo ($out)" 'grep -qx "sudo -A modprobe -r iwlmvm iwlwifi" "$FAKE/calls" && grep -qx "sudo -A modprobe -a iwlwifi iwlmvm" "$FAKE/calls" && [[ $(grep -n "modprobe -r" "$FAKE/calls" | cut -d: -f1 | head -n 1) -lt $(grep -n "modprobe -a" "$FAKE/calls" | cut -d: -f1 | head -n 1) ]]'
+check "Wi-Fi: the radio is switched on, and the sentence names the network" 'grep -qx "nmcli radio wifi on" "$FAKE/calls" && [[ "$(tail -n 1 <<< "$out")" == "done Wi-Fi restarted (its driver was reloaded) and joined Corner Caf:e" && $rc == 0 ]]'
+check "Wi-Fi: a note says which driver" 'grep -qx "note Reloading the Wi-Fi driver (iwlwifi)" <<< "$out"'
+touch "$FAKE/busy"; rm -f "$FAKE/joined"; fix wifi
+check "Wi-Fi: a driver that will not unload: NetworkManager restarts instead ($out)" 'grep -qx "sudo -A systemctl restart NetworkManager.service" "$FAKE/calls" && ! grep -q "modprobe -a" "$FAKE/calls" && [[ "$(tail -n 1 <<< "$out")" == "done Wi-Fi restarted (the network service was restarted); choose a network in Quick settings, Wi-Fi" ]]'
+rm -f "$FAKE/busy"; rm "$t/net/wlan0/device/driver/module"; fix wifi
+check "Wi-Fi: a driver built in: NetworkManager restarts" 'grep -qx "sudo -A systemctl restart NetworkManager.service" "$FAKE/calls" && ! grep -q modprobe "$FAKE/calls"'
+rm -rf "$t/net/wlan0"; fix wifi
+check "Wi-Fi: no Wi-Fi here is 3, said ($rc)" '[[ $rc == 3 && "$(tail -n 1 <<< "$out")" == "This computer has no Wi-Fi to restart" ]] && ! grep -q sudo "$FAKE/calls"'
+
+fix bluetooth
+check "Bluetooth: the service restarts through sudo" 'grep -qx "sudo -A systemctl restart bluetooth.service" "$FAKE/calls"'
+check "Bluetooth: paired and trusted devices are connected again, the untrusted left alone" 'grep -qx "bluetoothctl connect AA:AA:AA:AA:AA:01" "$FAKE/calls" && grep -qx "bluetoothctl connect AA:AA:AA:AA:AA:03" "$FAKE/calls" && ! grep -q "connect AA:AA:AA:AA:AA:02" "$FAKE/calls"'
+check "Bluetooth: one sentence says who came back and who did not ($out)" '[[ "$(tail -n 1 <<< "$out")" == "done Bluetooth restarted; AirPods connected again; Speaker did not answer (turn it on, or hold it near)" && $rc == 0 ]]'
+touch "$FAKE/sudo-fails"; fix bluetooth
+check "Bluetooth: no password, no restart: 1, said" '[[ $rc == 1 && "$(tail -n 1 <<< "$out")" == "Bluetooth did not restart (journalctl -u bluetooth says why)" ]] && ! grep -q "bluetoothctl connect" "$FAKE/calls"'
+rm -f "$FAKE/sudo-fails"
+
+fix sound
+check "sound: the user's PipeWire restarts, without sudo" 'grep -qx "systemctl --user restart pipewire.service pipewire-pulse.service wireplumber.service" "$FAKE/calls" && ! grep -q sudo "$FAKE/calls"'
+check "sound: the sentence names the output ($out)" '[[ "$(tail -n 1 <<< "$out")" == "done Sound restarted and plays on Built-in Audio Analog Stereo; an app that was playing may need to start again" ]]'
+touch "$FAKE/nosink"; fix sound
+check "sound: no output after it is said" '[[ "$(tail -n 1 <<< "$out")" == "done Sound restarted, but there is no output to play on: "* ]]'
+rm -f "$FAKE/nosink"
+
+touch "$FAKE/shell-unit"; fix desktop
+check "desktop: said first, then takumi-shell.service restarts without waiting" '[[ "$(head -n 1 <<< "$out")" == "done The desktop is restarting; it is back in a moment, with your apps still open" ]] && grep -qx "systemctl --user --no-block restart takumi-shell.service" "$FAKE/calls" && ! grep -q sudo "$FAKE/calls"'
+rm -f "$FAKE/shell-unit"; fix desktop
+check "desktop: without the unit, 3" '[[ $rc == 3 ]] && ! grep -q "restart takumi-shell" "$FAKE/calls"'
+fix printer
+check "anything else is usage, 2" '[[ $rc == 2 ]]'
+
+rows=$(takumi palette doctor "fix")
+check "fix: the four restart rows, each a conversation" '[[ "$(jq -r "select(.id | startswith(\"doctor:restart:\")) | .title" <<< "$rows" | tr "\n" "|")" == "Restart Wi-Fi|Restart Bluetooth|Restart sound|Restart the desktop|" && "$(jq -s "map(select(.id | startswith(\"doctor:restart:\")) | .converse) | all" <<< "$rows")" == true ]]'
+check "no sound, wifi not working, bluetooth not working" '[[ "$(takumi palette doctor "no sound" | jq -r .title)" == "Restart sound" ]] && takumi palette doctor "wifi not working" | jq -r .run[3] | grep -qx wifi && takumi palette doctor "bluetooth not working" | jq -r .title | grep -qx "Restart Bluetooth"'
+check "two letters stay quiet" '[[ -z "$(takumi palette doctor wi)" ]]'
+
+# The speed test: takumi doctor speed against a fake curl that moves 25 MB in a second each way.
+export TAKUMI_SPEED_SECONDS=2 TAKUMI_SPEED_URL=https://speed.example
+fake curl 'echo "curl $*" >> "$FAKE/calls"; [[ -f "$FAKE/offline" ]] && exit 6; cat > /dev/null
+  case "$*" in *bytes=0*) echo "0.010 0.028" ;; *__down*) echo "11750000 1.000 200" ;; *__up*) echo "2625000 1.000 200" ;; esac'
+: > "$FAKE/calls"; out=$(TAKUMI_CORE=1 takumi doctor speed < /dev/null 2>&1) && rc=0 || rc=$?
+check "speed: one sentence, download, upload and the time an answer takes ($out)" '[[ "$(tail -n 1 <<< "$out")" == "done Download 94 Mbit/s · Upload 21 Mbit/s · 18 ms" && $rc == 0 ]]'
+check "speed: each step is a note" 'grep -qx "note Measuring the download" <<< "$out" && grep -qx "note Download 94 Mbit/s" <<< "$out" && grep -qx "note Measuring the upload" <<< "$out"'
+check "speed: requests run until the time is up, at the address given" '[[ $(grep -c "__down?bytes=25000000" "$FAKE/calls") == 2 ]] && grep -q "https://speed.example/__up" "$FAKE/calls" && ! grep -q sudo "$FAKE/calls"'
+check "speed: the result is kept" '[[ "$(cut -f2 "$HOME/.local/state/takumi/speed.txt")" == "Download 94 Mbit/s · Upload 21 Mbit/s · 18 ms" ]]'
+rows=$(takumi palette doctor "internet slow")
+check "internet slow: the speed test, in the Core, and the last result" '[[ "$(jq -c "select(.id==\"doctor:speed\") | [.converse, .run]" <<< "$rows")" == "[true,[\"takumi\",\"doctor\",\"speed\"]]" ]] && jq -r .title <<< "$rows" | grep -qx "Last speed test: Download 94 Mbit/s · Upload 21 Mbit/s · 18 ms"'
+touch "$FAKE/offline"; out=$(TAKUMI_CORE=1 takumi doctor speed < /dev/null 2>&1) && rc=0 || rc=$?
+check "speed: offline is 1, said, and the last result stays ($rc)" '[[ $rc == 1 && "$(tail -n 1 <<< "$out")" == "The speed test did not answer: check that you are online (\"something is wrong\")" ]] && grep -q "94 Mbit/s" "$HOME/.local/state/takumi/speed.txt"'
+echo "   $n doctor checks against a fake computer"
+exit $status

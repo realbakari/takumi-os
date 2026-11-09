@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: One line for the resting Core: volume, muted, the output's name, microphone in use
+usage: [--marks]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/audio.sh" ]] && { . "$l/audio.sh"; break; }; done
+if ! declare -F audio_state >/dev/null; then
+  if [[ "${1:-}" == --marks ]]; then echo "no no no"; else echo "-1 no No output no"; fi
+  exit 0
+fi
+# --marks: <microphone in use> <camera in use> <microphone muted>, for the privacy marks.
+if [[ "${1:-}" == --marks ]]; then audio_marks; else audio_state; fi

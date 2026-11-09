@@ -1,0 +1,393 @@
+#!/usr/bin/env bash
+# Contract checks for the assistant (lib/intent.sh, commands/intent/*, commands/mcp/serve, the Palette's assistant
+# rows) against fake claude, curl, secret-tool and foot, in a small world of fake takumi commands: the plan's shape
+# on each engine, the agent loop running risk 0 at once and asking once before anything risky, the MCP server over
+# a pipe, and that a key never appears in any command's arguments or in any log. Nothing here reaches a network,
+# a keyring or a real Claude Code.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; assistant checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-intent.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+t=$(cd "$t" && pwd -P)
+export FAKE=$t/fake HOME=$t/home XDG_RUNTIME_DIR=$t/run
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR" "$t/commands"
+# The fakes first, then the router, then only the system's own folders: a claude or curl installed elsewhere is
+# never reached.
+jqdir=$(dirname "$(command -v jq)")
+export PATH="$t/bin:$repo/bin:/usr/bin:/bin:$jqdir"
+export TAKUMI_COMMANDS="$t/commands"
+unset TAKUMI_CORE TAKUMI_MCP_LOG TAKUMI_MCP_ALLOW_RISK
+
+# --- A world of fake commands: risk 0, 1 and 2, one that asks "Keep this?", one that talks, one that needs a
+# terminal, two that print a secret.
+ln -s "$repo/commands/intent" "$t/commands/intent"
+ln -s "$repo/commands/mcp" "$t/commands/mcp"
+fake_command() {  # <group/name> <about lines> <body>
+  mkdir -p "$t/commands/${1%/*}"
+  printf '#!/usr/bin/env bash\n: <<'"'"'ABOUT'"'"'\n%s\nABOUT\n%s\n' "$2" "$3" > "$t/commands/$1"
+  chmod +x "$t/commands/$1"
+}
+fake_command switch/bluetooth $'summary: Turn Bluetooth on or off\nrisk: 0\ntitle: Bluetooth' \
+  'echo "switch bluetooth $*" >> "$FAKE/ran"; echo "Bluetooth is off"'
+fake_command display/brightness $'summary: Set or step brightness\nusage: <0-100|up|down>\nexample: takumi display brightness 30\nrisk: 0' \
+  'echo "display brightness $*" >> "$FAKE/ran"; echo "Brightness $1%"'
+fake_command display/scale $'summary: Make everything bigger or smaller; it goes back unless you keep it\nusage: <bigger|smaller> [screen]\nrisk: 0' \
+  'echo "display scale $*" >> "$FAKE/ran"; say() { if [[ "${TAKUMI_CORE:-}" == 1 ]]; then echo "done $1"; else echo "$1"; fi; }
+   [[ "${TAKUMI_CORE:-}" != 1 ]] || echo "confirm 10 Keep this?"
+   IFS= read -r a || a=no; if [[ "$a" == yes ]]; then say "Everything at 125%"; exit 0; fi; say "Went back"; exit 3'
+fake_command install/main $'summary: Install optional software by name\nusage: <name>\nexample: takumi install docker\nrisk: 1\nsudo: yes\nconverse: yes' \
+  'echo "install $*" >> "$FAKE/ran"; if [[ "${TAKUMI_CORE:-}" == 1 ]]; then echo "note Installing $1…"; echo "done Installed $1."; else echo "Installed $1."; fi'
+fake_command power/restart $'summary: Restart the computer\nrisk: 1\ntitle: Restart' 'echo "power restart $*" >> "$FAKE/ran"'
+fake_command room/prune $'summary: Delete old rooms\nusage: [--auto]\nrisk: 2\ninteractive: yes' 'echo "room prune $*" >> "$FAKE/ran"'
+fake_command wifi/share $'summary: Show a Wi-Fi password\nrisk: 0' 'echo "wifi share" >> "$FAKE/ran"; echo "Password: hunter22"'
+fake_command disk/recovery $'summary: Make a new recovery code\nrisk: 1\nconverse: yes' 'echo "disk recovery" >> "$FAKE/ran"'
+
+# --- Fake programs. Each records its arguments (one JSON array per call) and what came on stdin.
+cat > "$t/bin/curl" <<'FAKE'
+#!/usr/bin/env bash
+# Answers from $FAKE: the models list ($FAKE/models.status, $FAKE/models.json), the installer, and the model's
+# turns ($FAKE/replies, one "<status> <json>" line each, used up in order).
+printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]' >> "$FAKE/curl.args"
+pop() { local r; r=$(head -n 1 "$1"); if [[ $(wc -l < "$1") -gt 1 ]]; then tail -n +2 "$1" > "$1.next"; mv "$1.next" "$1"; fi; printf '%s' "$r"; }
+out=""; write=""; url=""; data=""; config=no
+while (( $# )); do
+  case "$1" in
+    -o) out=$2; shift ;; -w) write=$2; shift ;; -K) [[ $2 == - ]] && config=yes; shift ;;
+    --data-binary) data=${2#@}; shift ;; -X|-H|--max-time) shift ;; -*) ;; *) url=$1 ;;
+  esac
+  shift
+done
+[[ $config == no ]] || { cat; echo; } >> "$FAKE/curl.stdin"
+[[ -z "$data" ]] || jq -c . "$data" >> "$FAKE/curl.bodies"
+answer() { if [[ -n "$out" ]]; then printf '%s' "$2" > "$out"; else printf '%s' "$2"; fi; [[ -z "$write" ]] || printf '%s' "$1"; }
+case "$url" in
+  https://claude.ai/install.sh) cat "$FAKE/install-script" ;;
+  */models) answer "$(pop "$FAKE/models.status")" "$(cat "$FAKE/models.json")" ;;
+  */v1/messages|*/chat/completions) r=$(pop "$FAKE/replies"); [[ "$r" == 000* ]] && exit 7; answer "${r%% *}" "${r#* }" ;;
+  *) echo "fake curl: unexpected $url" >&2; exit 99 ;;
+esac
+FAKE
+cat > "$t/bin/secret-tool" <<'FAKE'
+#!/usr/bin/env bash
+# A keyring in $FAKE/keyring, by engine; $FAKE/nokeyring makes it unavailable.
+printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]' >> "$FAKE/secret-tool.args"
+[[ ! -f "$FAKE/nokeyring" ]] || exit 1
+for a; do last=$a; done
+case "$1" in
+  store) mkdir -p "$FAKE/keyring"; cat > "$FAKE/keyring/$last" ;;
+  lookup) [[ -f "$FAKE/keyring/$last" ]] && cat "$FAKE/keyring/$last" ;;
+  *) exit 2 ;;
+esac
+FAKE
+cat > "$FAKE/claude-fake" <<'FAKE'
+#!/usr/bin/env bash
+# Claude Code: signed in when $FAKE/claude.signed-in exists. -p with --json-schema answers $FAKE/claude.plan; with
+# --mcp-config it plays the model: starts the MCP server it was given, with only the environment it was given,
+# makes the calls in $FAKE/claude.calls, and answers $FAKE/claude.result.
+printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]' >> "$FAKE/claude.args"
+case "${1:-} ${2:-}" in
+  "auth status") [[ -f "$FAKE/claude.signed-in" ]]; exit ;;
+  "auth login") touch "$FAKE/claude.signed-in"; exit 0 ;;
+esac
+cat > "$FAKE/claude.stdin"; pwd > "$FAKE/claude.cwd"
+mcp=""; schema=""
+while (( $# )); do case "$1" in --mcp-config) mcp=$2; shift ;; --json-schema) schema=$2; shift ;; --system-prompt-file) cp "$2" "$FAKE/claude.system"; shift ;; esac; shift; done
+[[ -f "$FAKE/claude.signed-in" ]] || { echo '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}'; exit 1; }
+if [[ -n "$schema" ]]; then cat "$FAKE/claude.plan"; exit 0; fi
+if [[ -n "$mcp" ]]; then
+  cp "$mcp" "$FAKE/claude.mcp-config"
+  cmd=$(jq -r '.mcpServers.takumi.command' "$mcp")
+  envs=(); while IFS= read -r kv; do envs+=("$kv"); done < <(jq -r '.mcpServers.takumi.env | to_entries[] | "\(.key)=\(.value)"' "$mcp")
+  margs=(); while IFS= read -r a; do margs+=("$a"); done < <(jq -r '.mcpServers.takumi.args[]' "$mcp")
+  { echo '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fake","version":"0"}}}'
+    echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+    n=1; while IFS= read -r c; do jq -c --argjson n "$n" '{jsonrpc: "2.0", id: $n, method: "tools/call", params: .}' <<< "$c"; n=$((n + 1)); done < "$FAKE/claude.calls"
+  } | env -i FAKE="$FAKE" "${envs[@]}" "$cmd" "${margs[@]}" > "$FAKE/claude.mcp"
+  cat "$FAKE/claude.result"
+fi
+FAKE
+cat > "$t/bin/foot" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]' >> "$FAKE/foot.args"
+[[ "${1:-}" == -e ]] && shift
+"$@" </dev/null
+FAKE
+chmod +x "$t/bin/"* "$FAKE/claude-fake"
+cp "$FAKE/claude-fake" "$t/bin/claude"
+# Anthropic's installer, as the fake serves it: puts the fake Claude Code in ~/.local/bin.
+cat > "$FAKE/install-script" <<'FAKE'
+mkdir -p "$HOME/.local/bin" && cp "$FAKE/claude-fake" "$HOME/.local/bin/claude" && echo ran >> "$FAKE/installer"
+FAKE
+
+state=$HOME/.local/state/takumi/intent
+conf=$HOME/.config/takumi/intent.toml
+reset() {  # a clean home and fakes; what the fakes recorded is kept aside for the key check at the end
+  cat "$FAKE"/*.args >> "$t/all.args" 2>/dev/null || true
+  cat "$FAKE/curl.bodies" >> "$t/all.bodies" 2>/dev/null || true
+  cat "$FAKE/curl.stdin" >> "$t/all.stdin" 2>/dev/null || true
+  cat "$HOME/.local/state/takumi/intent/transcript.jsonl" "$HOME/.local/state/takumi/intent/"*.log >> "$t/all.logs" 2>/dev/null || true
+  rm -rf "${FAKE:?}"/[a-z]*.* "$FAKE/keyring" "$FAKE/nokeyring" "$FAKE/ran" "$FAKE/replies" "$FAKE/installer" "$HOME/.config" "$HOME/.local"
+  : > "$FAKE/ran"; echo 200 > "$FAKE/models.status"; echo '{"data":[]}' > "$FAKE/models.json"
+}
+check() { if eval "$2"; then :; else echo "intent: $1"; status=1; fi; }
+said() { tail -n 1 <<< "$1"; }
+conf_is() { [[ "$(sed -n "s/^$1 = \"\(.*\)\"/\1/p" "$conf")" == "$2" ]]; }
+body() { sed -n "${1}p" "$FAKE/curl.bodies"; }   # the nth body sent to a model
+setup() { local rc=0 out; out=$(printf '%s\n' "${@:2}" | "$repo/commands/intent/setup" "$1" 2>&1) || rc=$?; printf '%s|%s' "$rc" "$(said "$out")"; }
+
+ANT=sk-ant-test-0123456789abcdef
+OAI=sk-proj-test-9876543210fedcba
+
+# --- Nothing of the old local model is left.
+check "no Ollama anywhere in the assistant" '! grep -rqiE "ollama|11434|qwen" commands/intent commands/mcp lib/intent.sh docs/intent.md commands/palette/index shell/Core/Providers.qml shell/Core/Open.qml'
+check "the old completion helper is gone" '[[ ! -e commands/intent/complete ]]'
+
+# --- Not set up: nothing is asked of anyone.
+reset
+rc=0; out=$("$repo/commands/intent/main" --plan "turn off bluetooth" 2>/dev/null) || rc=$?
+check "plan before setup: 3 and no output ($rc)" '[[ $rc == 3 && -z "$out" ]]'
+rc=0; out=$("$repo/commands/intent/ask" "turn off bluetooth" 2>&1) || rc=$?
+check "ask before setup: 3 and what to do ($rc)" '[[ $rc == 3 && "$(said "$out")" == "The assistant is not set up. Type assistant in the Palette to choose Claude or OpenAI." ]]'
+check "nothing was sent anywhere" '[[ ! -f "$FAKE/curl.args" && ! -f "$FAKE/claude.args" ]]'
+
+# --- An Anthropic key, in the Core: a wrong one asked again, then kept in the keyring.
+reset; printf '401\n200\n' > "$FAKE/models.status"
+said=$(printf '%s\n' "bad key!" "sk-ant-wrong-00000000" "$ANT" | TAKUMI_CORE=1 "$repo/commands/intent/setup" anthropic; echo "rc=$?")
+want=$(printf '%s\n' "secret Anthropic API key" "wrong That does not look like an Anthropic API key" "secret Anthropic API key" \
+  "note Checking the key…" "wrong That key did not work" "secret Anthropic API key" "note Checking the key…" \
+  "done The assistant now uses Claude through your Anthropic key, kept in your keyring." "rc=0")
+check "anthropic setup in the Core: secret, wrong, again, done" '[[ "$said" == "$want" ]]'
+check "the key is checked with the list of models, the version header set" '[[ "$(jq -r ".[-1]" "$FAKE/curl.args" | tail -n 1)" == https://api.anthropic.com/v1/models ]] && grep -q "anthropic-version: 2026-10-21" "$FAKE/curl.args"'
+check "the key went to the keyring on stdin, exactly" '[[ "$(cat "$FAKE/keyring/anthropic")" == "$ANT" ]]'
+check "engine and model written" 'conf_is engine anthropic && conf_is model claude-opus-5-5'
+echo 401 > "$FAKE/models.status"; res=$(setup anthropic "sk-ant-wrong-00000000")
+check "at a terminal a refused key is 4 ($res)" '[[ "$res" == "4|That key did not work" ]] && [[ "$(cat "$FAKE/keyring/anthropic")" == "$ANT" ]]'
+rc=0; out=$("$repo/commands/intent/setup" anthropic </dev/null 2>&1) || rc=$?
+check "no key typed: 3 ($rc)" '[[ $rc == 3 && "$(said "$out")" == "Nothing changed. The assistant needs an Anthropic API key." ]]'
+
+# --- The plan on the Anthropic API: the first calls the model would make, as exact lines.
+reset; echo 200 > "$FAKE/models.status"; setup anthropic "$ANT" > /dev/null
+turn1='{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5-5","content":[{"type":"thinking","thinking":"","signature":"c2ln"},{"type":"tool_use","id":"toolu_1","name":"switch_bluetooth","input":{"args":[]}},{"type":"tool_use","id":"toolu_2","name":"install_main","input":{"args":["docker"]}},{"type":"tool_use","id":"toolu_3","name":"wifi_share","input":{"args":[]}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}'
+turn2='{"id":"msg_2","type":"message","role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"Bluetooth is off."}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}'
+echo "200 $turn1" > "$FAKE/replies"
+plan=$("$repo/commands/intent/main" --plan "turn off bluetooth and install docker")
+check "anthropic plan: exact lines, the secret-printing command dropped ($plan)" '[[ "$plan" == "[\"takumi switch bluetooth\",\"takumi install docker\"]" ]]'
+b=$(body 1)
+check "the request: opus 5.5, effort set, fallbacks, no thinking or temperature" '[[ "$(jq -c "[.model, .output_config.effort, .fallbacks, has(\"thinking\"), has(\"temperature\"), .tool_choice.type, .max_tokens]" <<< "$b")" == "[\"claude-opus-5-5\",\"low\",\"default\",false,false,\"auto\",16000]" ]]'
+check "the headers: API version and the fallback beta" 'jq -e "index(\"anthropic-version: 2026-10-21\") and index(\"anthropic-beta: server-side-fallback-2026-07-01\")" <<< "$(tail -n 1 "$FAKE/curl.args")" >/dev/null'
+check "tools: one per command, args a list, risk in the description, no secrets offered" '[[ "$(jq -c "[.tools[].name] | sort" <<< "$b")" == "[\"display_brightness\",\"display_scale\",\"install_main\",\"power_restart\",\"room_prune\",\"switch_bluetooth\"]" ]] && jq -e ".tools[] | select(.name == \"install_main\") | (.description | contains(\"Risk 1\")) and .input_schema.properties.args.type == \"array\"" <<< "$b" >/dev/null'
+check "the system prompt is cached" '[[ "$(jq -r ".system[0].cache_control.type" <<< "$b")" == ephemeral ]]'
+check "a plan writes nothing down" '[[ ! -f "$state/transcript.jsonl" ]]'
+echo "000" > "$FAKE/replies"
+rc=0; out=$("$repo/commands/intent/main" --plan "turn off bluetooth" 2>/dev/null) || rc=$?
+check "plan with no network: 5, nothing printed ($rc)" '[[ $rc == 5 && -z "$out" ]]'
+
+# --- The agent on the Anthropic API, in the Core: risk 0 runs, the risky one is asked about once, then runs.
+reset; setup anthropic "$ANT" > /dev/null
+printf '%s\n' "200 $turn1" "200 $turn2" > "$FAKE/replies"
+said=$(printf 'yes\n' | TAKUMI_CORE=1 "$repo/commands/intent/ask" "turn off bluetooth and install docker"; echo "rc=$?")
+want=$(printf '%s\n' "note Thinking…" "note takumi switch bluetooth…" "note Thinking…" "confirm Run takumi install docker?" \
+  "note takumi install docker…" "note Installing docker…" "note Installed docker." "done Bluetooth is off. Installed docker." "rc=0")
+check "ask in the Core: notes, one question, the nested conversation, done" '[[ "$said" == "$want" ]]'
+check "risk 0 ran at once, the risky one only after yes" '[[ "$(cat "$FAKE/ran")" == "$(printf "%s\n" "switch bluetooth " "install docker")" ]]'
+b=$(body 2)
+check "the whole first answer went back, thinking block and all" '[[ "$(jq -c ".messages[1]" <<< "$b")" == "$(jq -c "{role: \"assistant\", content: .content}" <<< "$turn1")" ]]'
+check "all three results in one user message" '[[ "$(jq -c ".messages[2] | [.role, (.content | map(.type)), (.content | map(.tool_use_id))]" <<< "$b")" == "[\"user\",[\"tool_result\",\"tool_result\",\"tool_result\"],[\"toolu_1\",\"toolu_2\",\"toolu_3\"]]" ]]'
+check "risk 0 output went back; the risky one waits; an unknown tool is an error" '[[ "$(jq -c ".messages[2].content | map([.content, (.is_error // false)])" <<< "$b")" == "[[\"Bluetooth is off\",false],[\"needs the person'"'"'s approval: takumi install docker\",false],[\"There is no tool called wifi_share.\",true]]" ]]'
+check "the agent asks at medium effort" '[[ "$(jq -r .output_config.effort <<< "$b")" == medium ]]'
+check "the transcript: request, what ran, what was asked and approved, the last words" '[[ "$(jq -sc "map(keys_unsorted - [\"at\",\"id\"] | join(\",\"))" "$state/transcript.jsonl")" == "[\"engine,model,request\",\"ran,status\",\"asked,approved\",\"ran,status,approved\",\"said\"]" ]]'
+check "one id for the whole run" '[[ "$(jq -r .id "$state/transcript.jsonl" | sort -u | wc -l | tr -d " ")" == 1 ]]'
+
+reset; setup anthropic "$ANT" > /dev/null
+printf '%s\n' "200 $turn1" "200 $turn2" > "$FAKE/replies"
+said=$(printf 'no\n' | TAKUMI_CORE=1 "$repo/commands/intent/ask" "turn off bluetooth and install docker"; echo "rc=$?")
+check "a no: nothing risky runs" '[[ "$said" == *"confirm Run takumi install docker?"$'"'"'\n'"'"'"done Bluetooth is off. Nothing else changed."$'"'"'\n'"'"'"rc=0" ]] && ! grep -q install "$FAKE/ran"'
+check "a no is written down" 'grep -q "\"approved\":false" "$state/transcript.jsonl"'
+
+reset; setup anthropic "$ANT" > /dev/null
+printf '%s\n' "200 $turn1" "200 $turn2" > "$FAKE/replies"
+out=$(printf 'yes\n' | "$repo/commands/intent/ask" "turn off bluetooth and install docker")
+check "at a terminal: the words, then the risky one runs there ($(said "$out"))" '[[ "$out" == *"Bluetooth is off."*"Installed docker."* && "$(said "$out")" == "Bluetooth is off." ]] && grep -q "install docker" "$FAKE/ran"'
+
+# A risk 0 command that asks ("Keep this?") asks the person in the Core, and the model reads how it ended;
+# with nobody to answer, it goes back.
+scale1='{"content":[{"type":"tool_use","id":"toolu_s","name":"display_scale","input":{"args":["bigger"]}}],"stop_reason":"tool_use"}'
+scale2='{"content":[{"type":"text","text":"Everything is bigger now."}],"stop_reason":"end_turn"}'
+reset; setup anthropic "$ANT" > /dev/null
+printf '%s\n' "200 $scale1" "200 $scale2" > "$FAKE/replies"
+said=$(printf 'yes\n' | TAKUMI_CORE=1 "$repo/commands/intent/ask" "make everything bigger"; echo "rc=$?")
+want=$(printf '%s\n' "note Thinking…" "note takumi display scale bigger…" "confirm 10 Keep this?" "note Everything at 125%" "note Thinking…" "done Everything is bigger now." "rc=0")
+check "Keep this? reaches the person in the Core" '[[ "$said" == "$want" ]]'
+check "the model reads how it ended" '[[ "$(jq -c ".messages[2].content[0] | [.content, (.is_error // false)]" <<< "$(body 2)")" == "[\"Everything at 125%\",false]" ]]'
+printf '%s\n' "200 $scale1" "200 $scale2" > "$FAKE/replies"; : > "$FAKE/curl.bodies"
+"$repo/commands/intent/ask" "make everything bigger" > /dev/null
+check "outside the Core nobody answers, and the model is told" '[[ "$(jq -c ".messages[2].content[0] | [.content, .is_error]" <<< "$(body 2)")" == "[\"It did not work (exit status 3). It said: Went back\",true]" ]]'
+
+# The model's ways of stopping.
+reset; setup anthropic "$ANT" > /dev/null
+echo '200 {"content":[],"stop_reason":"refusal","stop_details":{"type":"refusal","category":null}}' > "$FAKE/replies"
+rc=0; out=$("$repo/commands/intent/ask" "do something" 2>&1) || rc=$?
+check "a refusal: 6, nothing run ($rc)" '[[ $rc == 6 && "$(said "$out")" == "Claude declined that request. Nothing changed." && ! -s "$FAKE/ran" ]]'
+echo '200 {"content":[{"type":"tool_use","id":"t","name":"switch_bluetooth","input":{"args":[]}}],"stop_reason":"max_tokens"}' > "$FAKE/replies"
+rc=0; out=$("$repo/commands/intent/ask" "do something" 2>&1) || rc=$?
+check "cut short: 1, its tool never runs ($rc)" '[[ $rc == 1 && ! -s "$FAKE/ran" ]]'
+loop='{"content":[{"type":"tool_use","id":"t","name":"switch_bluetooth","input":{"args":[]}}],"stop_reason":"tool_use"}'
+for _ in 1 2 3 4 5 6 7 8 9 10; do echo "200 $loop"; done > "$FAKE/replies"
+: > "$FAKE/curl.bodies"
+out=$("$repo/commands/intent/ask" "keep going")
+check "at most eight rounds ($(said "$out"))" '(( $(wc -l < "$FAKE/curl.bodies") == 8 )) && [[ "$(said "$out")" == "I stopped after eight steps." ]]'
+echo '401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}' > "$FAKE/replies"
+rc=0; out=$("$repo/commands/intent/ask" "do something" 2>&1) || rc=$?
+check "a refused key: 4 ($rc)" '[[ $rc == 4 && "$(said "$out")" == "Anthropic did not accept the assistant'"'"'s key. Set it again with Use an Anthropic API key for the assistant in the Palette." ]]'
+
+# --- OpenAI: the newest general GPT model the key can use, the plan, and the loop.
+reset
+echo '{"data":[{"id":"gpt-4.1"},{"id":"gpt-5"},{"id":"gpt-5.1"},{"id":"gpt-5.2"},{"id":"gpt-5.2-mini"},{"id":"gpt-5.1-codex"},{"id":"gpt-5.2-2025-12-11"},{"id":"o3"},{"id":"gpt-4o"}]}' > "$FAKE/models.json"
+res=$(setup openai "$OAI")
+check "openai setup picks gpt-5.2 ($res)" '[[ "$res" == "0|The assistant now uses OpenAI'"'"'s gpt-5.2, kept in your keyring." ]] && conf_is engine openai && conf_is model gpt-5.2'
+check "openai's key goes as a bearer header on stdin" 'grep -q "header = \"Authorization: Bearer $OAI\"" "$FAKE/curl.stdin" && [[ "$(jq -r ".[-1]" <<< "$(tail -n 1 "$FAKE/curl.args")")" == https://api.openai.com/v1/models ]]'
+echo '{"data":[{"id":"gpt-4.1"},{"id":"gpt-4.1-mini"}]}' > "$FAKE/models.json"
+check "an older key gets gpt-4.1" '[[ "$(setup openai "$OAI")" == *"gpt-4.1, kept in your keyring." ]]'
+echo '{"data":[{"id":"gpt-4.1"},{"id":"gpt-5"},{"id":"gpt-5.2"}]}' > "$FAKE/models.json"; setup openai "$OAI" > /dev/null
+oturn1='{"id":"c1","object":"chat.completion","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"display_brightness","arguments":"{\"args\":[\"30\"]}"}},{"id":"call_2","type":"function","function":{"name":"power_restart","arguments":"{\"args\":[]}"}}]}}]}'
+oturn2='{"id":"c2","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"The screen is at 30 percent."}}]}'
+echo "200 $oturn1" > "$FAKE/replies"; : > "$FAKE/curl.bodies"
+plan=$("$repo/commands/intent/main" --plan "dim the screen to 30 and restart")
+check "openai plan: exact lines ($plan)" '[[ "$plan" == "[\"takumi display brightness 30\",\"takumi power restart\"]" ]]'
+check "openai request: the model, function tools, auto" '[[ "$(jq -c "[.model, .tool_choice, .tools[0].type, (.tools | map(.function.name) | sort | index(\"switch_bluetooth\") != null), .messages[0].role]" <<< "$(body 1)")" == "[\"gpt-5.2\",\"auto\",\"function\",true,\"system\"]" ]]'
+printf '%s\n' "200 $oturn1" "200 $oturn2" > "$FAKE/replies"; : > "$FAKE/curl.bodies"; : > "$FAKE/ran"
+said=$(printf 'yes\n' | TAKUMI_CORE=1 "$repo/commands/intent/ask" "dim the screen to 30 and restart"; echo "rc=$?")
+check "openai ask: brightness at once, restart after yes ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$said" == *"note takumi display brightness 30…"*"confirm Run takumi power restart?"*"done The screen is at 30 percent."*"rc=0" && "$(cat "$FAKE/ran")" == "$(printf "%s\n" "display brightness 30" "power restart ")" ]]'
+b=$(body 2)
+check "openai: the assistant turn with its tool calls, then one tool message each" '[[ "$(jq -c ".messages[2:] | map([.role, (.tool_call_id // (.tool_calls | length))])" <<< "$b")" == "[[\"assistant\",2],[\"tool\",\"call_1\"],[\"tool\",\"call_2\"]]" && "$(jq -r ".messages[3].content, .messages[4].content" <<< "$b")" == "$(printf "%s\n" "Brightness 30%" "needs the person'"'"'s approval: takumi power restart")" ]]'
+
+# An approved command that needs a terminal opens in one; the Core says where it went.
+oturn3='{"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_9","type":"function","function":{"name":"room_prune","arguments":"{\"args\":[\"--auto\"]}"}}]}}]}'
+printf '%s\n' "200 $oturn3" "200 $oturn2" > "$FAKE/replies"; : > "$FAKE/ran"
+said=$(printf 'yes\n' | TAKUMI_CORE=1 "$repo/commands/intent/ask" "clean up old rooms"; echo "rc=$?")
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s "$FAKE/ran" ]] && break; sleep 0.2; done
+check "risk 2 that needs a terminal: asked, then opened in one ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$said" == *"confirm Run takumi room prune --auto?"*"done The screen is at 30 percent. Opened in a terminal: takumi room prune --auto."*"rc=0" && "$(cat "$FAKE/ran")" == "room prune --auto" ]] && grep -q "\"-e\",\"sh\",\"-c\"" "$FAKE/foot.args"'
+echo "200 $oturn2" > "$FAKE/replies"
+check "takumi intent <request> is ask" '[[ "$("$repo/commands/intent/main" "how bright is it" | tail -n 1)" == "The screen is at 30 percent." ]]'
+
+# --- No keyring: the key in a file only this user reads, and it still works.
+reset; touch "$FAKE/nokeyring"
+echo '{"data":[{"id":"gpt-5"}]}' > "$FAKE/models.json"
+res=$(setup openai "$OAI")
+check "no keyring: a private file ($res)" '[[ "$res" == "0|The assistant now uses OpenAI'"'"'s gpt-5, kept in a file only you can read." && "$(cat "$state/keys/openai")" == "$OAI" && "$(ls -l "$state/keys/openai" | cut -c1-10)" == "-rw-------" ]]'
+echo "200 $oturn2" > "$FAKE/replies"; : > "$FAKE/curl.stdin"
+check "the file's key is used" '[[ "$("$repo/commands/intent/ask" "hello" | tail -n 1)" == "The screen is at 30 percent." ]] && grep -q "Bearer $OAI" "$FAKE/curl.stdin"'
+
+# --- Claude Code: installed from Anthropic when missing, signed in, then planning and acting through MCP.
+reset
+mv "$t/bin/claude" "$FAKE/claude-away"
+if command -v claude >/dev/null; then
+  echo "   (a claude in the system's folders; the install check is skipped)"
+else
+  said=$(printf 'yes\nyes\n' | TAKUMI_CORE=1 "$repo/commands/intent/setup" claude; echo "rc=$?")
+  want=$(printf '%s\n' "note Looking for Claude Code…" "confirm Claude Code is not on this computer. Install it from Anthropic? It goes in your home folder; no password needed." \
+    "note Installing Claude Code…" "confirm Claude Code needs you to sign in once with your Claude account: a terminal opens, then your browser. Open it now?" \
+    "note Sign in in your browser, then come back here…" "done The assistant now uses Claude, through your Claude account." "rc=0")
+  check "claude setup in the Core: install, sign in, done" '[[ "$said" == "$want" ]]'
+  check "Anthropic's installer ran, the sign-in opened in a terminal" '[[ -f "$FAKE/installer" && -x "$HOME/.local/bin/claude" ]] && [[ "$(jq -c ".[1:]" "$FAKE/foot.args")" == "[\"$HOME/.local/bin/claude\",\"auth\",\"login\"]" ]] && conf_is engine claude'
+  reset
+  res=$(setup claude no)
+  check "declining the install: 3 ($res)" '[[ "$res" == "3|Nothing changed. The assistant needs Claude Code, or an API key." && ! -f "$FAKE/installer" ]]'
+fi
+mv "$FAKE/claude-away" "$t/bin/claude"
+reset
+res=$(setup claude no)
+check "declining the sign-in: 3 and what to do ($res)" '[[ "$res" == "3|To finish, run claude auth login in a terminal, then choose Use Claude for the assistant again." ]]'
+touch "$FAKE/claude.signed-in"
+res=$(setup claude)
+check "signed in already: no questions ($res)" '[[ "$res" == "0|The assistant now uses Claude, through your Claude account." ]] && conf_is engine claude'
+rm -f "$conf"; res=$(setup "")
+check "no word: Claude ($res)" '[[ "$res" == "0|"* ]] && conf_is engine claude'
+
+echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"calls":[{"tool":"switch_bluetooth","args":[]},{"tool":"display_brightness","args":["30"]},{"tool":"nosuch","args":[]}]}}' > "$FAKE/claude.plan"
+: > "$FAKE/claude.args"
+plan=$("$repo/commands/intent/main" --plan "turn off bluetooth and dim to 30")
+check "claude plan: exact lines, unknown tools dropped ($plan)" '[[ "$plan" == "[\"takumi switch bluetooth\",\"takumi display brightness 30\"]" ]]'
+a=$(tail -n 1 "$FAKE/claude.args")
+check "claude plan flags: print, json, no tools, own prompt, schema, no session, no MCP" '[[ "$(jq -c "[.[0:4], (index(\"--system-prompt-file\") != null), (.[index(\"--json-schema\") + 1] | fromjson | .required), (index(\"--no-session-persistence\") != null), (index(\"--strict-mcp-config\") != null), (index(\"--mcp-config\") == null)]" <<< "$a")" == "[[\"-p\",\"--output-format\",\"json\",\"--tools\"],true,[\"calls\"],true,true,true]" && "$(jq -r ".[4]" <<< "$a")" == "" ]]'
+check "the request goes on stdin, never as an argument" '[[ "$(cat "$FAKE/claude.stdin")" == "turn off bluetooth and dim to 30" ]] && ! grep -q "dim to 30" "$FAKE/claude.args"'
+check "the plan prompt lists the tools with their risk" 'grep -q "^- install_main: Install optional software by name. Arguments: <name>.*Risk 1" "$FAKE/claude.system"'
+check "Claude Code runs in Intent's own folder" '[[ "$(cat "$FAKE/claude.cwd")" == "$state" ]]'
+
+printf '%s\n' '{"name":"switch_bluetooth","arguments":{"args":[]}}' '{"name":"install_main","arguments":{"args":["docker"]}}' > "$FAKE/claude.calls"
+echo '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"Bluetooth is off."}' > "$FAKE/claude.result"
+: > "$FAKE/claude.args"; : > "$FAKE/ran"
+said=$(printf 'yes\n' | TAKUMI_CORE=1 "$repo/commands/intent/ask" "turn off bluetooth and install docker"; echo "rc=$?")
+want=$(printf '%s\n' "note Asking Claude…" "note takumi switch bluetooth…" "confirm Run takumi install docker?" "note takumi install docker…" \
+  "note Installing docker…" "note Installed docker." "done Bluetooth is off. Installed docker." "rc=0")
+check "claude ask in the Core: its commands as notes, one question, done" '[[ "$said" == "$want" ]]'
+check "risk 0 ran in the MCP server, the risky one only after yes" '[[ "$(cat "$FAKE/ran")" == "$(printf "%s\n" "switch bluetooth " "install docker")" ]]'
+a=$(tail -n 1 "$FAKE/claude.args")
+check "claude agent flags: Takumi's MCP server only, its tools allowed, eight turns, no session" '[[ "$(jq -c "[(index(\"--strict-mcp-config\") != null), .[index(\"--allowedTools\") + 1], .[index(\"--max-turns\") + 1], (index(\"--no-session-persistence\") != null), .[index(\"--tools\") + 1], (index(\"--json-schema\") == null)]" <<< "$a")" == "[true,\"mcp__takumi__*\",\"8\",true,\"\",true]" ]]'
+check "the MCP config: takumi mcp serve with an events file" '[[ "$(jq -c ".mcpServers.takumi | [.args, (.env.TAKUMI_MCP_LOG | length > 0), (.env.TAKUMI_COMMANDS == \"$t/commands\")]" "$FAKE/claude.mcp-config")" == "[[\"mcp\",\"serve\"],true,true]" ]]'
+check "the model was told the risky call waits" 'grep -q "needs the person'"'"'s approval: takumi install docker" "$FAKE/claude.mcp"'
+check "the claude run is written down" '[[ "$(jq -sc "map(keys_unsorted - [\"at\",\"id\"] | join(\",\"))" "$state/transcript.jsonl")" == "[\"engine,model,request\",\"ran,status\",\"asked,approved\",\"ran,status,approved\",\"said\"]" ]]'
+printf '%s\n' '{"name":"display_scale","arguments":{"args":["bigger"]}}' > "$FAKE/claude.calls"
+echo '{"type":"result","subtype":"success","is_error":false,"result":"Everything is bigger now."}' > "$FAKE/claude.result"
+said=$(printf 'yes\n' | TAKUMI_CORE=1 "$repo/commands/intent/ask" "make everything bigger"; echo "rc=$?")
+check "through Claude Code too, Keep this? reaches the person ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$said" == *"note takumi display scale bigger…"$'"'"'\n'"'"'"confirm 10 Keep this?"$'"'"'\n'"'"'"note Everything at 125%"*"done Everything is bigger now."*"rc=0" ]]'
+check "and Claude reads how it ended" '[[ "$(jq -r "select(.id == 1) | .result.content[0].text" "$FAKE/claude.mcp")" == "Everything at 125%" ]]'
+rm -f "$FAKE/claude.signed-in"
+rc=0; out=$("$repo/commands/intent/ask" "hello" 2>&1) || rc=$?
+check "signed out: 4 and what to do ($rc)" '[[ $rc == 4 && "$(said "$out")" == "Claude Code is not signed in. Choose Use Claude for the assistant in the Palette to sign in." ]]'
+
+# --- The model command.
+check "the model in use" '[[ "$("$repo/commands/intent/model")" == "claude: the model Claude Code chooses" ]]'
+check "choosing one" '[[ "$("$repo/commands/intent/model" claude-sonnet-5-5)" == "The assistant now uses claude-sonnet-5-5." ]] && conf_is model claude-sonnet-5-5 && conf_is engine claude'
+touch "$FAKE/claude.signed-in"; "$repo/commands/intent/main" --plan "turn off bluetooth" > /dev/null
+check "Claude Code is given that model" '[[ "$(jq -r ".[index(\"--model\") + 1]" <<< "$(tail -n 1 "$FAKE/claude.args")")" == claude-sonnet-5-5 ]]'
+check "default goes back" '[[ "$("$repo/commands/intent/model" default)" == "The assistant now uses the model Claude Code chooses." ]]'
+rc=0; "$repo/commands/intent/model" 'two words' >/dev/null 2>&1 || rc=$?
+check "not a model name: 2" '[[ $rc == 2 ]]'
+
+# --- The MCP server over a pipe.
+reset; : > "$FAKE/ran"
+mcp() { printf '%s\n' "$@" | takumi mcp serve; }
+init() { printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"%s","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' "$1"; }
+callj() { printf '{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"%s","arguments":%s}}' "$1" "$2" "$3"; }
+out=$(mcp "$(init 2025-03-26)" '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":"p","method":"ping"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' "$(callj 3 switch_bluetooth '{"args":[]}')" "$(callj 4 install_main '{"args":["docker"]}')" \
+  "$(callj 5 nosuch '{}')" "$(callj 6 power_restart '{"args":["now"]}')" '{"jsonrpc":"2.0","id":7,"method":"resources/list"}' 'not json' \
+  "$(callj 8 display_brightness '{"args":["a\nb"]}')")
+r() { jq -c "select(.id == $1)" <<< "$out"; }
+check "one answer per request, none for the notification" '(( $(wc -l <<< "$out") == 10 ))'
+check "initialize: the client's version kept, tools offered" '[[ "$(r 1 | jq -c "[.result.protocolVersion, .result.capabilities.tools.listChanged, .result.serverInfo.name]")" == "[\"2025-03-26\",false,\"takumi\"]" ]]'
+check "initialize: an unknown version gets ours" '[[ "$(mcp "$(init 2099-01-01)" | jq -r .result.protocolVersion)" == 2025-11-25 ]]'
+check "ping" '[[ "$(r "\"p\"" | jq -c .result)" == "{}" ]]'
+check "tools/list: the same tools, with an args list and the risk" '[[ "$(r 2 | jq -c "[.result.tools[].name] | sort")" == "[\"display_brightness\",\"display_scale\",\"install_main\",\"power_restart\",\"room_prune\",\"switch_bluetooth\"]" ]] && r 2 | jq -e ".result.tools[] | select(.name == \"room_prune\") | (.description | contains(\"Risk 2\")) and .inputSchema.required == [\"args\"]" >/dev/null'
+check "tools/call risk 0 runs and answers what it printed" '[[ "$(r 3 | jq -c "[.result.content[0].text, .result.isError]")" == "[\"Bluetooth is off\",false]" ]]'
+check "tools/call risk 1 answers the exact line and runs nothing" '[[ "$(r 4 | jq -r .result.content[0].text)" == "needs the person'"'"'s approval: takumi install docker" && "$(cat "$FAKE/ran")" == "switch bluetooth " ]]'
+check "an unknown tool is an error" '[[ "$(r 5 | jq -c .error.code)" == -32602 ]]'
+check "arguments a command does not take" '[[ "$(r 6 | jq -c "[.result.content[0].text, .result.isError]")" == "[\"takumi power restart takes no arguments.\",true]" ]]'
+check "an unknown method, a line that is not JSON" '[[ "$(r 7 | jq -c .error.code)" == -32601 && "$(jq -c "select(.id == null) | .error.code" <<< "$out")" == -32700 ]]'
+check "a control character in an argument is refused" '[[ "$(r 8 | jq -c .result.isError)" == true ]]'
+check "without ask, what the server did is in the transcript" '[[ "$(jq -sc "map(.via + \":\" + (.ran // .asked))" "$state/transcript.jsonl")" == "[\"mcp:takumi switch bluetooth\",\"mcp:takumi install docker\"]" ]]'
+out=$(printf '%s\n' "$(init 2025-11-25)" "$(callj 2 install_main '{"args":["docker"]}')" | TAKUMI_MCP_ALLOW_RISK=1 takumi mcp serve)
+check "TAKUMI_MCP_ALLOW_RISK=1 runs risk 1 too" '[[ "$(jq -r "select(.id == 2) | .result.content[0].text" <<< "$out")" == "Installed docker." ]] && grep -q "install docker" "$FAKE/ran"'
+
+# --- The Palette's rows: three ways to set the assistant up, each a conversation; the plan and ask in the shell.
+reset; touch "$FAKE/claude.signed-in"; rm -rf "$HOME/.claude"; setup claude > /dev/null
+check "Claude Code gets Takumi's skill, linked into its skills folder" '[[ -L "$HOME/.claude/skills/takumi" ]] && grep -q "^name: takumi" "$HOME/.claude/skills/takumi/SKILL.md"'
+rm "$HOME/.claude/skills/takumi"; mkdir "$HOME/.claude/skills/takumi"; setup claude > /dev/null
+check "a skills folder of the same name that is yours is left alone" '[[ -d "$HOME/.claude/skills/takumi" && ! -L "$HOME/.claude/skills/takumi" ]]'
+rows=$(commands/palette/index commands assistant)
+check "three assistant rows, conversations, the one in use says so" '[[ "$(jq -sc "map([.title, .converse, (.run | join(\" \"))])" <<< "$rows")" == "[[\"Use Claude for the assistant\",true,\"takumi intent setup claude\"],[\"Use an Anthropic API key for the assistant\",true,\"takumi intent setup anthropic\"],[\"Use OpenAI for the assistant\",true,\"takumi intent setup openai\"]]" && "$(jq -sr ".[0].subtitle" <<< "$rows")" == "In use · "* ]]'
+check "the words find them" '[[ "$(commands/palette/index commands openai | jq -r .title)" == "Use OpenAI for the assistant" && "$(commands/palette/index commands "api key" | jq -sr length)" == 2 ]]'
+check "no intent command is a row of its own" '[[ -z "$(commands/palette/index commands "" | jq -r "select(.id | startswith(\"cmd:intent\")) | .id")" ]]'
+check "the shell asks Intent as a conversation, and keeps the plan" 'grep -q "converse: true, run: \[\"takumi\", \"intent\", \"ask\", q\]" shell/Core/Providers.qml && grep -q "\"takumi\", \"intent\", \"--plan\"" shell/Core/Providers.qml && grep -q "runIntent(q) {.*\"takumi\", \"intent\", \"ask\", q" shell/Core/Open.qml'
+
+# --- A key never appears in any command's arguments, the transcript or a log; it does reach curl on stdin.
+reset
+for k in "$ANT" "$OAI"; do
+  check "no key in any argument, request body, transcript or log (${k:0:10}…)" '[[ -s "$t/all.args" && -s "$t/all.logs" ]] && ! grep -qF -- "$k" "$t/all.args" "$t/all.bodies" "$t/all.logs"'
+  check "the key reached curl on stdin (${k:0:10}…)" 'grep -qF -- "$k" "$t/all.stdin"'
+done
+
+echo "   $(grep -c '^ *check ' "$0") assistant checks against fake claude, curl and secret-tool"
+exit $status

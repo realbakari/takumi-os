@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: At login, put back the timers of reminders still to come and ring the ones missed in the last 12 hours
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; break; }; done
+declare -F remind_lines >/dev/null || exit 0
+# Their timers live in the person's systemd, which stops when they log out or the computer turns off; the list
+# in ~/.local/state/takumi/reminders.tsv does not. Older misses are dropped without a word.
+now=$(clock_now)
+while IFS=$'\t' read -r id kind at _ _; do
+  [[ "$id" =~ ^[0-9]+$ ]] || continue
+  remind_scheduled "$id" "$kind" && continue
+  if (( at > now + 1 )); then remind_schedule "$id" "$kind" "$at" || true
+  elif (( now - at < 43200 )); then (takumi remind fire "$id" </dev/null >/dev/null 2>&1 &)
+  else remind_drop "$id"; fi
+done <<< "$(remind_lines)"
+exit 0

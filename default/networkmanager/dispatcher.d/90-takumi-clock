@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# When a network comes up or the internet appears, ask the session of each person here who turned on the
+# time zone by location (takumi clock auto on) to look once: `takumi clock auto check --network` runs in
+# their own systemd, as them, so the lookup and the notice are theirs. Nobody who left it off is asked
+# anything. NetworkManager runs this as root with the interface and the event (NetworkManager-dispatcher(8));
+# Takumi installs it in /usr/lib/NetworkManager/dispatcher.d. See docs/time.md.
+set -euo pipefail
+case "${2:-}" in
+  up) ;;
+  connectivity-change) [[ "${CONNECTIVITY_STATE:-}" == FULL ]] || exit 0 ;;
+  *) exit 0 ;;
+esac
+users=$(loginctl list-users --no-legend 2>/dev/null || true)
+while read -r uid user _; do
+  [[ "$uid" =~ ^[0-9]+$ && -n "$user" ]] || continue
+  [[ "$(loginctl show-user "$uid" -p State --value 2>/dev/null || true)" == active ]] || continue
+  home=$(getent passwd "$user" | cut -d: -f6)
+  grep -qsE '^auto[[:space:]]*=[[:space:]]*true' "$home/.config/takumi/clock.toml" || continue
+  systemd-run --machine="$user@.host" --user --quiet --collect --no-block --unit="takumi-clock-auto-$$-$uid" \
+    /usr/bin/takumi clock auto check --network >/dev/null 2>&1 || true
+done <<< "$users"
+exit 0

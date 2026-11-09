@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Takumi's version and room, the model, processor, memory, disk, graphics, kernel and time up
+usage: [--json|--card]
+example: takumi about
+risk: 0
+title: About this computer
+words: about computer system information specs specifications model processor cpu memory ram disk storage space graphics gpu kernel version room uptime
+glyph: info
+converse: yes
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; . "$l/rooms.sh"; break; }; done
+declare -F core_card >/dev/null && declare -F rooms_current >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# Read from the kernel's own files (/sys, /proc), df, lsblk and lspci; nothing needs a password. In the Core
+# (a conversation) it ends on a card; --card prints that card's JSON, --json the facts, and at a terminal
+# it prints one fact a line. Exit status: 0 · 2 usage.
+sys=${TAKUMI_SYSFS:-/sys}; proc=${TAKUMI_PROCFS:-/proc}
+out=text
+case "${1:-}" in '') core_in_core && out=card ;; --json) out=json ;; --card) out=card ;; *) echo "usage: takumi about [--json|--card]" >&2; exit 2 ;; esac
+read1() { local v=""; [[ -r "$1" ]] && v=$(tr -d '\000' < "$1" 2>/dev/null | head -n 1); v=${v#"${v%%[![:space:]]*}"}; printf '%s' "${v%"${v##*[![:space:]]}"}"; }
+# Firmware tables often hold placeholders instead of names.
+real() { case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in ''|*"to be filled"*|*"system product name"*|*"system manufacturer"*|"default string"|"not applicable"|none|"not specified"|invalid|"o.e.m."|0123456789|"type1productconfigid") return 1 ;; esac; }
+
+version=""
+for f in /usr/share/takumi/version "$here/../../version"; do [[ -f "$f" ]] && { version=$(read1 "$f"); break; }; done
+
+# The room in use: the system an update made, named for when (atomic rooms, docs/atomic-rooms.md).
+room=$(rooms_current 2>/dev/null || true); room_when=""
+if [[ "$room" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})-([0-9]{2})([0-9]{2})([0-9]{2})$ ]]; then
+  r=${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}' '${BASH_REMATCH[4]}:${BASH_REMATCH[5]}
+  room_when=$(date -d "$r UTC" '+%-d %b %Y, %H:%M' 2>/dev/null || \
+              { e=$(date -j -u -f '%Y-%m-%d %H:%M' "$r" +%s 2>/dev/null) && date -r "$e" '+%-d %b %Y, %H:%M'; } || echo "$r UTC")
+fi
+if [[ -n "$room_when" ]]; then takumi="${version:-dev}, room from $room_when"; else takumi="${version:-dev}, updates happen in place"; fi
+
+# The computer: its maker and model from the firmware, or the device tree on ARM boards.
+dmi="$sys/class/dmi/id"
+vendor=$(read1 "$dmi/sys_vendor"); real "$vendor" || vendor=""
+model=$(read1 "$dmi/product_name"); real "$model" || model=""
+pver=$(read1 "$dmi/product_version"); real "$pver" || pver=""
+case "$vendor" in
+  LENOVO) vendor=Lenovo; [[ -n "$pver" ]] && model=$pver ;;   # Lenovo's product name is a type code; its version is the name
+  "ASUSTeK COMPUTER INC."|"ASUSTeK Computer Inc.") vendor=ASUS ;;
+  "Dell Inc.") vendor=Dell ;;
+  "HP"|"Hewlett-Packard") vendor=HP ;;
+  "Micro-Star International Co., Ltd."|"Micro-Star International Co., Ltd") vendor=MSI ;;
+  "Apple Inc.") vendor=Apple ;;
+  "Microsoft Corporation") vendor=Microsoft ;;
+  "Gigabyte Technology Co., Ltd.") vendor=Gigabyte ;;
+  "Samsung Electronics Co., Ltd.") vendor=Samsung ;;
+  "innotek GmbH") vendor=VirtualBox ;;
+esac
+first=$(printf '%s' "$vendor" | awk '{ print tolower($1) }')
+if [[ -n "$model" && -n "$first" && "$(printf '%s' "$model" | awk '{ print tolower($1) }')" == "$first" ]]; then computer=$model
+else computer=$(printf '%s %s' "$vendor" "$model" | sed 's/^ *//; s/ *$//'); fi
+[[ -n "$computer" ]] || computer=$(read1 "$proc/device-tree/model")
+[[ -n "$computer" ]] || computer="This computer"
+
+# The processor, without the trade marks and clock speed it carries, and its cores.
+cpu=$(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' "$proc/cpuinfo" 2>/dev/null | head -n 1 || true)
+[[ -n "$cpu" ]] || cpu=$(LC_ALL=C lscpu 2>/dev/null | sed -n 's/^Model name:[[:space:]]*//p' | head -n 1 || true)
+cpu=$(printf '%s' "$cpu" | sed -E 's/\((R|r|TM|tm)\)//g; s/ (CPU|Processor)//g; s/ @ .*$//; s/ (with|w\/) .*$//; s/ [0-9]+-Core//; s/  +/ /g; s/^ //; s/ $//')
+cores=$(sed -n 's/^cpu cores[[:space:]]*:[[:space:]]*//p' "$proc/cpuinfo" 2>/dev/null | head -n 1 || true)
+[[ -n "$cores" ]] || cores=$(grep -c '^processor' "$proc/cpuinfo" 2>/dev/null || true)
+[[ -n "$cpu" ]] || cpu=$(uname -m)
+[[ "${cores:-0}" -gt 0 ]] 2>/dev/null && cpu="$cpu, $cores cores"
+
+# Memory, as the size on the box: the kernel keeps a little for itself, so the next common size up.
+kb=$(awk '/^MemTotal:/ { print $2; exit }' "$proc/meminfo" 2>/dev/null || true)
+memory=$(awk -v kb="${kb:-0}" 'BEGIN {
+  g = kb / 1048576; if (g <= 0) exit
+  n = split("1 2 3 4 6 8 12 16 20 24 32 36 48 64 96 128 192 256 384 512 768 1024 1536 2048", s, " ")
+  for (i = 1; i <= n; i++) if (s[i] + 0 >= g) { print s[i] " GB"; exit }
+  printf "%d GB\n", g + 0.5 }')
+
+# The disk Takumi runs from: what is free, of the disk's whole size as its maker counts (1 TB, not 931 GiB).
+dec() { awk -v b="$1" 'BEGIN {
+  if (b >= 1e12) { r = int(b / 1e12 * 10 + 0.5) / 10; if (r == int(r)) printf "%d TB", r; else printf "%.1f TB", r }
+  else if (b >= 1e9) printf "%d GB", b / 1e9 + 0.5; else printf "%d MB", b / 1e6 + 0.5 }'; }
+free_b=$(df -Pk / 2>/dev/null | awk 'NR == 2 { printf "%.0f", $4 * 1024 }' || true)
+size_b=""
+src=$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*//' || true)
+[[ -n "$src" ]] && size_b=$(lsblk -bnlso NAME,TYPE,SIZE "$src" 2>/dev/null | awk '$2 == "disk" { print $3; exit }' || true)
+[[ -n "$size_b" ]] || size_b=$(df -Pk / 2>/dev/null | awk 'NR == 2 { printf "%.0f", $2 * 1024 }' || true)
+disk=""; [[ -n "$free_b" && -n "$size_b" ]] && disk="$(dec "$free_b") free of $(dec "$size_b")"
+
+# Graphics: lspci's names (the bracketed one is the product's), else the kernel's driver for each card.
+graphics=$(LC_ALL=C lspci -mm 2>/dev/null | awk -F '"' '$2 ~ /VGA compatible controller|3D controller|Display controller/ {
+  v = $4; d = $6; name = d
+  if (match(d, /\[[^]]*\]$/)) name = substr(d, RSTART + 1, RLENGTH - 2)
+  if (v ~ /NVIDIA/) v = "NVIDIA"; else if (v ~ /AMD|ATI|Advanced Micro/) v = "AMD"; else if (v ~ /Intel/) v = "Intel"; else v = ""
+  if (v != "" && index(name, v) != 1) name = v " " name
+  out = out (out == "" ? "" : " and ") name
+} END { print out }' || true)
+if [[ -z "$graphics" ]]; then
+  for c in "$sys"/class/drm/card[0-9]; do
+    [[ -e "$c/device" ]] || continue
+    drv=$(basename "$(readlink -f "$c/device/driver" 2>/dev/null)" 2>/dev/null || true)
+    case "$(read1 "$c/device/vendor")" in 0x1002) g="AMD graphics" ;; 0x10de) g="NVIDIA graphics" ;; 0x8086) g="Intel graphics" ;; 0x1af4|0x1234) g="Virtual graphics" ;; *) g="Graphics" ;; esac
+    graphics="${graphics:+$graphics and }$g${drv:+ ($drv)}"
+  done
+fi
+
+kernel="Linux $(uname -r)"
+up=$(awk '{ s = int($1); d = int(s / 86400); h = int(s % 86400 / 3600); m = int(s % 3600 / 60)
+  if (d > 0) printf "%d %s, %d h", d, (d == 1 ? "day" : "days"), h; else if (h > 0) printf "%d h %d min", h, m; else printf "%d min", m }' "$proc/uptime" 2>/dev/null || true)
+
+facts=$(printf '%s\t%s\n' Takumi "$takumi" Computer "$computer" Processor "$cpu" Memory "$memory" Disk "$disk" Graphics "$graphics" Kernel "$kernel" Up "$up" | awk -F '\t' '$2 != ""')
+case "$out" in
+  text) awk -F '\t' '{ printf "%-10s %s\n", $1, $2 }' <<< "$facts" ;;
+  json) jq -Rn '[inputs | split("\t") | {key: (.[0] | ascii_downcase), value: .[1]}] | from_entries' <<< "$facts" ;;
+  card)
+    line1="Takumi $takumi"
+    line2=$(printf '%s\n' "$cpu" "${memory:+$memory memory}" "$graphics" | awk 'NF' | paste -sd '|' - | sed 's/|/ · /g')
+    line3=$(printf '%s\n' "$disk" "$kernel" "${up:+up $up}" | awk 'NF' | paste -sd '|' - | sed 's/|/ · /g')
+    card=$(T=$computer D="$line1"$'\n'"$line2"$'\n'"$line3" jq -Rnc '{kicker: "About this computer", title: env.T, detail: env.D,
+      secretLabel: "", secret: "", qr: [], facts: [inputs | split("\t")]}' <<< "$facts")
+    if core_in_core; then core_card "$card"; else printf '%s\n' "$card"; fi ;;
+esac

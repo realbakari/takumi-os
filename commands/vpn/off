@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Disconnect from a VPN
+usage: <name>
+example: takumi vpn off Work
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/vpn.sh" ]] && { . "$l/vpn.sh"; . "$l/core.sh"; break; }; done
+declare -F vpn_down >/dev/null && declare -F core_done >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# Exit status: 0 disconnected, or it was not connected · 5 no VPN by that name · 1 it did not disconnect.
+name=${1:-}; [[ -n "$name" ]] || { echo "usage: takumi vpn off <name>" >&2; exit 2; }
+command -v nmcli >/dev/null || core_fail 1 "NetworkManager is not installed"
+uuid=$(vpn_uuid "$name"); [[ -n "$uuid" ]] || core_fail 5 "There is no VPN called $name"
+[[ "$(vpn_state "$uuid")" != off ]] || { core_done "VPN $name is not connected"; exit 0; }
+core_note "Disconnecting from VPN $name…"
+vpn_down "$uuid" || core_fail 1 "VPN $name did not disconnect"
+core_done "Disconnected from VPN $name"

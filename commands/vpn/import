@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Add a VPN from a WireGuard (.conf) or OpenVPN (.ovpn) file; asks for its username and password when it needs them
+usage: [file]
+example: takumi vpn import ~/Downloads/work.ovpn
+risk: 1
+converse: yes
+words: vpn import add wireguard openvpn file
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/vpn.sh" ]] && { . "$l/vpn.sh"; . "$l/core.sh"; break; }; done
+declare -F vpn_ask >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh). Without a file it opens a file chooser (zenity); the Core steps aside for it and
+# comes back for the questions. The file goes to nmcli connection import; a username and a password, when the VPN
+# needs them, are kept with it (the password through nmcli's editor on stdin). The VPN never connects by itself:
+# the last question offers to connect now. Exit status: 0 added · 3 an answer was needed and none came · 1 anything
+# else.
+file=${1:-}
+command -v nmcli >/dev/null || core_fail 1 "NetworkManager is not installed"
+if [[ -z "$file" ]]; then
+  if command -v zenity >/dev/null && [[ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]]; then
+    core_note "Choose the VPN file…"
+    core_in_core && { qs -c takumi ipc --any-display call core close >/dev/null 2>&1 || true; }
+    file=$(zenity --file-selection --title="Choose a VPN file" \
+             --file-filter="VPN files (.conf, .ovpn) | *.conf *.ovpn *.CONF *.OVPN" --file-filter="All files | *" 2>/dev/null) ||
+      core_fail 3 "No file was chosen"
+  else
+    core_ask file "Where the VPN file is, such as ~/Downloads/work.ovpn" || core_fail 3 "No file was chosen"
+    file=${file/#\~/$HOME}
+  fi
+fi
+[[ -f "$file" && -r "$file" ]] || core_fail 1 "Takumi cannot read $file"
+
+base=${file##*/}; name=${base%.*}; [[ -n "$name" ]] || name=VPN
+case "$(printf '%s' "${base##*.}" | tr '[:upper:]' '[:lower:]')" in
+  conf) type=wireguard ;;
+  ovpn) type=openvpn ;;
+  *)
+    if grep -q '^\[Interface\]' "$file"; then type=wireguard
+    elif grep -qE '^[[:space:]]*(client|remote)([[:space:]]|$)' "$file"; then type=openvpn
+    else core_fail 1 "Takumi adds WireGuard (.conf) and OpenVPN (.ovpn) files; $base is neither"; fi ;;
+esac
+core_note "Adding VPN $name…"
+
+# NetworkManager names a WireGuard connection's interface after its file, which must then be a valid interface
+# name (at most 15 letters, digits and ._=+-). Any other name goes through a private copy with a short one, and the
+# VPN keeps the name you know.
+src=$file
+if [[ $type == wireguard ]] && ! [[ "$name" =~ ^[A-Za-z0-9_=+.-]{1,15}$ && "$name" != . && "$name" != .. ]]; then
+  ifname=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9\n' '-' | tr -s '-' | sed 's/^-//; s/-$//' | cut -c 1-15)
+  ifname=${ifname%-}; [[ -n "$ifname" ]] || ifname=wg0
+  tmp=$(mktemp -d "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/takumi-vpn.XXXXXX")
+  trap 'rm -rf "${tmp:?}"' EXIT
+  cp "$file" "$tmp/$ifname.conf"; chmod 600 "$tmp/$ifname.conf"
+  src="$tmp/$ifname.conf"
+fi
+
+ok=yes; out=$(LC_ALL=C nmcli connection import type "$type" file "$src" 2>&1) || ok=no
+[[ -z "${tmp:-}" ]] || rm -rf "${tmp:?}"   # the private copy goes at once: the key is in the profile now
+if [[ $ok == no ]]; then
+  [[ $type == openvpn && "$out" == *[Pp]lugin* ]] && core_fail 1 "OpenVPN is not installed on this computer (networkmanager-openvpn)"
+  core_fail 1 "Could not add $name: $(sed -n 's/^Error: //p' <<< "$out" | head -n 1)"
+fi
+uuid=$(sed -n 's/.*(\([0-9a-f-]\{36\}\)).*/\1/p' <<< "$out" | head -n 1)
+[[ -n "$uuid" ]] || core_fail 1 "Could not add $name"
+# Imported, a WireGuard profile would join by itself at every start: a VPN here connects when you say so.
+LC_ALL=C nmcli connection modify uuid "$uuid" connection.autoconnect no >/dev/null 2>&1 || true
+
+# The name you know, with a number when another VPN already has it.
+want=$name; n=2
+while [[ -n "$(vpn_list | U="$uuid" N="$want" awk -F '\t' '{ x = $0; sub(/^[^\t]*\t[^\t]*\t[^\t]*\t/, "", x) } $1 != ENVIRON["U"] && x == ENVIRON["N"] { print; exit }')" ]]; do
+  want="$name $n"; n=$((n + 1))
+done
+if [[ "$(LC_ALL=C nmcli -e no -g connection.id connection show uuid "$uuid" 2>/dev/null || true)" != "$want" ]]; then
+  LC_ALL=C nmcli connection modify uuid "$uuid" connection.id "$want" >/dev/null 2>&1 || true
+fi
+name=$want
+
+[[ -z "$(vpn_needs "$uuid")" ]] || vpn_ask "$uuid" "$name" no "VPN $name is added; it asks for its password when you connect"
+if core_confirm "Connect to VPN $name now?"; then exec takumi vpn on "$name"; fi
+[[ "$(vpn_state "$uuid")" == off ]] || vpn_down "$uuid" || true
+core_done "Added VPN $name. Type vpn to connect"

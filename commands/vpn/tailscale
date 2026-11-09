@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Tailscale: set it up and sign in, turn it off, or send your internet through one of your exit nodes
+usage: [off | exit <node> | exit off]
+example: takumi vpn tailscale
+example: takumi vpn tailscale exit nyc-1
+risk: 1
+sudo: yes
+converse: yes
+words: tailscale vpn tailnet exit node
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/vpn.sh" ]] && { . "$l/vpn.sh"; . "$l/core.sh"; break; }; done
+declare -F vpn_ts_status >/dev/null && declare -F core_card >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh). Setting up installs Tailscale (the password asked in the Core), starts its service
+# and makes you its operator, so it needs no password after that. Signing in ends on a card: a code a phone can
+# open the sign-in page from, while the page itself opens in the browser. `tailscale up` goes on waiting in the
+# background, and a notice says when this computer has joined. Exit status: 0 done · 1 anything else, said in
+# words · 2 usage.
+usage() { echo "usage: takumi vpn tailscale [off | exit <node> | exit off]" >&2; exit 2; }
+command -v jq >/dev/null || core_fail 1 "Tailscale from the Core needs jq"
+log="$HOME/.local/state/takumi/vpn.log"; mkdir -p "${log%/*}"
+me=$(id -un)
+dir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/takumi-tailscale-$(id -u)"
+admin() { core_sudo "Setting up Tailscale needs your password" "$@"; }
+run() { if core_in_core; then "$@" >> "$log" 2>&1; else "$@"; fi; }
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+said() { sed -e 's/^[Ee]rror: //' <<< "$1" | sed '/^[[:space:]]*$/d' | head -n 1; }
+
+# The service, started now and with the computer from then on.
+service() {
+  local i=0
+  core_note "Starting Tailscale…"
+  run admin systemctl enable --now tailscaled.service || return 1   # /etc/systemd/system/multi-user.target.wants/tailscaled.service
+  while (( i < 20 )); do [[ -z "$(vpn_ts_status)" ]] || return 0; sleep 0.5; i=$((i + 1)); done
+  return 0
+}
+# This account as Tailscale's operator: it may connect, disconnect and choose an exit node without the password.
+operator() { run admin tailscale set --operator="$me"; }   # /var/lib/tailscale/tailscaled.state
+
+# ts <words...>: tailscale, once more after making this account its operator or starting its service, when that is
+# what stood in the way. What it said is in $ts_out.
+ts_out=""
+ts() {
+  local tries=0
+  while :; do
+    ts_out=$(LC_ALL=C tailscale "$@" 2>&1 </dev/null) && return 0
+    tries=$((tries + 1)); (( tries <= 2 )) || return 1
+    case "$(lower "$ts_out")" in
+      *"access denied"*|*"permission denied"*) operator || return 1 ;;
+      *"appear to be running"*|*"failed to connect to local tailscale"*) service || return 1 ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+# label <node>: an exit node in words (its city, or its machine's name), from the address or name given.
+label() {
+  local l
+  l=$(N=$1 jq -r "$vpn_ts_label"'[.Peer // {} | .[] | select(any(.TailscaleIPs[]?; . == env.N) or .HostName == env.N)] | first
+    | if . then nodename else empty end' <<< "$(vpn_ts_status)" 2>/dev/null || true)
+  printf '%s' "${l:-$1}"
+}
+
+# card <url>: the sign-in, as a card in the Core: the code for a phone, and the link behind Enter. The page opens in
+# the browser too.
+card() {
+  local url=$1 qr="" detail
+  touch "$dir/card"
+  gio open "$url" >/dev/null 2>&1 || xdg-open "$url" >/dev/null 2>&1 || true
+  if command -v qrencode >/dev/null; then qr=$(printf '%s' "$url" | qrencode -t ASCII -m 0 -o - 2>/dev/null | sed 's/##/1/g; s/  /0/g' || true); fi
+  detail="Sign in on the page that opened, or scan the code with your phone. This computer joins when you do."
+  [[ -n "$qr" ]] || detail="Sign in on the page that opened in your browser. This computer joins when you do."
+  core_card "$(U=$url D=$detail Q=$qr jq -cn '{kicker: "Tailscale", title: "Sign in to Tailscale", detail: env.D,
+    secretLabel: "Link", secret: env.U, qr: (env.Q | split("\n") | map(select(length > 0)))}')"
+  if ! core_in_core && command -v qrencode >/dev/null; then printf '%s' "$url" | qrencode -t ANSIUTF8 -m 2 || true; fi
+}
+
+# start_up [flags...]: `tailscale up` in the background, where it may wait for the sign-in as long as it takes (a
+# quarter of an hour at most). What it says goes to $dir/up and how it ended to $dir/rc; once a card was shown, its
+# success is a notice. A wait left from an earlier try is stopped first.
+start_up() {
+  local job pid
+  pid=$(cat "$dir/pid" 2>/dev/null || true)
+  [[ -z "$pid" ]] || kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+  rm -f "$dir/up" "$dir/rc" "$dir/card" "$dir/pid"
+  job='d=$1; shift; echo $$ > "$d/pid"; t=; command -v timeout >/dev/null && t="timeout 900"
+$t tailscale up "$@" > "$d/up" 2>&1; rc=$?; echo "$rc" > "$d/rc"; rm -f "$d/pid"
+if [ "$rc" = 0 ] && [ -e "$d/card" ]; then takumi notice lock "Tailscale is on" "this computer joined your tailnet" >/dev/null 2>&1; fi'
+  if command -v setsid >/dev/null; then setsid bash -c "$job" _ "$dir" "$@" </dev/null >/dev/null 2>&1 &
+  else bash -c "$job" _ "$dir" "$@" </dev/null >/dev/null 2>&1 & fi
+}
+
+# connect: up, or the sign-in card when Tailscale asks for one. Asked to make this account its operator, to start
+# its service, or to name settings made earlier (Tailscale names them itself), it does and tries again.
+connect() {
+  local url rc tries=0 i f
+  local -a extra=()
+  mkdir -p "$dir"; chmod 700 "$dir"
+  while :; do
+    start_up ${extra[@]+"${extra[@]}"}
+    url=""; rc=""; i=0
+    while (( i < 60 )); do
+      if [[ -f "$dir/rc" ]]; then rc=$(cat "$dir/rc"); break; fi
+      url=$(grep -oE 'https://[^[:space:]"]+' "$dir/up" 2>/dev/null | head -n 1 || true)
+      [[ -z "$url" ]] || break
+      sleep 0.5; i=$((i + 1))
+    done
+    if [[ -n "$url" ]]; then card "$url"; exit 0; fi
+    [[ "$rc" != 0 ]] || { core_done "Tailscale is on"; exit 0; }
+    [[ -n "$rc" ]] || core_fail 1 "Tailscale did not answer: try again in a moment"
+    ts_out=$(cat "$dir/up" 2>/dev/null || true)
+    tries=$((tries + 1)); (( tries <= 2 )) || break
+    case "$(lower "$ts_out")" in
+      *"access denied"*|*"permission denied"*) operator || break ;;
+      *"appear to be running"*|*"failed to connect to local tailscale"*) service || break ;;
+      *"non-default flags"*|*"mentioning all"*)
+        read -r -a extra <<< "$(sed -n 's/^[[:space:]]*tailscale up \(.*\)$/\1/p' <<< "$ts_out" | tail -n 1)"
+        [[ ${#extra[@]} -gt 0 ]] || break
+        for f in "${extra[@]}"; do
+          case "$f" in *\"*|*\'*) break 2 ;; --*=*) ;; *) break 2 ;; esac
+        done ;;
+      *) break ;;
+    esac
+  done
+  core_fail 1 "Tailscale did not connect: $(said "$ts_out")"
+}
+
+case "${1:-}" in
+  "")
+    fresh=no
+    if ! command -v tailscale >/dev/null; then
+      core_confirm "Tailscale links this computer with your other devices, wherever they are. Install it?" || core_fail 1 "Nothing changed"
+      core_note "Installing Tailscale…"
+      run admin pacman -S --needed --noconfirm tailscale || core_fail 1 "Tailscale did not install: $log"   # pacman
+      fresh=yes
+    fi
+    if [[ "$(systemctl is-active tailscaled.service 2>/dev/null || true)" != active ]]; then
+      service || core_fail 1 "Tailscale's service did not start: $log"
+    fi
+    if [[ $fresh == yes ]]; then operator || core_fail 1 "Tailscale is installed, but it would not take this account as its operator: $log"; fi
+    [[ "$(vpn_ts_status | jq -r '.BackendState // ""' 2>/dev/null)" != Running ]] || { core_done "Tailscale is on"; exit 0; }
+    core_note "Connecting to Tailscale…"
+    connect ;;
+  off)
+    [[ $# -eq 1 ]] || usage
+    command -v tailscale >/dev/null || core_fail 1 "Tailscale is not installed"
+    core_note "Disconnecting from Tailscale…"
+    ts down || core_fail 1 "Tailscale did not disconnect: $(said "$ts_out")"
+    core_done "Tailscale is off" ;;
+  exit)
+    node=${2:-}; [[ -n "$node" && $# -eq 2 ]] || usage
+    command -v tailscale >/dev/null || core_fail 1 "Tailscale is not installed"
+    if [[ "$node" == off ]]; then
+      ts set --exit-node= || core_fail 1 "Tailscale did not change: $(said "$ts_out")"
+      core_done "Your internet goes straight out again"
+    else
+      name=$(label "$node")
+      core_note "Sending your internet through $name…"
+      # Printers, speakers and the rest of the network here keep answering while the internet goes the long way.
+      ts set --exit-node="$node" --exit-node-allow-lan-access=true || core_fail 1 "Tailscale did not change: $(said "$ts_out")"
+      core_done "Your internet goes through $name now"
+    fi ;;
+  *) usage ;;
+esac

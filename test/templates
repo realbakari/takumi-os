@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+# A template's tokens: the palette, the theme's mode, name, phase and glass, and what render adds: the
+# opacity glass asks for and your fonts (docs/phase-themes.md).
+keys=" accent background surface foreground muted red yellow green cyan blue magenta mode name phase glass opacity font_ui font_mono font_size font_pt "
+status=0
+check() { if eval "$2"; then :; else echo "templates: $1"; status=1; fi; }
+for f in default/app-colours/*; do
+  for tok in $(grep -oE '\{\{[a-z_]+(:bare)?\}\}' "$f" | tr -d '{}' | sed 's/:bare$//' | sort -u); do
+    [[ "$keys" == *" $tok "* ]] || { echo "$f: unknown token {{$tok}}"; status=1; }
+  done
+done
+# foot reads colours as RRGGBB under [colors-dark], the font as family:size and alpha as a fraction:
+# render every theme and look.
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-templates.XXXXXX")
+for th in themes/*/; do
+  n=$(basename "$th")
+  HOME=$t TAKUMI_RENDER_OUT=$t/$n commands/theme/render "$n" night >/dev/null
+  bad=$(grep -vE '^(#|\[colors-dark\]$|[a-z0-9-]+=[0-9a-f]{6}$|alpha=(1\.0|0\.[0-9]+)$|font=[A-Za-z0-9][A-Za-z0-9 ._+-]*:size=[0-9]+(\.5)?$)' "$t/$n/foot-theme.ini" || true)
+  [[ -z "$bad" ]] || { echo "$n: foot-theme.ini has lines foot will not read: $bad"; status=1; }
+done
+
+# Glass: a theme that asks for it makes foot and GTK a little see-through; one that does not stays solid.
+mkdir -p "$t/home/.config/takumi/themes/glassy"
+sed 's/^name = "ion"/name = "glassy"/; /^mode = /a\
+glass = true
+' themes/ion/theme.toml > "$t/home/.config/takumi/themes/glassy/theme.toml"
+HOME=$t/home TAKUMI_RENDER_OUT=$t/glassy commands/theme/render glassy day >/dev/null
+HOME=$t/home TAKUMI_RENDER_OUT=$t/solid commands/theme/render ion day >/dev/null
+check "glass: foot's alpha below 1" 'grep -qx "alpha=0.92" "$t/glassy/foot-theme.ini" && grep -qx "alpha=1.0" "$t/solid/foot-theme.ini"'
+check "glass: GTK's window see-through, solid without" 'grep -qx "@define-color window_bg_color alpha(#0b0f14, 0.92);" "$t/glassy/gtk.css" && grep -qx "@define-color window_bg_color alpha(#0b0f14, 1.0);" "$t/solid/gtk.css"'
+check "glass reaches palette.toml" 'grep -qx "glass = \"true\"" "$t/glassy/palette.toml"'
+
+# Fonts: the families and size in shell.toml reach foot and fontconfig; 15 is 12.5 points in foot.
+printf 'font_size = 15\nfont_ui = "IBM Plex Sans"\nfont_mono = "Fira Code"\n' > "$t/home/.config/takumi/shell.toml"
+HOME=$t/home TAKUMI_RENDER_OUT=$t/fonts commands/theme/render ion day >/dev/null
+check "fonts: foot's font line" 'grep -qx "font=Fira Code:size=12.5" "$t/fonts/foot-theme.ini"'
+check "fonts: fontconfig's aliases" '[[ "$(grep -c "<prefer><family>IBM Plex Sans</family></prefer>" "$t/fonts/fontconfig.conf")" == 2 && "$(grep -c "<prefer><family>Fira Code</family></prefer>" "$t/fonts/fontconfig.conf")" == 1 ]]'
+check "no fonts chosen: Inter and JetBrains Mono at 11 points" 'grep -qx "font=JetBrains Mono:size=11" "$t/solid/foot-theme.ini" && grep -q "<family>Inter</family>" "$t/solid/fontconfig.conf"'
+# The prompt and Firefox's stylesheet carry the palette, and a file that did not change is not rewritten.
+check "starship's palette is the theme's" 'grep -qx "accent = \"#5ad7ff\"" "$t/solid/starship.toml" && grep -qx "quiet = \"#5c6b7a\"" "$t/solid/starship.toml"'
+check "Firefox's toolbar is the surface" 'grep -q -- "--toolbar-bgcolor: #111821 !important;" "$t/solid/firefox-userChrome.css"'
+touch -t 202001010000 "$t/solid/fontconfig.conf"; before=$(ls -l "$t/solid/fontconfig.conf")
+HOME=$t TAKUMI_RENDER_OUT=$t/solid commands/theme/render ion dusk >/dev/null
+check "an unchanged file is left alone" '[[ "$(ls -l "$t/solid/fontconfig.conf")" == "$before" ]] && grep -q "ff9f6e" "$t/solid/gtk.css"'
+rm -rf "${t:?}"
+exit $status

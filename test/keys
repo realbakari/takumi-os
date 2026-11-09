@@ -1,0 +1,440 @@
+#!/usr/bin/env bash
+# Contract checks for keyboards and input methods (lib/keys.sh, commands/keys/layout, commands/keys/input, the
+# Palette's keyboard rows, default/takumi-session) against a fake systemd-localed, sudo, niri, pacman and fcitx5:
+# the list by name, adding and removing through polkit, the console keymap and the disk's password prompt when the
+# first keyboard changes, the limits, the conversation, the rows, and fcitx5's profile.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; keyboard checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-keys.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run
+unset XDG_CONFIG_HOME
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice" "$t/commands/room"
+export TAKUMI_XKB_RULES=$t/evdev.lst TAKUMI_KBD_MAP=$t/kbd-model-map
+
+cat > "$TAKUMI_XKB_RULES" <<'L'
+! model
+  pc105           Generic 105-key PC
+! layout
+  us              English (US)
+  gb              English (UK)
+  de              German
+  fr              French
+  ch              German (Switzerland)
+  ru              Russian
+  jp              Japanese
+  gr              Greek
+! variant
+  intl            us: English (US, intl., with dead keys)
+  nodeadkeys      de: German (no dead keys)
+  azerty          fr: French (AZERTY)
+  fr              ch: French (Switzerland)
+! option
+  grp:alts_toggle Both Alt together
+L
+printf '%s\n' "# consolelayout	xlayout	xmodel	xvariant	xoptions" "us	us	pc105+inet	-	terminate:ctrl_alt_bksp" \
+  "de	de	pc105	-	terminate:ctrl_alt_bksp" "de-latin1-nodeadkeys	de	pc105	nodeadkeys	terminate:ctrl_alt_bksp" \
+  "fr	fr	pc105	-	terminate:ctrl_alt_bksp" "uk	gb	pc105	-	terminate:ctrl_alt_bksp" "ru	ru	pc105	-	terminate:ctrl_alt_bksp" > "$TAKUMI_KBD_MAP"
+
+# systemd-localed: $FAKE/localed holds X11Layout, X11Model, X11Variant, X11Options, VConsoleKeymap, a line each.
+cat > "$t/bin/busctl" <<'FAKE'
+#!/usr/bin/env bash
+[[ "$1" == get-property && "$2" == org.freedesktop.locale1 ]] || { echo "fake busctl: unexpected: $*" >&2; exit 99; }
+while IFS= read -r v; do printf 's "%s"\n' "$v"; done < "$FAKE/localed"
+FAKE
+cat > "$t/bin/localectl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'localectl %s\n' "$*" >> "$FAKE/calls"
+[[ -e "$FAKE/localectl-refuse" ]] && { echo "Failed to set keymap: Access denied" >&2; exit 1; }
+case "$1 $2" in
+  "set-x11-keymap --no-convert") { printf '%s\n' "$3" "$4" "$5" "$6"; sed -n 5p "$FAKE/localed"; } > "$FAKE/l" && mv "$FAKE/l" "$FAKE/localed" ;;
+  "set-keymap --no-convert") { sed -n 1,4p "$FAKE/localed"; printf '%s\n' "$3"; } > "$FAKE/l" && mv "$FAKE/l" "$FAKE/localed" ;;
+  *) echo "fake localectl: unexpected: $*" >&2; exit 99 ;;
+esac
+FAKE
+cat > "$t/bin/sudo" <<'FAKE'
+#!/usr/bin/env bash
+printf 'sudo %s\n' "$*" >> "$FAKE/calls"
+while [[ "${1:-}" == -* ]]; do [[ "$1" == -p ]] && shift; shift; done
+[[ -e "$FAKE/sudo-refuse" ]] && exit 1
+(( $# )) || exit 0
+exec "$@"
+FAKE
+cat > "$t/bin/niri" <<'FAKE'
+#!/usr/bin/env bash
+printf 'niri %s\n' "$*" >> "$FAKE/calls"
+[[ -e "$FAKE/no-niri" ]] && exit 1
+case "$*" in
+  "msg --json keyboard-layouts") cat "$FAKE/niri.json" ;;
+  "msg action switch-layout next") jq -c '.current_idx = ((.current_idx + 1) % (.names | length))' "$FAKE/niri.json" > "$FAKE/n" && mv "$FAKE/n" "$FAKE/niri.json" ;;
+  *) echo "fake niri: unexpected: $*" >&2; exit 99 ;;
+esac
+FAKE
+cat > "$t/bin/pacman" <<'FAKE'
+#!/usr/bin/env bash
+printf 'pacman %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  -Q) grep -qx "$2" "$FAKE/installed" ;;
+  -S) [[ -e "$FAKE/pacman-fail" ]] && { echo "error: failed retrieving file"; exit 1; }
+      shift; for p in "$@"; do [[ "$p" == -* ]] || echo "$p" >> "$FAKE/installed"; done ;;
+  *) exit 1 ;;
+esac
+FAKE
+cat > "$t/bin/fcitx5-remote" <<'FAKE'
+#!/usr/bin/env bash
+printf 'fcitx5-remote %s\n' "$*" >> "$FAKE/calls"
+case "${1:-}" in
+  "") cat "$FAKE/fcitx-state" 2>/dev/null || echo 1 ;;
+  -n) cat "$FAKE/fcitx-im" 2>/dev/null || echo keyboard-us ;;
+  -t) : ;;
+  -e) rm -f "$FAKE/fcitx-running" ;;
+esac
+FAKE
+printf '#!/bin/sh\nprintf "fcitx5 %%s\\n" "$*" >> "$FAKE/calls"; touch "$FAKE/fcitx-running"\n' > "$t/bin/fcitx5"
+printf '#!/bin/sh\nprintf "pgrep %%s\\n" "$*" >> "$FAKE/calls"; [ -e "$FAKE/fcitx-running" ]\n' > "$t/bin/pgrep"
+printf '#!/bin/sh\nprintf "systemd-run %%s\\n" "$*" >> "$FAKE/calls"; touch "$FAKE/fcitx-running"\n' > "$t/bin/systemd-run"
+printf '#!/bin/sh\nprintf "systemctl %%s\\n" "$*" >> "$FAKE/calls"; [ "$*" = "--user stop takumi-input.service" ] && rm -f "$FAKE/fcitx-running"; exit 0\n' > "$t/bin/systemctl"
+printf '#!/bin/sh\nprintf "mkinitcpio %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/bin/mkinitcpio"
+printf '#!/bin/sh\ncase "$*" in "-no OPTIONS /") echo "rw,noatime,subvol=/@rooms/20261101-120000" ;; "-no SOURCE /") echo "/dev/mapper/takumi[/@rooms/20261101-120000]" ;; esac\n' > "$t/bin/findmnt"
+printf '#!/bin/sh\n[ -e "$FAKE/encrypted" ] && echo crypt || echo part\n' > "$t/bin/lsblk"
+printf '#!/bin/sh\nprintf "kernel-sync %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/commands/room/kernel-sync"
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+chmod +x "$t/bin/"* "$t/commands/notice/main" "$t/commands/room/kernel-sync"
+
+localed() { printf '%s\n' "$@" > "$FAKE/localed"; }   # layouts model variants options keymap
+reset() {
+  rm -rf "${FAKE:?}"/* "${HOME:?}"/.config "${HOME:?}"/.local
+  localed "us,de" pc105 "" "" us
+  echo '{"names":["English (US)","German"],"current_idx":0}' > "$FAKE/niri.json"
+  : > "$FAKE/calls"; : > "$FAKE/notices"; : > "$FAKE/installed"; touch "$FAKE/encrypted"
+}
+check() { if eval "$2"; then :; else echo "keys: $1"; status=1; fi; }
+layout() { local out rc=0; out=$(commands/keys/layout "$@" 2>&1) || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+input() { local out rc=0; out=$(commands/keys/input "$@" 2>&1) || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+talk() { local answers=$1; shift; printf '%b' "$answers" | TAKUMI_CORE=1 "$@" 2>&1; echo "rc=$?"; }
+rows() { commands/palette/keyboards "$1"; }
+lib() { bash -c '. lib/setup.sh; . lib/keys.sh; "$@"' _ "$@"; }
+calls() { grep "^$1" "$FAKE/calls" || true; }
+
+# --- lib/keys.sh
+reset
+tab=$(printf '\t')
+check "pairs: layouts with their variants" '[[ "$(lib keys_pairs "us,de,fr" ",nodeadkeys," | tr "\t\n" ":|")" == "us:|de:nodeadkeys|fr:|" ]]'
+check "no layout set is US English, as niri types then" '[[ "$(lib keys_pairs "" "" | tr "\t\n" ":|")" == "us:|" ]]'
+check "variants that are all empty join to nothing" '[[ "$(printf "us\t\nde\t\n" | lib keys_join 2)" == "" && "$(printf "us\t\nde\tnodeadkeys\n" | lib keys_join 2)" == ",nodeadkeys" ]]'
+check "names from xkeyboard-config, codes when it has none" '[[ "$(lib keys_name de nodeadkeys)" == "German (no dead keys)" && "$(lib keys_name zz)" == "zz" ]]'
+check "a password is typed with the first keyboard, or US English before one without Latin letters" '[[ "$(lib keys_password "$(printf "de\t\nus\t")")" == "de${tab}" && "$(lib keys_password "$(printf "ru\t\nus\tintl")")" == "us${tab}intl" && "$(lib keys_password "$(printf "gr\t")")" == "us${tab}" ]]'
+check "a name typed whole picks it" '[[ "$(lib keys_pick "french")" == "one${tab}fr${tab}${tab}French" ]]'
+check "matches of one layout pick the shortest" '[[ "$(lib keys_pick "swiss french")" == "one${tab}ch${tab}fr${tab}French (Switzerland)" || "$(lib keys_pick "switzerland french")" == "one${tab}ch${tab}fr${tab}French (Switzerland)" ]]'
+check "a code picks its layout" '[[ "$(lib keys_pick "gb")" == "one${tab}gb${tab}${tab}English (UK)" ]]'
+check "several layouts: some names" '[[ "$(lib keys_pick "english")" == "several${tab}English (UK), English (US), English (US, intl., with dead keys)" ]]'
+check "no match" '[[ "$(lib keys_pick "klingon")" == "none" ]]'
+
+# --- the list
+check "the list by name, the one in use marked" '[[ "$(commands/keys/layout | tr -s " " | tr "\n" "|")" == "* English (US) us|  German de|" ]] || [[ "$(commands/keys/layout | sed "s/  */ /g" | tr "\n" "|")" == "* English (US) us| German de|" ]]'
+check "the list as JSON" '[[ "$(commands/keys/layout --json | jq -sc "map([.layout, .name, .first, .current])")" == "[[\"us\",\"English (US)\",true,true],[\"de\",\"German\",false,false]]" ]]'
+
+# --- adding: through polkit, as you
+res=$(layout add fr)
+check "add: one localectl call, no sudo, the list grows ($res)" '[[ "$res" == "0|Added French. The keyboard mark in the Core switches between your keyboards." ]] && [[ "$(calls localectl)" == "localectl set-x11-keymap --no-convert us,de,fr pc105  " ]] && [[ -z "$(calls sudo)" && -z "$(calls mkinitcpio)" ]]'
+res=$(layout add fr azerty)
+check "add a variant: the variants line up ($res)" '[[ "$res" == 0* ]] && [[ "$(sed -n 1p "$FAKE/localed")|$(sed -n 3p "$FAKE/localed")" == "us,de,fr,fr|,,,azerty" ]]'
+reset
+res=$(layout add de)
+check "add one you have: nothing to do ($res)" '[[ "$res" == "0|German is already one of your keyboards" && -z "$(calls localectl)" ]]'
+localed "us,de,fr,gb" pc105 "" "" us
+res=$(layout add ru)
+check "a fifth: 4 ($res)" '[[ "$res" == 4* && -z "$(calls localectl)" ]]'
+reset
+res=$(layout add zz)
+check "a keyboard nobody knows: 5 ($res)" '[[ "$res" == 5* && -z "$(calls localectl)" ]]'
+res=$(layout add "../x")
+check "not a layout's code: 2 ($res)" '[[ "$res" == 2* ]]'
+res=$(layout frobnicate)
+check "an unknown action: 2" '[[ "$res" == 2* ]]'
+touch "$FAKE/localectl-refuse"
+res=$(layout add fr)
+check "the password not given: 3 ($res)" '[[ "$res" == "3|Nothing changed: the password was not given" ]]'
+reset
+localed "" "" "" "" ""
+res=$(layout add de)
+check "with no layout set, US English stays first ($res)" '[[ "$res" == 0* ]] && [[ "$(calls localectl)" == "localectl set-x11-keymap --no-convert us,de pc105  " ]]'
+
+# --- removing
+reset
+res=$(layout remove de)
+check "remove one that is not first: polkit only ($res)" '[[ "$res" == "0|Removed German. You type with English (US)." ]] && [[ "$(calls localectl)" == "localectl set-x11-keymap --no-convert us pc105  " && -z "$(calls sudo)" ]]'
+localed "us" pc105 "" "" us; : > "$FAKE/calls"
+res=$(layout remove us)
+check "never the last keyboard: 4 ($res)" '[[ "$res" == "4|English (US) is your only keyboard: add another before removing it" && -z "$(calls localectl)" ]]'
+reset
+res=$(layout remove fr)
+check "one you do not have: 5 ($res)" '[[ "$res" == "5|French is not one of your keyboards" ]]'
+said=$(talk 'yes\n' commands/keys/layout remove us)
+check "remove the first: asked first, then the console keymap and the disk's prompt, one password ($said)" '[[ "$said" == *"confirm From now on, type your password with German when the computer starts and at the login screen. Go on?"*"done Removed English (US). You type with German."*"rc=0" ]]'
+check "  sudo validates once, then localectl both ways, mkinitcpio and the room's kernel" '[[ "$(calls sudo | cut -d" " -f2- | sed "s/^-A //" | tr "\n" "|")" == "-v|localectl set-x11-keymap --no-convert de pc105  |localectl set-keymap --no-convert de|mkinitcpio -P|takumi room kernel-sync|" ]] && grep -q "^kernel-sync" "$FAKE/calls"'
+check "  the keymap now follows the new first keyboard" '[[ "$(sed -n 5p "$FAKE/localed")" == de ]]'
+reset; rm -f "$FAKE/encrypted"
+said=$(talk 'yes\n' commands/keys/layout remove us)
+check "remove the first on a disk without encryption: no initramfs to rebuild" '[[ "$said" == *"rc=0" && -z "$(calls mkinitcpio)" && -n "$(calls "sudo -A localectl set-keymap")$(calls "sudo localectl set-keymap")" ]]'
+reset
+said=$(talk 'no\n' commands/keys/layout remove us)
+check "remove the first, declined: 3 and nothing changed" '[[ "$said" == *"rc=3" && -z "$(calls localectl)" ]]'
+reset; touch "$FAKE/sudo-refuse"
+said=$(talk 'yes\n' commands/keys/layout remove us)
+check "remove the first, the password refused: 3 and nothing changed" '[[ "$said" == *"Nothing changed: the password was not given"*"rc=3" && -z "$(calls localectl)" ]]'
+reset; localed "us,ru" pc105 "" "" us
+res=$(layout remove us </dev/null)
+check "a keyboard without Latin letters left first: the password keyboard stays US English, nothing to ask ($res)" '[[ "$res" == 0* ]] && [[ "$(calls localectl)" == "localectl set-x11-keymap --no-convert ru pc105  " && -z "$(calls sudo)" ]]'
+reset; localed "ru" pc105 "" "" us
+res=$(layout add us)
+check "adding US English after Russian keeps Russian first ($res)" '[[ "$(calls localectl)" == "localectl set-x11-keymap --no-convert ru,us pc105  " ]]'
+
+# --- adding as a conversation
+reset
+said=$(talk 'english\nuk\n' commands/keys/layout add)
+check "which keyboard: several match, more words narrow it ($said)" '[[ "$said" == *"ask Which keyboard? A language or a country, like French"*"wrong Several keyboards match: English (UK), English (US), English (US, intl., with dead keys). Type more of its name"*"done Added English (UK)."*"rc=0" ]]'
+reset
+said=$(talk 'klingon\nfrench\n' commands/keys/layout add)
+check "which keyboard: none, then one" '[[ "$said" == *"wrong No keyboard is called klingon"*"done Added French."*"rc=0" ]]'
+said=$(talk '' commands/keys/layout add)
+check "which keyboard: no answer is 3" '[[ "$said" == *"rc=3" ]]'
+
+# --- switching
+reset
+res=$(layout next)
+check "next: niri switches and says to which ($res)" '[[ "$res" == "0|German" ]] && grep -qx "niri msg action switch-layout next" "$FAKE/calls"'
+touch "$FAKE/no-niri"
+res=$(layout next)
+check "next outside the desktop: 1 ($res)" '[[ "$res" == "1|Switching keyboards works inside the desktop" ]]'
+
+# --- the rows
+reset
+r=$(rows keyboard)
+check "rows are JSON with an id, a title and a kind" '[[ -n "$r" ]] && jq -e "select(.id and .title and .kind) | true" <<< "$r" >/dev/null'
+check "the summary row asks which to add, in the Core" '[[ "$(jq -c "select(.id == \"keys:layouts\") | [.title, .subtitle, .converse, .run]" <<< "$r")" == "[\"Keyboards: English (US), German\",\"Enter to add one · the keyboard mark in the Core switches between them\",true,[\"takumi\",\"keys\",\"layout\",\"add\"]]" ]]'
+check "the next one to switch to" '[[ "$(jq -c "select(.id == \"keys:next\") | [.title, .subtitle, .run]" <<< "$r")" == "[\"Switch to German\",\"Now English (US) · or press the keyboard mark in the Core\",[\"takumi\",\"keys\",\"layout\",\"next\"]]" ]]'
+check "removing asks first, and the first says who takes its place" '[[ "$(jq -r "select(.id | startswith(\"keys:remove:\")) | [.title, .subtitle, (.risk | tostring)] | join(\"/\")" <<< "$r" | tr "\n" "|")" == "Remove the English (US) keyboard/German becomes the one the computer starts with/1|Remove the German keyboard/Keeps English (US)/1|" ]]'
+check "\"language\" shows the summary too" '[[ "$(rows language | jq -r .id)" == "keys:layouts" ]]'
+r=$(rows "keyboard french")
+check "a language finds its keyboards to add, layouts first" '[[ "$(jq -r "select(.id | startswith(\"keys:add:\")) | .title" <<< "$r" | tr "\n" "|")" == "Add the French keyboard|Add the French (AZERTY) keyboard|Add the French (Switzerland) keyboard|" ]]'
+check "an add row runs the add command with the variant, in the Core" '[[ "$(jq -c "select(.id == \"keys:add:fr:azerty\") | [.run, .converse, .subtitle]" <<< "$r")" == "[[\"takumi\",\"keys\",\"layout\",\"add\",\"fr\",\"azerty\"],true,\"After English (US), German · Enter to add it\"]" ]]'
+check "four letters of a name alone find it" '[[ "$(rows french | jq -r "select(.id == \"keys:add:fr\") | .title")" == "Add the French keyboard" ]]'
+check "a name of one you have offers removing it" '[[ "$(rows german | jq -r .id | tr "\n" " ")" == *"keys:remove:de"* && "$(rows german | jq -r .id)" != *"keys:add:de "* ]]'
+check "unrelated words, and short ones: nothing" '[[ -z "$(rows zebra)" && -z "$(rows ke)" && -z "$(rows firefox)" ]]'
+check "one keyboard: no next row and no remove rows" 'localed us pc105 "" "" us; r1=$(rows keyboard); [[ "$(jq -r .id <<< "$r1" | tr "\n" " ")" == "keys:layouts " ]]'
+reset
+r=$(rows japanese)
+check "\"japanese\": typing it through an input method, in the Core" '[[ "$(jq -c "select(.id == \"keys:input:add:japanese\") | [.title, .subtitle, .converse, .run]" <<< "$r")" == "[\"Type Japanese\",\"Installs Mozc · Ctrl+Space switches it on and off\",true,[\"takumi\",\"keys\",\"input\",\"add\",\"japanese\"]]" ]]'
+check "\"chinese\": three ways, \"input\": all five" '[[ "$(rows chinese | jq -r .title | tr "\n" "|")" == "Type Chinese with Pinyin|Type Chinese with Zhuyin (Bopomofo)|Type Chinese with Cangjie|" && "$(rows input | grep -c "keys:input:add:")" -eq 5 ]]'
+check "\"keyboard japanese\" also offers the Japanese keyboard" '[[ "$(rows "keyboard japanese" | jq -r .id | tr "\n" " ")" == *"keys:add:jp"*"keys:input:add:japanese"* || "$(rows "keyboard japanese" | jq -r .id | tr "\n" " ")" == *"keys:input:add:japanese"*"keys:add:jp"* ]]'
+
+# --- input methods
+reset
+res=$(input add japanese)
+check "add Japanese: fcitx5, its GTK and Qt doors and Mozc installed with one password ($res)" '[[ "$res" == "0|Japanese typing is ready, with Mozc. Ctrl+Space, or 半角/全角 on a Japanese keyboard switches between it and your keyboard." ]] && [[ "$(calls "sudo" | tr "\n" "|")" == "sudo -A -v|sudo -A pacman -S --needed --noconfirm fcitx5 fcitx5-gtk fcitx5-qt fcitx5-mozc|" || "$(calls "sudo" | tr "\n" "|")" == "sudo -v|sudo pacman -S --needed --noconfirm fcitx5 fcitx5-gtk fcitx5-qt fcitx5-mozc|" ]]'
+p="$HOME/.config/fcitx5/profile"
+check "  the profile: your keyboard first, then Mozc, which Ctrl+Space turns on" '[[ "$(grep -E "^(Default Layout|DefaultIM|Name)=" "$p" | tr "\n" "|")" == "Name=Default|Default Layout=us|DefaultIM=mozc|Name=keyboard-us|Name=mozc|" ]]'
+check "  fcitx5 settings: Ctrl+Space and the keyboards' own keys switch, Super+Space is left alone, one state for every app" 'grep -qx "0=Control+space" "$HOME/.config/fcitx5/config" && grep -qx "1=Zenkaku_Hankaku" "$HOME/.config/fcitx5/config" && grep -qx "\[Hotkey/EnumerateGroupForwardKeys\]" "$HOME/.config/fcitx5/config" && grep -qx "ShareInputState=All" "$HOME/.config/fcitx5/config" && ! grep -qi "super" "$HOME/.config/fcitx5/config"'
+check "  started in a unit of its own that ends with the session, and X11 and Qt apps pointed at it" '[[ "$(calls systemd-run)" == "systemd-run --user --unit=takumi-input --collect --quiet -p PartOf=graphical-session.target -p After=graphical-session.target fcitx5" ]] && grep -qx "systemctl --user set-environment XMODIFIERS=@im=fcitx QT_IM_MODULES=wayland;fcitx QT_IM_MODULE=fcitx" "$FAKE/calls"'
+check "  its package's autostart entry is hidden, so nothing else starts it" 'grep -qx "Hidden=true" "$HOME/.config/autostart/org.fcitx.Fcitx5.desktop"'
+echo "# yours" >> "$HOME/.config/fcitx5/config"; : > "$FAKE/calls"
+res=$(input add korean)
+check "add Korean next: nothing reinstalled but the engine, fcitx5 stopped before the profile changes ($res)" '[[ "$res" == 0* ]] && [[ "$(calls "sudo" | tail -n 1)" == *"pacman -S --needed --noconfirm fcitx5-hangul" ]] && [[ "$(grep -n "stop takumi-input.service" "$FAKE/calls" | cut -d: -f1)" -lt "$(grep -n "^systemd-run" "$FAKE/calls" | cut -d: -f1)" ]]'
+check "  the profile keeps Mozc, adds Hangul, and Ctrl+Space turns Hangul on; your fcitx5 settings are kept" '[[ "$(grep -E "^(DefaultIM|Name)=" "$p" | tr "\n" "|")" == "Name=Default|DefaultIM=hangul|Name=keyboard-us|Name=mozc|Name=hangul|" ]] && grep -qx "# yours" "$HOME/.config/fcitx5/config"'
+: > "$FAKE/calls"
+res=$(input add korean)
+check "add one already there: no password, still running ($res)" '[[ "$res" == "0|Korean typing is already set up. Ctrl+Space, or 한/영 on a Korean keyboard switches between it and your keyboard." && -z "$(calls sudo)" ]]'
+echo 2 > "$FAKE/fcitx-state"; echo mozc > "$FAKE/fcitx-im"
+check "state: Mozc on, its mark" '[[ "$(commands/keys/input state | jq -c "[.running, .on, .engine, .mark, .name, .setUp]")" == "[true,true,\"mozc\",\"あ\",\"Japanese\",[\"mozc\",\"hangul\"]]" ]]'
+echo 1 > "$FAKE/fcitx-state"; echo keyboard-us > "$FAKE/fcitx-im"
+check "state: the keyboard, no mark, the engine Ctrl+Space would turn on" '[[ "$(commands/keys/input state | jq -c "[.on, .engine, .mark]")" == "[false,\"hangul\",\"\"]" ]]'
+check "toggle: fcitx5 switches" 'commands/keys/input toggle && grep -qx "fcitx5-remote -t" "$FAKE/calls"'
+r=$(rows keyboard)
+check "rows: with an input method set up, \"keyboard\" offers switching to it and stopping it" '[[ "$(jq -r "select(.id == \"keys:input:toggle\") | .title" <<< "$r")" == "Switch to Korean" && "$(jq -r "select(.id | startswith(\"keys:input:remove:\")) | .title" <<< "$r" | tr "\n" "|")" == "Stop typing Japanese|Stop typing Korean|" ]]'
+echo 2 > "$FAKE/fcitx-state"; echo hangul > "$FAKE/fcitx-im"
+check "rows: while it is on, back to the keyboard" '[[ "$(rows korean | jq -r "select(.id == \"keys:input:toggle\") | .title")" == "Switch back to English (US)" ]]'
+res=$(input remove japanese)
+check "remove Japanese: the profile without Mozc, still running for Korean ($res)" '[[ "$res" == "0|Stopped Japanese typing." ]] && [[ "$(grep -E "^(DefaultIM|Name)=" "$p" | tr "\n" "|")" == "Name=Default|DefaultIM=hangul|Name=keyboard-us|Name=hangul|" ]] && [[ -e "$FAKE/fcitx-running" ]]'
+: > "$FAKE/calls"
+res=$(input remove korean)
+check "remove the last: nothing runs, Qt 5 apps no longer pointed at it ($res)" '[[ "$res" == "0|Stopped Korean typing. Its software stays installed; nothing runs while no input method is set up." ]] && [[ ! -e "$FAKE/fcitx-running" ]] && grep -qx "systemctl --user unset-environment QT_IM_MODULE" "$FAKE/calls" && [[ -z "$(calls systemd-run)" ]]'
+res=$(input remove korean)
+check "remove one not set up: 5 ($res)" '[[ "$res" == "5|Korean typing is not set up" ]]'
+res=$(input add klingon)
+check "an input method nobody knows: 2" '[[ "$res" == 2* ]]'
+reset; localed "de,us" pc105 "nodeadkeys," "" de-latin1-nodeadkeys; echo fcitx5 > "$FAKE/installed"; printf '%s\n' fcitx5-gtk fcitx5-qt fcitx5-chinese-addons >> "$FAKE/installed"
+res=$(input add pinyin)
+check "the keyboard under the engine is yours, with its variant; nothing to install, no password ($res)" '[[ "$res" == 0* ]] && grep -qx "Default Layout=de-nodeadkeys" "$HOME/.config/fcitx5/profile" && grep -qx "Name=keyboard-de-nodeadkeys" "$HOME/.config/fcitx5/profile" && [[ -z "$(calls sudo)" ]]'
+reset; localed "ru" pc105 "" "" us
+input add cangjie >/dev/null
+check "under a keyboard without Latin letters, US English; Cangjie from the extra tables" 'grep -qx "Name=keyboard-us" "$HOME/.config/fcitx5/profile" && grep -qx "Name=cangjie5" "$HOME/.config/fcitx5/profile" && grep -q "fcitx5-table-extra" "$FAKE/calls"'
+reset; touch "$FAKE/sudo-refuse"
+res=$(input add japanese)
+check "the password refused: 3, nothing written ($res)" '[[ "$res" == "3|Nothing changed: the password was not given" && ! -e "$HOME/.config/fcitx5/profile" ]]'
+reset; touch "$FAKE/pacman-fail"
+res=$(input add zhuyin)
+check "no network: 1, in words, nothing written ($res)" '[[ "$res" == "1|Chinese (Zhuyin) typing did not install. Is the computer online? The details: $HOME/.local/state/takumi/install.log" && ! -e "$HOME/.config/fcitx5/profile" ]]'
+reset
+commands/keys/input start
+check "start with none set up: nothing runs" '[[ -z "$(calls systemd-run)" ]] && grep -qx "systemctl --user unset-environment QT_IM_MODULE" "$FAKE/calls"'
+
+# --- the session starts it, before the shell, so the shell and what it opens get QT_IM_MODULE
+s=default/takumi-session
+check "takumi-session starts the input method before the shell, and hands X11 and Qt apps the way to it" '[[ "$(grep -n "takumi keys input start" "$s" | cut -d: -f1)" -lt "$(grep -n "start takumi-shell.service" "$s" | cut -d: -f1)" ]] && grep -q "import-environment.*XMODIFIERS QT_IM_MODULES" "$s"'
+
+# --- the pointer, the touchpad and key repeat (takumi keys pointer): input.kdl, which defaults.kdl includes
+reset
+pin=$HOME/.config/niri/takumi/input.kdl
+d=config/niri/takumi/defaults.kdl
+pointer() { local out rc=0; out=$(commands/keys/pointer "$@" 2>&1) || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+tp() { awk '/touchpad \{/ { f = 1; next } f && /^    \}/ { f = 0 } f { gsub(/^ +/, ""); print }' "$1"; }
+check "nothing chosen: Takumi's settings, and no file" '[[ "$(commands/keys/pointer | tr "\n" "|")" == "Natural scrolling on|Tap to click on|Pointer speed 4 of 8|Key repeat 4 of 6|" && ! -e "$pin" ]]'
+res=$(pointer natural)
+check "natural scrolling switches off ($res)" '[[ "$res" == "0|Natural scrolling off" ]] && ! grep -q natural-scroll "$pin" && grep -qx "        tap" "$pin"'
+check "the file restates every touchpad setting defaults.kdl makes but the one changed" '[[ "$(tp "$d" | grep -vx natural-scroll | sed "s/ *\/\/.*//" | tr "\n" "|")" == "$(tp "$pin" | grep -v accel-speed | tr "\n" "|")" ]]'
+check "and the keyboard's and the mouse's, at Takumi's speed" 'grep -qx "        repeat-delay 280" "$pin" && grep -qx "        repeat-rate 40" "$pin" && grep -qx "        numlock" "$pin" && [[ $(grep -c "accel-speed 0.0" "$pin") -eq 2 ]] && grep -qx "        accel-profile \"flat\"" "$pin"'
+check "niri is asked to read it at once, and a notice says so" 'grep -qx "niri msg action load-config-file" "$FAKE/calls" && grep -q "^touchpad|Natural scrolling off|" "$FAKE/notices"'
+res=$(pointer natural); res2=$(pointer tap off)
+check "natural again: on; tap to click off ($res, $res2)" '[[ "$res" == "0|Natural scrolling on" && "$res2" == "0|Tap to click off" ]] && grep -qx "        natural-scroll" "$pin" && ! grep -qx "        tap" "$pin"'
+res=$(pointer speed faster)
+check "faster: the next step, for touchpad and mouse alike ($res)" '[[ "$res" == "0|Pointer speed 5 of 8" && $(grep -c "accel-speed 0.2" "$pin") -eq 2 ]]'
+pointer speed faster >/dev/null; pointer speed faster >/dev/null; pointer speed faster >/dev/null
+res=$(pointer speed faster)
+check "past the fastest: 4, said, nothing changed ($res)" '[[ "$res" == "4|The pointer is as fast as it goes" && $(grep -c "accel-speed 0.8" "$pin") -eq 2 ]]'
+res=$(pointer repeat slower)
+check "key repeat slower: waits longer, repeats slower ($res)" '[[ "$res" == "0|Key repeat 3 of 6" ]] && grep -qx "        repeat-delay 350" "$pin" && grep -qx "        repeat-rate 30" "$pin" && grep -qx "        natural-scroll" "$pin"'
+res=$(pointer speed); res2=$(pointer wobble)
+check "a wrong word: 2 ($res, $res2)" '[[ "$res" == 2\|* && "$res2" == 2\|* ]]'
+check "nothing but input.kdl is written" '[[ "$(cd "$HOME" && find . -type f | sort | tr "\n" " ")" == "./.config/niri/takumi/input.kdl " ]]'
+check "defaults.kdl reads input.kdl after its own input block, and a missing one is no error" '[[ $(grep -n "include optional=true \"input.kdl\"" "$d" | cut -d: -f1) -gt $(grep -n "^input {" "$d" | cut -d: -f1) ]]'
+check "and motion.kdl after its animations" '[[ $(grep -n "include optional=true \"motion.kdl\"" "$d" | cut -d: -f1) -gt $(grep -n "^animations {" "$d" | cut -d: -f1) ]]'
+
+# The rows: in the words people use, each the opposite of what is on.
+reset
+r=$(rows "natural scrolling" | jq -r '.title + "|" + (.run | join(" "))')
+check "natural scrolling: one row that turns it off ($r)" '[[ "$r" == "Turn natural scrolling off|takumi keys pointer natural off" ]]'
+pointer natural >/dev/null
+r=$(rows "scroll direction" | jq -r .title)
+check "then on" '[[ "$r" == "Turn natural scrolling on" ]]'
+r=$(rows "mouse speed" | jq -r .title | tr "\n" "|"); r2=$(rows "tap to click" | jq -r .title)
+check "speed and tapping by their words ($r $r2)" '[[ "$r" == "Pointer speed: faster|Pointer speed: slower|" && "$r2" == "Turn tap to click off" ]]'
+r=$(rows "key repeat" | jq -r '.title + " (" + .subtitle + ")"' | tr "\n" "|")
+check "key repeat ($r)" '[[ "$r" == "Key repeat: faster (Now 4 of 6)|Key repeat: slower (Now 4 of 6)|" ]]'
+check "none of them asks: each is one step, undone by the other" '[[ -z "$(rows "pointer speed" | jq -r "select(.risk) | .id")" ]]'
+
+# --- the top row (takumi keys fn): hid_apple's fnmode, a laptop's Fn lock, or the keyboard's own firmware
+export TAKUMI_SYS=$t/sys TAKUMI_MODPROBE_D=$t/modprobe.d
+reset; rm -rf "$TAKUMI_SYS" "$TAKUMI_MODPROBE_D"
+res=$(talk "" commands/keys/fn)
+check "no switch: 4, said in words ($res)" '[[ "$res" == *"This keyboard decides in its firmware"*"rc=4" ]] && ! grep -q "^sudo" "$FAKE/calls"'
+check "and the row says how to switch it" '[[ "$(rows "function keys" | jq -r .title)" == "Top row: the keyboard decides" ]]'
+mkdir -p "$TAKUMI_SYS/module/hid_apple/parameters"; echo 1 > "$TAKUMI_SYS/module/hid_apple/parameters/fnmode"
+r=$(rows "function keys" | jq -r '.title + "|" + (.run | join(" "))')
+check "an Apple keyboard, media keys first: the row offers F1 to F12 ($r)" '[[ "$r" == "Top row: F1 to F12 first|takumi keys fn fkeys" ]]'
+res=$(talk "" commands/keys/fn fkeys)
+check "F1 to F12 first: now and at every start ($res)" '[[ "$res" == *"done The top row types F1 to F12 first"*"rc=0" && "$(cat "$TAKUMI_SYS/module/hid_apple/parameters/fnmode")" == 2 ]] && grep -qx "options hid_apple fnmode=2" "$TAKUMI_MODPROBE_D/takumi-fn.conf"'
+check "through sudo, asked in the Core" 'grep -q "^sudo -A sh -c" "$FAKE/calls"'
+res=$(talk "" commands/keys/fn)
+check "again with no word: back to media keys ($res)" '[[ "$res" == *"done The top row changes brightness"*"rc=0" && "$(cat "$TAKUMI_SYS/module/hid_apple/parameters/fnmode")" == 1 ]] && grep -qx "options hid_apple fnmode=1" "$TAKUMI_MODPROBE_D/takumi-fn.conf"'
+rm -rf "$TAKUMI_SYS" "$TAKUMI_MODPROBE_D"; mkdir -p "$TAKUMI_SYS/bus/platform/devices/VPC2004:00"; echo 0 > "$TAKUMI_SYS/bus/platform/devices/VPC2004:00/fn_lock"
+res=$(talk "" commands/keys/fn fkeys)
+check "a Lenovo's Fn lock: switched on, no modprobe file ($res)" '[[ "$res" == *"rc=0" && "$(cat "$TAKUMI_SYS/bus/platform/devices/VPC2004:00/fn_lock")" == 1 && ! -e "$TAKUMI_MODPROBE_D/takumi-fn.conf" ]]'
+touch "$FAKE/sudo-refuse"
+res=$(talk "" commands/keys/fn media)
+check "the password refused: 3, nothing changed ($res)" '[[ "$res" == *"rc=3" && "$(cat "$TAKUMI_SYS/bus/platform/devices/VPC2004:00/fn_lock")" == 1 ]]'
+rm -f "$FAKE/sudo-refuse"
+res=$(talk "" commands/keys/fn sideways)
+check "a wrong word: 2" '[[ "$res" == *"rc=2" ]]'
+unset TAKUMI_SYS TAKUMI_MODPROBE_D
+
+# --- Alt and Super swapped (takumi keys harmony swap), on Harmony's real file and with Harmony off
+export TAKUMI_KEYD_CONF=$t/keyd/default.conf TAKUMI_KEYD_SOURCE=$repo/default/keyd/default.conf
+printf '#!/bin/sh\nprintf "keyd %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/bin/keyd"; chmod +x "$t/bin/keyd"
+reset; mkdir -p "$t/keyd"; cp default/keyd/default.conf "$TAKUMI_KEYD_CONF"
+check "the row offers the swap" '[[ "$(rows "swap alt super" | jq -r .title)" == "Swap Alt and Super" ]]'
+res=$(talk "" commands/keys/harmony swap)
+check "swapped: Alt is the Command key, the Windows key Alt, the right Alt untouched ($res)" '[[ "$res" == *"done Alt and Super swapped: the key beside the space bar is the Command key"*"rc=0" ]] && grep -qx "leftalt = layer(cmd)" "$TAKUMI_KEYD_CONF" && grep -qx "leftmeta = layer(alt)" "$TAKUMI_KEYD_CONF" && ! grep -qx "leftmeta = layer(cmd)" "$TAKUMI_KEYD_CONF" && grep -qx "rightmeta = layer(cmd)" "$TAKUMI_KEYD_CONF" && ! grep -q rightalt "$TAKUMI_KEYD_CONF"'
+check "keyd reads it again, and the row offers to put them back" 'grep -qx "keyd reload" "$FAKE/calls" && [[ "$(rows "swap alt super" | jq -r .title)" == "Put Alt and Super back" ]]'
+talk "" commands/keys/harmony swap on >/dev/null
+check "on twice is the same" '[[ $(grep -c "^leftalt = layer(cmd)$" "$TAKUMI_KEYD_CONF") -eq 1 ]]'
+talk "" commands/keys/harmony swap off >/dev/null
+check "off gives the Harmony file back byte for byte" 'cmp -s default/keyd/default.conf "$TAKUMI_KEYD_CONF"'
+talk "" commands/keys/harmony swap on >/dev/null; talk "" commands/keys/harmony off >/dev/null
+check "Harmony off, swap kept: the file holds the swap alone" '[[ "$(head -n 1 "$TAKUMI_KEYD_CONF")" == "# Made by takumi keys harmony"* ]] && grep -qx "leftalt = leftmeta" "$TAKUMI_KEYD_CONF" && grep -qx "leftmeta = leftalt" "$TAKUMI_KEYD_CONF" && ! grep -q "layer(cmd)" "$TAKUMI_KEYD_CONF"'
+talk "" commands/keys/harmony on >/dev/null
+check "Harmony on again keeps the swap" 'grep -qx "leftalt = layer(cmd)" "$TAKUMI_KEYD_CONF" && grep -qx "c = copy" "$TAKUMI_KEYD_CONF"'
+talk "" commands/keys/harmony off >/dev/null; talk "" commands/keys/harmony swap off >/dev/null
+check "the swap off with Harmony off: keyd's file goes" '[[ ! -e "$TAKUMI_KEYD_CONF" ]]'
+talk "" commands/keys/harmony on >/dev/null
+check "and Harmony on is the Harmony file as shipped" 'cmp -s default/keyd/default.conf "$TAKUMI_KEYD_CONF"'
+res=$(talk "" commands/keys/harmony swap sideways)
+check "a wrong word: 2" '[[ "$res" == *"rc=2" ]]'
+unset TAKUMI_KEYD_CONF TAKUMI_KEYD_SOURCE
+
+# --- Force quit (takumi app quit, Super+Alt+Escape) and closing every window (takumi app close-all), against a
+# niri that knows windows and real processes standing in for apps: one that stops when asked, one that will not.
+reset
+export TAKUMI_APPS_DIRS=$t/apps TAKUMI_QUIT_WAIT=1 TAKUMI_CLOSE_WAIT=1
+mkdir -p "$t/apps"
+printf '%s\n' "[Desktop Entry]" "Type=Application" "Name=Spotify" "Exec=spotify %U" > "$t/apps/spotify.desktop"
+sleep 60 & calm=$!; disown
+bash -c 'trap "" TERM; while :; do sleep 0.1; done' & stubborn=$!; disown
+trap 'kill -9 $calm $stubborn 2>/dev/null || true; rm -rf "${t:?}"' EXIT
+windows() {  # the windows niri has: app id, pid, title
+  jq -cn --arg c "$calm" --arg s "$stubborn" '[{id: 1, app_id: "spotify", pid: ($c | tonumber), title: "Spotify Premium"},
+    {id: 2, app_id: "spotify", pid: ($c | tonumber), title: "Mini player"},
+    {id: 3, app_id: "org.example.Stuck", pid: ($s | tonumber), title: "Report.odt"},
+    {id: 4, app_id: "foot", pid: 1, title: "~"}]' > "$FAKE/windows.json"
+}
+windows
+cat > "$t/bin/niri" <<'FAKE'
+#!/usr/bin/env bash
+printf 'niri %s\n' "$*" >> "$FAKE/calls"
+case "$*" in
+  "msg --json windows") cat "$FAKE/windows.json" ;;
+  "msg action close-window --id "*)
+    if [[ ! -e "$FAKE/keep-open" ]]; then jq -c --argjson i "${!#}" 'map(select(.id != $i))' "$FAKE/windows.json" > "$FAKE/w"; mv "$FAKE/w" "$FAKE/windows.json"; fi ;;
+  *) exit 0 ;;
+esac
+FAKE
+printf '#!/bin/sh\nprintf "gio %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/bin/gio"
+chmod +x "$t/bin/niri" "$t/bin/gio"
+list=$(commands/app/quit | cut -f1-3 | tr '\t\n' ',|')
+check "the apps with windows: one line per app and process, by name, never pid 1 ($list)" '[[ "$list" == "org.example.Stuck,org.example.Stuck,1|spotify,Spotify,2|" ]]'
+r=$(commands/palette/quit "force quit" | jq -r '.title + "|" + (.run | join(" ")) + "|" + (.risk | tostring)' | tr '\n' '#')
+check "force quit: a row for each, asked first, and one to restart it ($r)" '[[ "$r" == "Force quit org.example.Stuck|takumi app quit org.example.Stuck|1#Restart org.example.Stuck|takumi app quit org.example.Stuck --restart|1#Force quit Spotify|takumi app quit spotify|1#Restart Spotify|takumi app quit spotify --restart|1#" ]]'
+check "the rows carry the icon of the app" '[[ "$(commands/palette/quit "force quit spotify" | jq -r "select(.title == \"Force quit Spotify\") | .icon")" == spotify ]]'
+check "restart spotify names the app; restart alone is for the computer" '[[ "$(commands/palette/quit "restart spotify" | jq -r .title)" == "Restart Spotify" && -z "$(commands/palette/quit restart)" && -z "$(commands/palette/quit spotify)" ]]'
+check "frozen, not responding: the same rows" '[[ $(commands/palette/quit "not responding" | grep -c "Force quit") -eq 2 && $(commands/palette/quit frozen | grep -c "Force quit") -eq 2 ]]'
+res=$(commands/app/quit Spotify 2>&1; echo "rc=$?")
+check "asked to stop, it stops ($res)" '[[ "$res" == "Spotify was made to quit"*"rc=0" ]] && ! kill -0 $calm 2>/dev/null && grep -q "^cross|Spotify was made to quit|" "$FAKE/notices"'
+res=$(commands/app/quit org.example.Stuck 2>&1; echo "rc=$?")
+check "one that ignores it is made to, after the wait ($res)" '[[ "$res" == "org.example.Stuck was made to quit"*"rc=0" ]] && ! kill -0 $stubborn 2>/dev/null'
+sleep 60 & calm=$!; disown; windows
+res=$(commands/app/quit spotify --restart 2>&1; echo "rc=$?")
+check "restart: it goes, and opens again from its entry ($res)" '[[ "$res" == "Spotify opened again"*"rc=0" ]] && ! kill -0 $calm 2>/dev/null && grep -qx "gio launch $t/apps/spotify.desktop" "$FAKE/calls"'
+res=$(commands/app/quit Photoshop 2>&1; echo "rc=$?"); res2=$(commands/app/quit spotify --gently 2>&1; echo "rc=$?")
+check "no such window: 4; a wrong word: 2" '[[ "$res" == "No window of Photoshop is open"*"rc=4" && "$res2" == *"rc=2" ]]'
+check "Super+Alt+Escape opens the Core on force quit" 'grep -qE "^    Mod\+Alt\+Escape .*\"core\" \"search\" \"force quit\"; \}$" config/niri/takumi/defaults.kdl'
+check "existing homes get the new defaults.kdl" 'm=$(ls migrations/2026111002*-niri-defaults-*.sh) && grep -q "cp \"\$src\" \"\$f\"" "$m"'
+
+windows
+res=$(talk "no\n" commands/app/close-all)
+check "close all: asks how many first; no closes nothing ($res)" '[[ "$res" == *"confirm Close all 4 windows? Apps with unsaved work will ask about it"*"rc=1" && $(jq length "$FAKE/windows.json") -eq 4 ]]'
+res=$(talk "yes\n" commands/app/close-all)
+check "yes: each window is asked to close, as its own button would ($res)" '[[ "$res" == *"done Every window is closed"*"rc=0" && $(grep -c "^niri msg action close-window --id" "$FAKE/calls") -eq 4 ]]'
+windows; touch "$FAKE/keep-open"
+res=$(talk "yes\n" commands/app/close-all)
+check "one asking about unsaved work stays, named: 5 ($res)" '[[ "$res" == *"Still open, asking about unsaved work: "*"Report.odt"*"rc=5" ]]'
+rm -f "$FAKE/keep-open"; echo "[]" > "$FAKE/windows.json"
+res=$(talk "" commands/app/close-all)
+check "nothing open: said, nothing asked" '[[ "$res" == *"done No windows are open"*"rc=0" && "$res" != *confirm* ]]'
+kill -9 $calm $stubborn 2>/dev/null || true
+unset TAKUMI_APPS_DIRS TAKUMI_QUIT_WAIT TAKUMI_CLOSE_WAIT
+
+echo "   $(grep -c '^check ' "$0") keyboard checks against a fake localed, sudo, niri and fcitx5"
+exit $status

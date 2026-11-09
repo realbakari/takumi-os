@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+# Contract checks for sound (lib/audio.sh, commands/audio/*, the Palette's sound rows, default/pipewire,
+# default/wireplumber, default/audio) against a fake PipeWire, a fake playerctl and a fake systemd: plain
+# names for devices, the output in use first, apps playing with their own volume, who is using the
+# microphone, that switching moves what plays, the volume and microphone keys, the next output, which app
+# the media keys control, Bluetooth codecs in words, the sound quality, and the speaker tuning from the
+# Palette's row down to the filter it runs and the route it follows.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; sound checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-sound.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run TAKUMI_AUDIO_STATE=$t/machine LADSPA_PATH=$t/ladspa
+export TAKUMI_TUNING_WAIT=2 TAKUMI_TUNING_PAUSE=0
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice"   # fake takumi commands go in front of the real ones
+
+# A laptop: speakers in use at 60% (headphones on the same jack, unplugged), HDMI, Bluetooth headphones on
+# AAC, the null sink PipeWire makes up, a built-in microphone; Firefox playing at 75%, Zoom recording the
+# microphone, a recorder taking the desktop, and a headset bridge inside the sound server.
+cat > "$FAKE/dump.json" <<'JSON'
+[
+ {"id": 40, "type": "PipeWire:Interface:Metadata", "props": {"metadata.name": "default"}, "metadata": [
+   {"subject": 0, "key": "default.audio.sink", "type": "Spa:String:JSON", "value": {"name": "alsa_output.pci.analog-stereo"}},
+   {"subject": 0, "key": "default.audio.source", "type": "Spa:String:JSON", "value": {"name": "alsa_input.pci.analog-stereo"}}]},
+ {"id": 50, "type": "PipeWire:Interface:Device", "info": {"props": {"device.api": "alsa", "device.description": "Built-in Audio"},
+   "params": {"EnumRoute": [{"index": 0, "direction": "Output", "name": "analog-output-speaker", "description": "Speakers", "devices": [1]},
+                            {"index": 1, "direction": "Output", "name": "analog-output-headphones", "description": "Headphones", "devices": [1]},
+                            {"index": 2, "direction": "Input", "name": "analog-input-internal-mic", "description": "Internal Microphone", "devices": [2]}],
+              "Route": [{"index": 0, "direction": "Output", "device": 1, "name": "analog-output-speaker", "description": "Speakers"},
+                        {"index": 2, "direction": "Input", "device": 2, "name": "analog-input-internal-mic", "description": "Internal Microphone"}]}}},
+ {"id": 51, "type": "PipeWire:Interface:Device", "info": {"props": {"device.api": "alsa", "device.description": "HDA Intel HDMI"},
+   "params": {"Route": [{"index": 0, "direction": "Output", "device": 3, "name": "hdmi-output-0", "description": "HDMI / DisplayPort 1"}]}}},
+ {"id": 60, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Audio/Sink", "node.name": "alsa_output.pci.analog-stereo",
+   "node.description": "Built-in Audio Analog Stereo", "device.id": 50, "card.profile.device": 1, "priority.session": 1009, "object.serial": 160},
+   "params": {"Props": [{"volume": 1.0, "mute": false, "channelVolumes": [0.216, 0.216]}]}}},
+ {"id": 61, "type": "PipeWire:Interface:Node", "info": {"state": "suspended", "props": {"media.class": "Audio/Sink", "node.name": "alsa_output.pci.hdmi-stereo",
+   "node.description": "HDA Intel HDMI Digital Stereo", "device.id": 51, "card.profile.device": 3, "priority.session": 700, "object.serial": 161},
+   "params": {"Props": [{"mute": false, "channelVolumes": [1.0, 1.0]}]}}},
+ {"id": 62, "type": "PipeWire:Interface:Node", "info": {"state": "idle", "props": {"media.class": "Audio/Sink", "node.name": "bluez_output.AA_BB.1",
+   "node.description": "WH-1000XM4", "device.api": "bluez5", "priority.session": 1010, "object.serial": 162,
+   "api.bluez5.codec": "aac", "api.bluez5.profile": "a2dp-sink", "api.bluez5.address": "AA:BB:CC:DD:EE:FF"},
+   "params": {"Props": [{"mute": false, "channelVolumes": [0.125, 0.125]}]}}},
+ {"id": 63, "type": "PipeWire:Interface:Node", "info": {"state": "suspended", "props": {"media.class": "Audio/Sink", "node.name": "auto_null",
+   "node.description": "Dummy Output", "object.serial": 163}}},
+ {"id": 64, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Audio/Source", "node.name": "alsa_input.pci.analog-stereo",
+   "node.description": "Built-in Audio Analog Stereo", "device.id": 50, "card.profile.device": 2, "priority.session": 2009, "object.serial": 164},
+   "params": {"Props": [{"mute": false, "channelVolumes": [1.0, 1.0]}]}}},
+ {"id": 70, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Stream/Output/Audio", "application.name": "Firefox",
+   "media.name": "Lo-fi beats", "node.name": "Firefox", "object.serial": 170}, "params": {"Props": [{"mute": false, "channelVolumes": [0.421875, 0.421875]}]}}},
+ {"id": 71, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Stream/Input/Audio", "application.name": "Zoom",
+   "node.name": "zoom", "object.serial": 171}, "params": {"Props": [{"mute": false, "channelVolumes": [1.0]}]}}},
+ {"id": 72, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Stream/Input/Audio", "application.name": "Recorder",
+   "node.name": "rec", "stream.capture.sink": "true", "object.serial": 172}, "params": {"Props": [{"mute": false, "channelVolumes": [1.0]}]}}},
+ {"id": 73, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Stream/Output/Audio", "node.name": "bridge.out",
+   "node.link-group": "loopback-1-2", "object.serial": 173}, "params": {"Props": [{"mute": false, "channelVolumes": [1.0]}]}}}
+]
+JSON
+# The tuning's filter, as the graph shows it once takumi-tuning.service has started it.
+tuned='{"id": 90, "type": "PipeWire:Interface:Node", "info": {"state": "idle", "props": {"media.class": "Audio/Sink", "node.name": "takumi_tuning",
+  "node.description": "Speaker tuning", "filter.smart": true, "filter.smart.name": "takumi-tuning", "node.link-group": "filter-chain-9-1"}}}'
+cat > "$t/bin/pw-dump" <<EOF
+#!/bin/sh
+[ -e "\$FAKE/down" ] && exit 1
+# The graph's changes, once the tuning's own PipeWire is up (a real one is up before it shows in the graph).
+if [ "\${1:-}" = -m ] && [ "\${2:-}" = -N ]; then
+  i=0; while [ ! -e "\$FAKE/tuning.conf" ] && [ \$i -lt 50 ]; do sleep 0.1; i=\$((i + 1)); done
+  cat "\$FAKE/monitor"; exit 0
+fi
+if [ -e "\$FAKE/started" ] && [ ! -e "\$FAKE/never" ]; then jq '. + [$tuned]' "\$FAKE/dump.json"; else cat "\$FAKE/dump.json"; fi
+EOF
+cat > "$t/bin/wpctl" <<'EOF'
+#!/bin/sh
+printf 'wpctl %s\n' "$*" >> "$FAKE/calls"
+[ -e "$FAKE/down" ] && exit 1
+case "$1" in
+  get-volume) case "$2" in *SINK*) cat "$FAKE/sink" ;; *) [ -s "$FAKE/source" ] || exit 1; cat "$FAKE/source" ;; esac ;;
+esac
+exit 0
+EOF
+cat > "$t/bin/playerctl" <<'EOF'
+#!/bin/sh
+printf 'playerctl %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  -l) [ -s "$FAKE/players" ] || { echo "No players found" >&2; exit 1; }; cat "$FAKE/players" ;;
+  -p) cat "$FAKE/title.$2" 2>/dev/null; exit 0 ;;
+  *) [ -s "$FAKE/players" ] || { echo "No players found" >&2; exit 1; } ;;
+esac
+EOF
+cat > "$t/bin/systemctl" <<'EOF'
+#!/bin/sh
+printf 'systemctl %s\n' "$*" >> "$FAKE/calls"
+case "$*" in
+  *" cat takumi-tuning.service") [ -e "$FAKE/unit" ] || exit 1; echo "# /usr/lib/systemd/user/takumi-tuning.service" ;;
+  *" start takumi-tuning.service") touch "$FAKE/started" ;;
+  *" stop takumi-tuning.service") rm -f "$FAKE/started" ;;
+esac
+exit 0
+EOF
+printf '#!/bin/sh\nprintf "systemd-run %%s\\n" "$*" >> "$FAKE/calls"; touch "$FAKE/started"\n' > "$t/bin/systemd-run"
+printf '#!/bin/sh\nprintf "pw-metadata %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/bin/pw-metadata"
+printf '#!/bin/sh\nprintf "pipewire %%s\\n" "$*" >> "$FAKE/calls"; cp "$2" "$FAKE/tuning.conf"; exec sleep 30\n' > "$t/bin/pipewire"
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+chmod +x "$t/bin/"* "$t/commands/notice/main"
+reset() {
+  rm -rf "${FAKE:?}"/* "${HOME:?}"/.config "$HOME/.local" "${TAKUMI_AUDIO_STATE:?}" "${LADSPA_PATH:?}"
+  cp "$t/dump.orig" "$FAKE/dump.json"
+  : > "$FAKE/calls"; : > "$FAKE/notices"; : > "$FAKE/players"
+  echo "Volume: 0.65" > "$FAKE/sink"; echo "Volume: 1.00" > "$FAKE/source"
+  mkdir -p "$LADSPA_PATH"; : > "$LADSPA_PATH/fast_lookahead_limiter_1913.so"
+}
+check() { if eval "$2"; then :; else echo "sound: $1"; status=1; fi; }
+lib() { bash -c '. lib/audio.sh; "$@"' _ "$@"; }
+called() { grep -qxF "$1" "$FAKE/calls"; }
+noticed() { grep -qxF "$1" "$FAKE/notices"; }
+cp "$FAKE/dump.json" "$t/dump.orig"
+
+reset
+devs=$(lib audio_devices < "$FAKE/dump.json")
+check "outputs first, the one in use first, plain names" '[[ "$(jq -r .plain <<< "$devs" | tr "\n" "|")" == "Speakers|Bluetooth: WH-1000XM4|HDMI 1|Built-in microphone|" ]]'
+check "volumes as a person reads them" '[[ "$(jq -r "select(.dir == \"out\") | .percent" <<< "$devs" | tr "\n" " ")" == "60 50 100 " ]]'
+check "the sink PipeWire makes up is no output" '[[ "$devs" != *auto_null* ]]'
+check "a Bluetooth codec in words" '[[ "$(jq -r "select(.bluetooth) | .short + \" · \" + .codecWords" <<< "$devs")" == "WH-1000XM4 · AAC · good quality" ]]'
+check "the state line: volume, muted, output, microphone in use" '[[ "$(lib audio_state)" == "60 no Speakers yes" ]]'
+check "privacy marks: the microphone in use, no camera, not muted" '[[ "$(lib audio_marks)" == "yes no no" ]]'
+check "a recorder taking the desktop is not the microphone" '[[ "$(jq -r "select(.dir == \"in\" and (.monitor | not)) | .app" <<< "$(lib audio_streams < "$FAKE/dump.json")")" == "Zoom" ]]'
+check "a bridge inside the sound server is no app" '[[ "$(lib audio_streams < "$FAKE/dump.json")" != *bridge* ]]'
+check "the built-in speakers, by their route" '[[ "$(lib audio_speakers < "$FAKE/dump.json")" == "{\"id\":60,\"name\":\"alsa_output.pci.analog-stereo\",\"route\":\"analog-output-speaker\"}" ]]'
+jq '(.[] | select(.id == 50) | .info.params.Route[0]) |= (.name = "analog-output-headphones" | .description = "Headphones")' "$t/dump.orig" > "$FAKE/dump.json"
+check "headphones plugged in: still the speakers to tune" '[[ "$(lib audio_speakers < "$FAKE/dump.json" | jq -r .route)" == analog-output-speaker && "$(lib audio_devices < "$FAKE/dump.json" | jq -r "select(.id == 60) | .plain")" == Headphones ]]'
+jq '. + [{"id": 74, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Audio/Sink", "node.name": "x", "filter.smart": true}}}]
+    | map(select(.id != 71))' "$t/dump.orig" > "$FAKE/dump.json"
+check "a smart filter is no output" '[[ "$(lib audio_devices < "$FAKE/dump.json" | jq -r "select(.name == \"x\")")" == "" ]]'
+jq 'map(if .id == 64 then .info.params.Props[0].mute = true else . end | select(.id != 71))' "$t/dump.orig" > "$FAKE/dump.json"
+check "privacy marks: nobody recording, the microphone muted" '[[ "$(lib audio_marks)" == "no no yes" ]]'
+jq 'map(select(.id != 62)) + [{"id": 66, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Audio/Sink",
+      "node.name": "bluez_output.CC.1", "node.description": "AirPods Pro", "api.bluez5.codec": "msbc", "api.bluez5.profile": "headset-head-unit"}}}]' "$t/dump.orig" > "$FAKE/dump.json"
+check "headset mode in words" '[[ "$(commands/audio/codec 2>&1)" == "AirPods Pro · mSBC · call quality, while an app uses the microphone" ]]'
+cp "$t/dump.orig" "$FAKE/dump.json"; : > "$FAKE/notices"
+check "takumi audio codec: the line and the notice" '[[ "$(commands/audio/codec)" == "WH-1000XM4 · AAC · good quality" ]] && noticed "bt|WH-1000XM4|AAC · good quality|"'
+jq 'map(select(.id != 62))' "$t/dump.orig" > "$FAKE/dump.json"
+rc=0; out=$(commands/audio/codec) || rc=$?
+check "no Bluetooth headphones: 3 and words ($out)" '[[ $rc -eq 3 && "$out" == "No Bluetooth headphones are connected" ]]'
+
+reset
+r=$(commands/palette/sound sound)
+check "rows are JSON with an id, a title and a kind" '[[ -n "$r" ]] && jq -e "select(.id and .title and .kind) | true" <<< "$r" >/dev/null'
+check "the output in use says so and does nothing" '[[ "$(jq -c "select(.title == \"Speakers\") | [.subtitle, .run]" <<< "$r")" == "[\"Sound goes here · 60%\",[\"true\"]]" ]]'
+check "another output switches" '[[ "$(jq -c "select(.title == \"HDMI 1\") | [.subtitle, .run]" <<< "$r")" == "[\"Enter to send sound here\",[\"takumi\",\"audio\",\"output\",\"61\"]]" ]]'
+check "a Bluetooth output says how its sound travels" '[[ "$(jq -r "select(.title == \"Bluetooth: WH-1000XM4\") | .subtitle" <<< "$r")" == "Enter to send sound here · AAC, good quality" ]]'
+check "the microphone in use" '[[ "$(jq -r "select(.title == \"Built-in microphone\") | .subtitle" <<< "$r")" == "Your microphone" ]]'
+check "mute and four volumes" '[[ "$(jq -r "select(.id | test(\"sound:(mute|vol)\")) | .title" <<< "$r" | tr "\n" "|")" == "Mute|Volume 25%|Volume 50%|Volume 75%|Volume 100%|" ]]'
+check "mute the microphone" '[[ "$(jq -c "select(.id == \"sound:mic:mute\") | [.title, .run]" <<< "$r")" == "[\"Mute the microphone\",[\"takumi\",\"audio\",\"mic\",\"mute\"]]" ]]'
+check "an app steps down from 75 to 50" '[[ "$(jq -c "select(.id == \"sound:app:70\") | [.title, .subtitle, .run]" <<< "$r")" == "[\"Firefox · 75%\",\"Lo-fi beats · Enter for 50%\",[\"takumi\",\"audio\",\"app\",\"70\",\"50\"]]" ]]'
+check "who is using the microphone is named" '[[ "$(jq -r "select(.id | startswith(\"sound:rec:\")) | .title" <<< "$r")" == "Zoom is using the microphone" ]]'
+check "lists refresh themselves" '[[ "$(jq -r "select(.id == \"sound:app:70\") | .refresh" <<< "$r")" == 4 ]]'
+check "Balanced in use, Studio quality on offer" '[[ "$(jq -r "select(.id | startswith(\"sound:quality:\")) | .title + \" · \" + .subtitle + \" · \" + (.run | join(\" \"))" <<< "$r" | tr "\n" "|")" == "Sound: Studio quality · Songs at their own sample rate, a short delay · for hi-res music, recording and instruments · takumi audio quality studio|Sound: Balanced · In use · One sample rate, a longer buffer · true|" ]]'
+check "the speakers can be tuned" '[[ "$(jq -c "select(.id == \"sound:tuning\") | [.title, .subtitle, .run]" <<< "$r")" == "[\"Tune the speakers\",\"A general tuning for laptop speakers · Enter to try it\",[\"takumi\",\"audio\",\"tuning\",\"on\",\"laptop-speakers\"]]" ]]'
+check "one media app: no media keys rows" '[[ "$r" != *sound:player:* ]]'
+check "three letters of a device find it" '[[ "$(commands/palette/sound hdm | jq -r .title)" == "HDMI 1" ]]'
+check "a device's name finds that device, not the one in use" '[[ "$(commands/palette/sound blueto | jq -r .title)" == "Bluetooth: WH-1000XM4" ]]'
+check "microphone lists the microphone rows" '[[ "$(commands/palette/sound microphone | jq -r .title | tr "\n" "|")" == "Built-in microphone|Mute the microphone|Zoom is using the microphone|" ]]'
+check "codec finds the Bluetooth output" '[[ "$(commands/palette/sound codec | jq -r .title)" == "Bluetooth: WH-1000XM4" ]]'
+check "under three letters, nothing" '[[ -z "$(commands/palette/sound so)" ]]'
+check "every word counts, in any field" '[[ "$(commands/palette/sound "volume 75" | jq -r .title | tr "\n" "|")" == "Volume 75%|Firefox · 75%|" ]]'
+mkdir -p "$TAKUMI_AUDIO_STATE"; echo laptop-speakers > "$TAKUMI_AUDIO_STATE/tuning"; touch "$FAKE/started"
+check "the computer's own tuning, on" '[[ "$(commands/palette/sound tuning | jq -c "[.title, .subtitle, .run]")" == "[\"Speakers tuned for this laptop\",\"Laptop speakers · Enter to hear them as they are\",[\"takumi\",\"audio\",\"tuning\",\"off\"]]" ]]'
+rm -f "$FAKE/started"
+check "the computer's own tuning, not running" '[[ "$(commands/palette/sound tuning | jq -r .title)" == "The speaker tuning is not running" ]]'
+lib audio_tuning_save off laptop-speakers "" ""
+check "the computer's own tuning, turned off" '[[ "$(commands/palette/sound tuning | jq -c "[.title, .run]")" == "[\"Tune the speakers for this laptop\",[\"takumi\",\"audio\",\"tuning\",\"on\",\"laptop-speakers\"]]" ]]'
+printf '%s\n' spotify firefox.instance_1_23 > "$FAKE/players"; echo "Night drive" > "$FAKE/title.spotify"; echo "Lo-fi beats" > "$FAKE/title.firefox.instance_1_23"
+r=$(commands/palette/sound media)
+check "two media apps: the one the keys control, and the other" '[[ "$(jq -r ".title + \" · \" + .subtitle" <<< "$r" | tr "\n" "|")" == "Media keys: Spotify · Night drive · The media keys control it|Media keys: Firefox · Lo-fi beats · Enter to control it with the media keys|" ]]'
+check "Enter on the other chooses it" '[[ "$(jq -c "select(.title == \"Media keys: Firefox\") | .run" <<< "$r")" == "[\"takumi\",\"audio\",\"player\",\"firefox.instance_1_23\"]" ]]'
+
+reset
+out=$(commands/audio/output hdmi || true)
+check "switching sets the default ($out)" 'called "wpctl set-default 61" && [[ "$out" == "Sound goes to HDMI 1" ]]'
+check "switching moves what plays, not what records" 'called "pw-metadata 70 target.object 161" && ! grep -q "pw-metadata 71" "$FAKE/calls"'
+check "switching says so in the Core" 'noticed "display|HDMI 1|Sound goes here|"'
+reset
+rc=0; out=$(commands/audio/output nowhere) || rc=$?
+check "no such output: 3 and words ($out)" '[[ $rc -eq 3 && "$out" == "There is no output called nowhere" ]]'
+reset
+out=$(commands/audio/output next || true)
+check "the next output, in a fixed order ($out)" '[[ "$out" == "Sound: HDMI 1" ]] && called "wpctl set-default 61" && called "pw-metadata 70 target.object 161"'
+check "the next output is named, with its volume" 'noticed "display|Sound: HDMI 1||100|"'
+jq '(.[] | select(.id == 40) | .metadata[0].value.name) = "alsa_output.pci.hdmi-stereo"' "$t/dump.orig" > "$FAKE/dump.json"
+out=$(commands/audio/output next || true)
+check "after the last, the first: Bluetooth by its own name ($out)" '[[ "$out" == "Sound: WH-1000XM4" ]] && noticed "bt|Sound: WH-1000XM4||50|"'
+reset
+out=$(commands/audio/input next || true)
+check "one microphone: next stays on it ($out)" '[[ "$out" == "Microphone: Built-in microphone" ]] && called "wpctl set-default 64" && ! grep -q "pw-metadata 72" "$FAKE/calls"'
+reset
+commands/audio/input "built-in microphone" >/dev/null || true
+check "a microphone found by its plain name" 'called "wpctl set-default 64"'
+reset
+commands/audio/app 70 mute >/dev/null || true
+check "muting one app" 'called "wpctl set-mute 70 1"'
+reset
+commands/audio/app 70 40 >/dev/null || true
+check "one app's volume, unmuted" 'called "wpctl set-volume -l 1.0 70 40%" && called "wpctl set-mute 70 0"'
+rc=0; commands/audio/app 70 loud >/dev/null 2>&1 || rc=$?
+check "not a level: 2" '[[ $rc -eq 2 ]]'
+
+# The volume keys.
+reset
+out=$(commands/audio/volume up)
+check "up: 5% more, unmuted, a meter ($out)" '[[ "$out" == "Volume 65%" ]] && called "wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+" && called "wpctl set-mute @DEFAULT_AUDIO_SINK@ 0" && noticed "vol|Volume||65|"'
+reset; commands/audio/volume up --fine >/dev/null
+check "Alt: 1% steps" 'called "wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 1%+"'
+reset; commands/audio/volume down >/dev/null
+check "down: 5% less" 'called "wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%-"'
+reset; commands/audio/volume down --fine >/dev/null
+check "Alt down: 1% less" 'called "wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 1%-"'
+reset; commands/audio/volume up --max >/dev/null
+check "Shift up: all the way" 'called "wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 100%"'
+reset; commands/audio/volume down --min >/dev/null
+check "Shift down: silent" 'called "wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 0%"'
+reset; commands/audio/volume 40 >/dev/null
+check "a level, unmuted" 'called "wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 40%" && called "wpctl set-mute @DEFAULT_AUDIO_SINK@ 0"'
+reset; echo "Volume: 0.65 [MUTED]" > "$FAKE/sink"
+out=$(commands/audio/volume mute)
+check "mute: the other of muted and not, said ($out)" '[[ "$out" == Muted ]] && called "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle" && noticed "mute|Muted||0|"'
+for bad in "loud" "up --loud" "40 --fine" "120" ""; do
+  # shellcheck disable=SC2086 # the words are meant to split
+  rc=0; commands/audio/volume $bad >/dev/null 2>&1 || rc=$?
+  check "the volume refuses \"$bad\": 2" '[[ $rc -eq 2 ]]'
+done
+reset; : > "$FAKE/down"
+rc=0; out=$(commands/audio/volume up) || rc=$?
+check "no sound: 1 and words ($out)" '[[ $rc -eq 1 && "$out" == "Sound is not running" ]]'
+
+# The microphone key.
+reset; echo "Volume: 1.00 [MUTED]" > "$FAKE/source"
+out=$(commands/audio/mic toggle)
+check "the microphone key mutes, and says so ($out)" '[[ "$out" == "Microphone off" ]] && called "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle" && noticed "micOff|Microphone off|apps hear nothing|"'
+reset
+out=$(commands/audio/mic unmute)
+check "unmute ($out)" '[[ "$out" == "Microphone on" ]] && called "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0" && noticed "mic|Microphone on|"'
+reset; : > "$FAKE/source"
+rc=0; out=$(commands/audio/mic mute) || rc=$?
+check "no microphone: 3 ($out)" '[[ $rc -eq 3 && "$out" == "There is no microphone" ]]'
+
+# Which app the media keys control.
+reset; printf '%s\n' spotify firefox.instance_1_23 > "$FAKE/players"; echo "Lo-fi beats" > "$FAKE/title.firefox.instance_1_23"
+out=$(commands/audio/player next)
+check "next: from the first to the second, named ($out)" '[[ "$out" == "The media keys control Firefox" ]] && noticed "play|Media keys: Firefox|Lo-fi beats|" && [[ "$(cat "$HOME/.local/state/takumi/player")" == firefox.instance_1_23 ]]'
+commands/audio/media play-pause
+check "the media keys reach it, or another Firefox, or any" 'called "playerctl --player=firefox.instance_1_23,firefox,%any play-pause"'
+out=$(commands/audio/player next)
+check "and round again ($out)" '[[ "$out" == "The media keys control Spotify" ]]'
+commands/audio/media forward; commands/audio/media pause-all
+check "ten seconds on; every app paused" 'called "playerctl --player=spotify,%any position 10+" && called "playerctl --all-players pause"'
+out=$(commands/audio/player firefox)
+check "chosen by name ($out)" '[[ "$out" == "The media keys control Firefox" ]]'
+check "the list marks the one the keys control" '[[ "$(commands/audio/player | tr "\n" "|")" == "  Spotify|* Firefox · Lo-fi beats|" ]]'
+rc=0; out=$(commands/audio/player vlc) || rc=$?
+check "no such app: 3 ($out)" '[[ $rc -eq 3 && "$out" == "No media app called vlc is open" ]]'
+: > "$FAKE/players"
+rc=0; out=$(commands/audio/media next) || rc=$?
+check "no media app: 3 ($out)" '[[ $rc -eq 3 && "$out" == "No media app is open" ]]'
+
+# Sound quality.
+reset
+out=$(commands/audio/quality studio)
+check "Studio quality: the file in the home, Takumi's own ($out)" '[[ "$out" == "Sound: Studio quality" ]] && cmp -s default/pipewire/studio.conf "$HOME/.config/pipewire/pipewire.conf.d/60-takumi-quality.conf"'
+check "Studio quality at once: the rate follows the song, a short buffer" 'called "pw-metadata -n settings 0 clock.allowed-rates [ 44100 48000 88200 96000 176400 192000 ]" && called "pw-metadata -n settings 0 clock.quantum 256"'
+check "which one is in use" '[[ "$(commands/audio/quality)" == "Sound: Studio quality" ]]'
+: > "$FAKE/calls"; commands/audio/quality balanced >/dev/null
+check "Balanced, back at once" 'called "pw-metadata -n settings 0 clock.allowed-rates [ 48000 ]" && called "pw-metadata -n settings 0 clock.quantum 1024" && [[ "$(commands/audio/quality)" == "Sound: Balanced" ]]'
+rc=0; commands/audio/quality loud >/dev/null 2>&1 || rc=$?
+check "not a quality: 2" '[[ $rc -eq 2 ]]'
+
+# The speaker tuning.
+reset
+check "the tunings there are" '[[ "$(commands/audio/tuning list)" == "laptop-speakers      Laptop speakers" ]]'
+check "nothing on, nothing chosen" '[[ "$(commands/audio/tuning)" == "Speaker tuning: none for this computer" ]]'
+out=$(commands/audio/tuning on)
+check "on: the general tuning, started, said ($out)" '[[ "$out" == "Speakers tuned: Laptop speakers" ]] && noticed "vol|Speakers tuned|Laptop speakers|"'
+check "on: remembered" '[[ "$(lib audio_setting tuning state) $(lib audio_setting tuning profile)" == "on laptop-speakers" ]]'
+check "on: a unit of its own while takumi-tuning.service is not installed" 'called "systemd-run --user --unit=takumi-tuning --collect --quiet takumi audio tuning run"'
+check "what is on" '[[ "$(commands/audio/tuning)" == "Speaker tuning: Laptop speakers" ]]'
+: > "$FAKE/unit"; : > "$FAKE/calls"; commands/audio/tuning on >/dev/null
+check "on, with takumi-tuning.service installed: that" 'called "systemctl --user start takumi-tuning.service" && ! grep -q systemd-run "$FAKE/calls"'
+out=$(commands/audio/tuning off)
+check "off: stopped and remembered ($out)" '[[ "$out" == "Speaker tuning off" ]] && called "systemctl --user stop takumi-tuning.service" && [[ "$(lib audio_setting tuning state)" == off ]] && noticed "vol|Speaker tuning off|the speakers play as they are|"'
+reset; : > "$FAKE/never"
+rc=0; out=$(commands/audio/tuning on) || rc=$?
+check "a tuning that never starts: 1, stopped, nothing kept ($out)" '[[ $rc -eq 1 && "$out" == "The speaker tuning did not start" && ! -e "$HOME/.config/takumi/sound.toml" ]] && called "systemctl --user stop takumi-tuning.service"'
+reset; rm -f "$LADSPA_PATH/fast_lookahead_limiter_1913.so"
+rc=0; out=$(commands/audio/tuning on) || rc=$?
+check "the limiter not installed: 5, the package named ($out)" '[[ $rc -eq 5 && "$out" == "Laptop speakers needs swh-plugins, which is not installed" ]]'
+reset
+rc=0; out=$(commands/audio/tuning on boom) || rc=$?
+check "no such tuning: 3 ($out)" '[[ $rc -eq 3 && "$out" == "There is no speaker tuning called boom" ]]'
+rc=0; commands/audio/tuning on ../../etc >/dev/null 2>&1 || rc=$?
+check "a tuning's name never reaches outside its folder: 3" '[[ $rc -eq 3 ]]'
+jq 'map(if .id == 50 then .info.params.EnumRoute |= map(select(.name != "analog-output-speaker")) | .info.params.Route[0] = {"index": 1, "direction": "Output", "device": 1, "name": "analog-output-headphones", "description": "Headphones"} else . end)' "$t/dump.orig" > "$FAKE/dump.json"
+rc=0; out=$(commands/audio/tuning on) || rc=$?
+check "no built-in speakers: 4 ($out)" '[[ $rc -eq 4 && "$out" == "This computer has no built-in speakers to tune" ]]'
+reset
+out=$(commands/audio/tuning default laptop-speakers)
+check "the computer's tuning, for everyone who has not chosen" '[[ "$(cat "$TAKUMI_AUDIO_STATE/tuning")" == laptop-speakers && "$(lib audio_tuning_wanted)" == laptop-speakers ]]'
+lib audio_tuning_save off laptop-speakers "" ""
+check "a person's own off wins over the computer's" '[[ -z "$(lib audio_tuning_wanted)" ]]'
+commands/audio/tuning default none >/dev/null
+check "default none: the computer has no tuning of its own" '[[ ! -e "$TAKUMI_AUDIO_STATE/tuning" ]]'
+if [[ "$(id -u)" != 0 ]]; then   # root writes anywhere
+  mkdir -p "$TAKUMI_AUDIO_STATE"; chmod 555 "$TAKUMI_AUDIO_STATE"
+  rc=0; out=$(commands/audio/tuning default laptop-speakers) || rc=$?
+  chmod 755 "$TAKUMI_AUDIO_STATE"
+  check "only an administrator sets the computer's tuning: 6" '[[ $rc -eq 6 && "$out" == "Only an administrator can choose the computer"* ]]'
+fi
+
+# What takumi-tuning.service runs: the filter in front of the speakers, on while their route is in use.
+reset
+check "run, with nothing wanted: done, nothing started" 'commands/audio/tuning run >/dev/null && ! grep -q "^pipewire" "$FAKE/calls"'
+lib audio_tuning_save on laptop-speakers "" ""
+{ jq -c . "$t/dump.orig"
+  echo '[{"id": 90, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "takumi_tuning", "filter.smart.name": "takumi-tuning"}}}]'
+  echo '[{"id": 50, "type": "PipeWire:Interface:Device", "info": {"params": {"Route": [{"direction": "Output", "device": 1, "name": "analog-output-headphones"}]}}}]'
+  echo '[{"id": 90, "info": null}]'; } > "$FAKE/monitor"
+rc=0; out=$(commands/audio/tuning run 2>&1) || rc=$?
+conf=$(cat "$FAKE/tuning.conf" 2>/dev/null || true)
+check "run: a PipeWire of its own with the tuning ($out)" 'grep -q "^pipewire -c $XDG_RUNTIME_DIR/takumi-tuning.conf$" "$FAKE/calls" && [[ "$conf" == *"label = param_eq"* && "$conf" == *fastLookaheadLimiter* ]]'
+check "run: a smart filter in front of the speakers, starting off" '[[ "$conf" == *"filter.smart.target   = { node.name = \"alsa_output.pci.analog-stereo\" }"* && "$conf" == *"filter.smart.disabled = true"* ]]'
+check "run: on with the speakers, off with the headphones, gone with its filter" '[[ "$(grep "^pw-metadata -n filters" "$FAKE/calls" | tr "\n" "|")" == "pw-metadata -n filters 90 filter.smart.disabled false Spa:String:JSON|pw-metadata -n filters 90 filter.smart.disabled true Spa:String:JSON|pw-metadata -n filters -d 90 filter.smart.disabled|" && $rc -eq 1 ]]'
+
+# The shipped files PipeWire and WirePlumber read: brackets that close, and the settings by their names.
+for f in default/pipewire/*.conf default/pipewire/*/*.conf default/wireplumber/*/*.conf default/audio/tunings/*.conf; do
+  bare=$(sed 's/#.*//' "$f" | tr -cd '{}[]')
+  check "$f: every bracket closes" '[[ "$(tr -cd "{" <<< "$bare" | wc -c)" -eq "$(tr -cd "}" <<< "$bare" | wc -c)" && "$(tr -cd "[" <<< "$bare" | wc -c)" -eq "$(tr -cd "]" <<< "$bare" | wc -c)" ]]'
+done
+bt=$(cat default/wireplumber/wireplumber.conf.d/60-takumi-bluetooth.conf)
+check "headset mode only while an app records; headsets connect themselves" '[[ "$bt" == *"bluetooth.autoswitch-to-headset-profile = true"* && "$bt" == *"bluez5.auto-connect = [ a2dp_sink hfp_hf hsp_hs ]"* ]]'
+check "a headset that connects becomes the output, a screen does not" '[[ "$(cat default/pipewire/pipewire-pulse.conf.d/60-takumi-new-devices.conf)" == *"\"module-switch-on-connect blocklist=hdmi\""* ]]'
+
+reset; : > "$FAKE/down"
+check "no PipeWire: the state line says so" '[[ "$(commands/audio/state)" == "-1 no No output no" && "$(commands/audio/state --marks)" == "no no no" ]]'
+check "no PipeWire: one row says so" '[[ "$(commands/palette/sound sound | jq -r .title)" == "Sound is not running" ]]'
+
+echo "   $(grep -c '^ *check ' "$0") sound checks against a fake PipeWire, playerctl and systemd"
+exit $status

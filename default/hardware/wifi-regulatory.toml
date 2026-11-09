@@ -1,0 +1,12 @@
+# Any Wi-Fi: the kernel reads the radio rules for each country from wireless-regdb; without it, Wi-Fi keeps to
+# the most cautious channels and strength everywhere.
+# Kernel: https://wireless.docs.kernel.org/en/latest/en/developers/regulatory/wireless-regdb.html
+title = "Wi-Fi channels for your country"
+part = "wifi"
+
+[match]
+pci_class = ["0280"]
+
+[apply]
+packages = ["wireless-regdb"]
+note = "Wi-Fi uses the channels and strength allowed where you are once it knows the rules; without them it keeps to the most cautious ones everywhere."

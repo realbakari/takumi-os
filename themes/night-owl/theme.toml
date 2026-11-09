@@ -1,0 +1,34 @@
+# Night Owl: for those who code late into the night
+# Colours after Night Owl by Sarah Drasner (https://github.com/sdras/night-owl-vscode-theme); phases by Takumi.
+
+[meta]
+name = "night-owl"
+mode = "dark"
+title = "Night Owl"
+about = "for those who code late into the night"
+credit = "Night Owl by Sarah Drasner (https://github.com/sdras/night-owl-vscode-theme)"
+
+[palette]
+accent     = "#82aaff"
+background = "#011627"
+surface    = "#0b2942"
+foreground = "#d6deeb"
+muted      = "#637777"
+red        = "#ef5350"
+yellow     = "#ecc48d"
+green      = "#addb67"
+cyan       = "#7fdbca"
+blue       = "#82aaff"
+magenta    = "#c792ea"
+
+[phase.dawn]
+accent     = "#f78c6c"
+
+[phase.dusk]
+accent     = "#f47862"
+
+[phase.night]
+accent     = "#a37cc7"
+background = "#010e19"
+surface    = "#081d2e"
+foreground = "#bcc6d3"

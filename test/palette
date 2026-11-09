@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Contract checks for finding your way in the Palette (commands/palette/index start and commands, shell/Core/Open.qml,
+# docs/palette.md): the empty Palette's Settings and Help rows, the settings by topic, and the guide rendered to
+# HTML at install (install/steps/50-user.sh). Runs on bash 3.2 with jq.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; palette checks skipped)"; exit 0; }
+repo=$PWD; status=0; n=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-palette.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export HOME=$t PATH="$t/bin:$repo/bin:$PATH"; mkdir -p "$t/bin" "$t/out" "$HOME/.local/state/takumi/palette"
+fake() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$t/bin/$1"; chmod +x "$t/bin/$1"; }
+check() { n=$((n + 1)); if ! eval "$2"; then echo "   FAIL: $1"; status=1; fi; }
+fake nmcli 'echo disconnected'
+# GNU stat's -c %Y on a Mac.
+fake stat 'if /usr/bin/stat --version >/dev/null 2>&1 || [[ "$1" != -c ]]; then exec /usr/bin/stat "$@"; fi; /usr/bin/stat -f %m "$3"'
+index() { commands/palette/index "$@"; }
+
+# --- The empty Palette: after the first week, Settings and Help; in it, the first week's rows before them.
+rows=$(index start "")
+check "after the first week: Settings, then Help" '[[ "$(jq -r .id <<< "$rows" | tr "\n" " ")" == "find:settings find:help " ]]'
+check "Settings types its word into the field, and the shell's IPC does the same for an older shell" \
+  '[[ "$(jq -c "select(.id == \"find:settings\") | [.search, .run, .glyph, .kind]" <<< "$rows")" == "[\"settings\",[\"qs\",\"-c\",\"takumi\",\"ipc\",\"--any-display\",\"call\",\"core\",\"search\",\"settings\"],\"toggle\",\"Find\"]" ]]'
+check "Help opens the guide" '[[ "$(jq -r "select(.id == \"find:help\") | .run[0]" <<< "$rows")" == xdg-open && -f "$(jq -r "select(.id == \"find:help\") | .run[1]" <<< "$rows")" ]]'
+touch "$HOME/.local/state/takumi/firstlight"
+rows=$(index start "")
+check "the first week's rows come first, Settings and Help stay" '[[ "$(jq -r .id <<< "$rows" | head -n 1)" == start:wifi && "$(jq -r .id <<< "$rows" | tail -n 2 | tr "\n" " ")" == "find:settings find:help " ]]'
+echo start:look > "$HOME/.local/state/takumi/palette/history"; echo find:settings >> "$HOME/.local/state/takumi/palette/history"
+rows=$(index start "")
+check "a used first-week row leaves; Settings never does" '! grep -q start:look <<< "$rows" && grep -q find:settings <<< "$rows"'
+
+# --- Settings by topic, for "settings", "preferences" or "control panel".
+topics=$(index commands settings | jq -c 'select(.kind == "Topic")')
+check "eleven topics, Help last" '[[ "$(jq -r .title <<< "$topics" | tr "\n" "|")" == "Wi-Fi|Bluetooth|Sound|Displays|Keyboard & mouse|Power & battery|Look|Apps|Privacy & security|Backups|Help|" ]]'
+check "each topic types its own word" '[[ "$(jq -r "select(.search) | .search" <<< "$topics" | tr "\n" " ")" == "wifi bluetooth sound display keyboard power theme app security backup " ]]'
+check "each topic has a glyph and a line saying what is in it" '[[ -z "$(jq -r "select(.id != \"find:help\") | select(.glyph == null or .subtitle == null) | .id" <<< "$topics")" ]]'
+check "\"preferences\" and \"control panel\" list them too" '[[ "$(index commands preferences | jq -s "map(select(.kind == \"Topic\")) | length")" == 11 && "$(index commands "control panel" | jq -s "map(select(.kind == \"Topic\")) | length")" == 11 ]]'
+check "a search for one topic does not list them all" '[[ -z "$(index commands wifi | jq -r "select(.kind == \"Topic\") | .id")" && -z "$(index commands sound | jq -r "select(.kind == \"Topic\") | .id")" ]]'
+check "\"help\" finds the guide" '[[ "$(index commands help | jq -r "select(.id == \"find:help\") | .title")" == Help && "$(index commands manual | jq -r "select(.id == \"find:help\") | .title")" == Help ]]'
+check "Erase this computer is a row, as a conversation" '[[ "$(index commands erase | jq -c "select(.id == \"cmd:settings erase\") | [.title, .converse, .glyph]")" == "[\"Erase this computer\",true,\"warn\"]" ]]'
+check "the Core types a row's search into the field" 'grep -q "if (row.search) { providers.remember(row.id); field.text = row.search;" shell/Core/Open.qml'
+check "the Core names the groups" 'grep -q "Find: \"Find your way\", Topic: \"Settings\"" shell/Core/Open.qml'
+
+# --- The guide, rendered at install.
+mkdir -p "$t/inst/bin"; printf '#!/usr/bin/env bash\nexit 0\n' > "$t/inst/bin/takumi"
+printf '#!/usr/bin/env bash\nargs=("${@//\\/usr\\/share\\/takumi/$OUT}"); exec "${args[@]}"\n' > "$t/inst/bin/sudo"; chmod +x "$t/inst/bin/"*
+OUT=$t/out PATH="$t/inst/bin:$PATH" TAKUMI_PATH=$repo bash install/steps/50-user.sh
+g=$t/out/guide
+check "every page, README as index.html" '[[ -f "$g/index.html" && -f "$g/installing.html" && -f "$g/your-first-hour.html" ]]'
+check "readable by everyone" '[[ "$(ls -ld "$g" | cut -c1-10)" == drwxr-xr-x && "$(ls -l "$g/index.html" | cut -c1-10)" == -rw-r--r-- ]]'
+check "links between pages go to their HTML, with the heading" 'grep -q "<a href=\"installing.html\">" "$g/index.html" && grep -q "href=\"installing.html#erasing-a-computer-to-start-again\"" "$g/your-first-hour.html" && grep -q "<h2 id=\"erasing-a-computer-to-start-again\">" "$g/installing.html"'
+check "tables, lists, code and bold become HTML" 'grep -q "<th>Mac</th>" "$g/your-first-hour.html" && grep -q "<ol>" "$g/installing.html" && grep -q "<code>Super+Space</code>" "$g/index.html" && grep -q "<strong>Settings</strong>" "$g/index.html"'
+check "no Markdown is left" '! grep -qE "\*\*|\]\(|^#|^\|" "$g"/*.html'
+check "a page names itself" 'grep -q "<title>Installing Takumi · Takumi guide</title>" "$g/installing.html"'
+check "the page follows the light or the dark" 'grep -q "prefers-color-scheme: dark" "$g/index.html"'
+
+echo "   $n palette checks"
+exit $status

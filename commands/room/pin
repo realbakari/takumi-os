@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Keep a room from ever being deleted
+usage: <name> [--unpin]
+risk: 1
+sudo: yes
+interactive: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_current >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
+name=${1:?room name}
+[[ -f "$TAKUMI_STATE/$name" ]] || { echo "no room $name" >&2; exit 1; }
+if [[ "${2:-}" == --unpin ]]; then state_set "$name" pinned no; else state_set "$name" pinned yes; fi

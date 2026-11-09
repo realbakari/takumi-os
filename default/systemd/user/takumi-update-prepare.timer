@@ -1,0 +1,9 @@
+[Unit]
+Description=Takumi: every half hour, see whether updates can be prepared on the charger
+
+[Timer]
+OnStartupSec=15min
+OnUnitActiveSec=30min
+
+[Install]
+WantedBy=timers.target

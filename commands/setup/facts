@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: What the setup screen knows before asking: its guesses and this computer, as JSON
+usage: [--for <country>]
+risk: 0
+hidden: yes
+ABOUT
+# The language, keyboard and place guessed from the firmware's language, whether the computer started with
+# UEFI, the battery and the charger, a network, and whether the screen is drawn in software. At a first start
+# (TAKUMI_SETUP_MODE=owner) the guesses are what the computer was set up with: its keyboard, time zone and
+# language. --for <country>: only the keyboard and the place most people there have ({"layout","variant",
+# "zone"}), for when a language is chosen.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib/setup.sh "$here/../../lib/setup.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+if [[ "${1:-}" == --for ]]; then
+  cc=$(printf '%s' "${2:-}" | tr a-z A-Z)
+  [[ "$cc" =~ ^[A-Z]{2}$ ]] || { echo "usage: takumi setup facts --for <country>" >&2; exit 2; }
+  jq -cn --arg layout "$(setup_country_layout "$cc")" --arg zone "$(setup_country_zone "$cc")" '{layout: $layout, variant: "", zone: $zone}'
+  exit 0
+fi
+run=$(setup_run)
+lang=$(setup_firmware_lang); cc=$(setup_country "$lang")
+layout="" variant="" zone="" locale=""
+[[ -f "$run/keyboard" ]] && read -r layout variant < "$run/keyboard"
+[[ -n "$layout" ]] || layout=$(setup_country_layout "$cc")
+mode=live
+if [[ "${TAKUMI_SETUP_MODE:-}" == owner ]]; then
+  mode=owner
+  etc=${TAKUMI_SETUP_ETC:-/etc}
+  zone=$(readlink "$etc/localtime" 2>/dev/null | sed -n 's|.*/zoneinfo/||p')
+  locale=$(sed -n 's/^LANG=//p' "$etc/locale.conf" 2>/dev/null | tr -d '"' | tail -n 1)
+fi
+[[ -n "$zone" ]] || zone=$(setup_country_zone "$cc")
+[[ -n "$locale" ]] || locale=$(setup_locale_guess "$lang" "$cc")
+battery=-1 plugged=true
+for b in "${TAKUMI_POWER_SUPPLY:-/sys/class/power_supply}"/*; do
+  [[ "$(cat "$b/type" 2>/dev/null)" == Battery ]] || continue
+  battery=$(cat "$b/capacity" 2>/dev/null || echo -1)
+  [[ "$(cat "$b/status" 2>/dev/null)" == Discharging ]] && plugged=false
+done
+online=false; [[ -n "$(ip route show default 2>/dev/null)" ]] && online=true
+uefi=false; [[ -d /sys/firmware/efi ]] && uefi=true
+software=false; [[ -f "$run/drawing" ]] && software=true
+mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || echo 0)
+jq -cn --arg layout "$layout" --arg variant "$variant" --arg zone "$zone" --arg country "$cc" --arg locale "$locale" --arg mode "$mode" \
+  --arg language "$lang" --arg arch "$(uname -m)" --arg version "$(cat "${TAKUMI_SETUP_SHARE:-/usr/share/takumi}/version" 2>/dev/null || echo "")" \
+  --argjson battery "${battery:--1}" --argjson plugged "$plugged" --argjson online "$online" --argjson uefi "$uefi" \
+  --argjson software "$software" --argjson memory "${mem:-0}" \
+  '{layout: $layout, variant: $variant, zone: $zone, country: $country, language: $language, locale: $locale, mode: $mode,
+    arch: $arch, version: $version,
+    battery: $battery, plugged: $plugged, online: $online, uefi: $uefi, software: $software, memory: $memory}'

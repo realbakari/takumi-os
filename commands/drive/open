@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Open a USB drive or memory card in Files; a locked one asks for its password first
+usage: <name>
+example: takumi drive open SanDisk
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/drive.sh" ]] && { . "$l/drive.sh"; . "$l/core.sh"; break; }; done
+declare -F drive_volumes >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh). udisks mounts it as you, at /run/media/<you>/<label>, with no password for a
+# drive plugged into this computer. An encrypted one (LUKS, or BitLocker from Windows) asks for its password
+# in place, as dots, and asks again after a wrong one; the password reaches udisks through a pipe, never an
+# argument. Exit status: 0 opened · 3 a password was needed and none came · 4 the password was wrong ·
+# 5 no such drive · 1 anything else. The last line says it in words.
+name=${1:-}
+[[ -n "$name" ]] || { echo "usage: takumi drive open <name>" >&2; exit 2; }
+command -v udisksctl >/dev/null || core_fail 1 "Drives need udisks (the udisks2 package)"
+found=$(drive_find "$name" | awk -F "$drive_sep" '$6 != "unlocked"')
+[[ -n "$found" ]] || core_fail 5 "No drive called $name is plugged in"
+if [[ $(grep -c . <<< "$found") -gt 1 ]]; then
+  which=$(awk -F "$drive_sep" '{ d = $1; sub(/^\/dev\//, "", d); w[NR] = ($4 != "" ? $4 " (" d ")" : d) }
+    END { for (i = 1; i <= NR; i++) printf "%s%s", (i == 1 ? "" : (i == NR ? " or " : ", ")), w[i] }' <<< "$found")
+  core_fail 1 "$name has $(grep -c . <<< "$found") parts; say which: $which"
+fi
+drive_read "$found"
+vname=$d_name
+
+# A locked drive: its password, then its open contents are what we open.
+if [[ $d_state == locked ]]; then
+  while :; do
+    core_secret pw "Password for $vname" || core_fail 3 "$vname needs its password"
+    core_note "Unlocking $vname…"
+    rc=0; out=$(LC_ALL=C udisksctl unlock -b "$d_dev" --key-file <(printf '%s' "$pw") 2>&1) || rc=$?
+    pw=""
+    (( rc == 0 )) && break
+    case "$out" in
+      *assphrase*|*"No key available"*|*"ncorrect"*|*"rong password"*)
+        core_wrong "That password did not work"
+        [[ "${TAKUMI_CORE:-}" == 1 ]] || core_fail 4 "That password did not work" ;;
+      *) core_fail 1 "$vname could not be unlocked: $(drive_why "$out" "$d_type")" ;;
+    esac
+  done
+  inner=$(sed -n 's/^Unlocked .* as \(.*\)\.$/\1/p' <<< "$out" | head -n 1)
+  [[ -n "$inner" ]] || inner=$(drive_volumes | awk -F "$drive_sep" -v d="$d_dev" '$1 == d { print $14; exit }')
+  [[ -n "$inner" ]] || core_fail 1 "$vname is unlocked, but what is inside could not be found"
+  line=$(drive_volumes | awk -F "$drive_sep" -v d="$inner" '$1 == d { print; exit }')
+  [[ -n "$line" ]] || core_fail 1 "$vname is unlocked, but Takumi cannot read what is inside"
+  drive_read "$line"
+fi
+[[ $d_state != blank ]] || core_fail 1 "$vname has nothing Takumi can read; formatting it makes it usable"
+
+mp=$d_mount
+if [[ -z "$mp" ]]; then
+  core_note "Opening $vname…"
+  mp=$(drive_mount "$d_dev") || core_fail 1 "$vname could not be opened: $(drive_why "$mp" "$d_type")"
+  [[ -n "$mp" ]] || core_fail 1 "$vname could not be opened"
+fi
+gio open "$mp" >/dev/null 2>&1 || xdg-open "$mp" >/dev/null 2>&1 || true
+core_done "Opened $vname"

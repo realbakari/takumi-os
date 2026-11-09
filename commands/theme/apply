@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Tell running apps to pick up the rendered theme
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/theme.sh" ]] && { . "$l/theme.sh"; break; }; done
+look="$HOME/.local/state/takumi/look"
+name=$(cat "$HOME/.config/takumi/theme" 2>/dev/null || echo ion)
+pkill -SIGUSR1 -x foot 2>/dev/null || true                        # foot re-reads its config
+command -v niri >/dev/null && niri msg action load-config-file >/dev/null 2>&1 || true
+mode=$(sed -n 's/^mode = "\(.*\)"/\1/p' "$look/palette.toml")
+command -v gsettings >/dev/null && gsettings set org.gnome.desktop.interface color-scheme "prefer-${mode:-dark}" 2>/dev/null || true
+command -v qs >/dev/null && qs -c takumi ipc --any-display call theme reload >/dev/null 2>&1 || true
+theme_toml_file=""
+if declare -F theme_find >/dev/null && dir=$(theme_find "$name"); then theme_toml_file="$dir/theme.toml"; fi
+# Folders in the accent: Takumi's icon theme points at the Papirus folder colour nearest the theme's day
+# accent (lib/theme.sh), and GTK uses it unless you chose another icon theme yourself.
+if [[ -n "$theme_toml_file" ]] && accent=$(theme_merged "$theme_toml_file" day | sed -n 's/^accent=//p') && \
+   theme_folders "$accent" "${mode:-dark}" >/dev/null 2>&1 && command -v gsettings >/dev/null; then
+  icons=$(gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null | tr -d "'" || true)
+  case "$icons" in ''|Adwaita|hicolor|Papirus|Papirus-Dark|Papirus-Light) gsettings set org.gnome.desktop.interface icon-theme Takumi 2>/dev/null || true ;; esac
+fi
+# The browsers, when you asked them to wear the theme (takumi theme browsers): a Firefox profile made since
+# gets the stylesheet, and Chromium's dark mode follows the theme's mode.
+if [[ -n "$theme_toml_file" && -f "$theme_browsers_flag" ]]; then
+  while IFS= read -r p; do [[ -n "$p" ]] && theme_firefox_wire "$p"; done < <(theme_firefox_profiles)
+  theme_chromium_flags "${mode:-dark}"
+fi
+# The login screen wears your theme too: keep its copy (one palette per phase and the optional sky picture) current.
+g=/var/lib/takumi/greeter
+if [[ -d "$g" && -w "$g" ]]; then
+  theme_dir=""
+  for d in "$HOME/.config/takumi/themes" /usr/share/takumi/themes "$here/../../themes"; do
+    [[ -f "$d/$name/theme.toml" ]] && { theme_dir="$d/$name"; break; }
+  done
+  for p in dawn day dusk night; do
+    TAKUMI_RENDER_OUT="$g/$p" TAKUMI_RENDER_PALETTE_ONLY=1 takumi theme render "$name" "$p" >/dev/null 2>&1 || true
+    bg=""
+    if [[ -n "$theme_dir" ]]; then
+      for cand in "$theme_dir/skies/$p".* "$theme_dir/skies/default".*; do
+        [[ -f "$cand" ]] || continue
+        case "$cand" in
+          *.[Pp][Nn][Gg]|*.[Jj][Pp][Gg]|*.[Jj][Pp][Ee][Gg]|*.[Ww][Ee][Bb][Pp]|*.[Bb][Mm][Pp]) bg=$cand; break ;;
+        esac
+      done
+    fi
+    if [[ -n "$bg" && -d "$g/$p" ]]; then
+      cp -f "$bg" "$g/$p/sky.tmp" && chmod 0644 "$g/$p/sky.tmp" && mv -f "$g/$p/sky.tmp" "$g/$p/sky"
+    else
+      rm -f "$g/$p/sky" "$g/$p/sky.tmp"
+    fi
+  done
+  if [[ -e "$look/sky" ]]; then
+    cp -fL "$look/sky" "$g/sky.tmp" && chmod 0644 "$g/sky.tmp" && mv -f "$g/sky.tmp" "$g/sky"
+  else
+    rm -f "$g/sky" "$g/sky.tmp"
+  fi
+  cp "$HOME/.config/takumi/phase.toml" "$g/phase.toml" 2>/dev/null || true
+fi
+hook="$HOME/.config/takumi/on/theme-change"; [[ -x "$hook" ]] && "$hook" "$(cat "$HOME/.config/takumi/theme")"
+exit 0

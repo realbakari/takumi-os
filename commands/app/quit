@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Force a stuck app to quit, or quit it and open it again; with no app, list the apps that have windows
+usage: [<app> [--restart]]
+example: takumi app quit Spotify
+example: takumi app quit firefox --restart
+risk: 1
+glyph: cross
+ABOUT
+set -euo pipefail
+# The Mac's Force Quit (Super+Alt+Escape opens the Core on "force quit": commands/palette/quit, docs/harmony-keys.md).
+# niri says which process owns each window (niri msg --json windows, its pid). The app is asked to stop
+# (SIGTERM), and made to (SIGKILL) when it is still there three seconds later. --restart opens it again from its
+# .desktop entry, or with the command it was started with. Unsaved work in it is lost: the Palette's row asks
+# first. An app is named by its window's app id (firefox, org.gnome.Nautilus), its name (Files), or a window id.
+# With no app: one line per app with windows, app id <tab> name <tab> windows <tab> pid.
+# Exit status: 0 done · 1 it would not stop · 2 usage · 3 niri is not running · 4 no window of that app.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; break; }; done
+declare -F apps_path >/dev/null || { echo "takumi: the apps library is missing" >&2; exit 1; }
+command -v jq >/dev/null || { echo "takumi: jq is missing" >&2; exit 1; }
+wait_secs=${TAKUMI_QUIT_WAIT:-3}
+
+# name_of <app id> <title>: what a person calls it. Takumi's own words first, then its .desktop Name.
+name_of() {
+  case "$1" in foot | footclient) echo Terminal; return 0 ;; esac
+  local n=""
+  [[ -n "$1" ]] && apps_path "$1" >/dev/null 2>&1 && n=$(apps_name "$1")
+  printf '%s\n' "${n:-${1:-${2:-An app}}}"
+}
+
+windows=$(niri msg --json windows 2>/dev/null) || { echo "niri is not running" >&2; exit 3; }
+[[ -n "$windows" ]] || windows="[]"
+# One line per app with windows: app id, name, how many windows, its process. One app with windows from two
+# processes (two Firefox profiles) is two lines.
+list() {
+  local app pid n title
+  jq -r 'group_by([.app_id // "", .pid // 0]) | .[] | [(.[0].app_id // ""), (length | tostring), ((.[0].pid // 0) | tostring), (.[0].title // "")] | @tsv' <<< "$windows" |
+    while IFS=$'\t' read -r app n pid title; do
+      [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || continue
+      printf '%s\t%s\t%s\t%s\n' "$app" "$(name_of "$app" "$title")" "$n" "$pid"
+    done
+}
+
+if [[ $# -eq 0 ]]; then list; exit 0; fi
+want=$1; restart=no
+case "${2:-}" in "") ;; --restart) restart=yes ;; *) echo "usage: takumi app quit [<app> [--restart]]" >&2; exit 2 ;; esac
+(( $# <= 2 )) || { echo "usage: takumi app quit [<app> [--restart]]" >&2; exit 2; }
+
+# The processes behind the app: by window id, app id or name, case aside.
+wl=$(printf '%s' "$want" | tr '[:upper:]' '[:lower:]')
+pids=""; app=""; name=""
+while IFS=$'\t' read -r a n _ p; do
+  [[ -n "$p" ]] || continue
+  if [[ "$(printf '%s' "$a" | tr '[:upper:]' '[:lower:]')" == "$wl" || "$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')" == "$wl" ]]; then
+    pids="$pids $p"; app=$a; name=$n
+  fi
+done <<< "$(list)"
+if [[ -z "$pids" && "$want" =~ ^[0-9]+$ ]]; then
+  line=$(W=$want jq -r '.[] | select((.id | tostring) == env.W) | [(.app_id // ""), ((.pid // 0) | tostring), (.title // "")] | @tsv' <<< "$windows")
+  if [[ -n "$line" ]]; then
+    IFS=$'\t' read -r app p title <<< "$line"
+    [[ "$p" =~ ^[0-9]+$ && "$p" -gt 1 ]] && pids=" $p"
+    name=$(name_of "$app" "$title")
+  fi
+fi
+[[ -n "$pids" ]] || { echo "No window of $want is open"; exit 4; }
+
+# What opens it again, read before it goes: its .desktop entry, or the command its process ran.
+again=""
+if [[ $restart == yes ]] && ! { [[ -n "$app" ]] && apps_path "$app" >/dev/null 2>&1; }; then
+  first=${pids# }; first=${first%% *}
+  again=$(tr '\0' '\n' < "/proc/$first/cmdline" 2>/dev/null || true)
+fi
+
+# shellcheck disable=SC2086 # pids are numbers
+kill -TERM $pids 2>/dev/null || true
+left=""
+for _ in $(seq 1 $(( wait_secs * 5 ))); do
+  left=""
+  for p in $pids; do kill -0 "$p" 2>/dev/null && left="$left $p"; done
+  [[ -n "$left" ]] || break
+  sleep 0.2
+done
+if [[ -n "$left" ]]; then
+  # shellcheck disable=SC2086
+  kill -KILL $left 2>/dev/null || true
+  sleep 0.2
+  for p in $left; do
+    if kill -0 "$p" 2>/dev/null; then
+      takumi notice warn "$name would not quit" "" >/dev/null 2>&1 || true
+      echo "$name would not quit"; exit 1
+    fi
+  done
+fi
+
+if [[ $restart == yes ]]; then
+  sleep 0.3   # the old windows go before the new one comes
+  if [[ -n "$app" ]] && f=$(apps_path "$app" 2>/dev/null); then
+    gio launch "$f" >/dev/null 2>&1 || true
+  elif [[ -n "$again" ]]; then
+    words=()
+    while IFS= read -r w; do words+=("$w"); done <<< "$again"
+    setsid -f "${words[@]}" >/dev/null 2>&1 < /dev/null || true
+  else
+    takumi notice cross "$name was made to quit" "open it again from the Core" >/dev/null 2>&1 || true
+    echo "$name was made to quit; open it again from the Core"; exit 0
+  fi
+  takumi notice restart "$name opened again" >/dev/null 2>&1 || true
+  echo "$name opened again"
+else
+  takumi notice cross "$name was made to quit" >/dev/null 2>&1 || true
+  echo "$name was made to quit"
+fi

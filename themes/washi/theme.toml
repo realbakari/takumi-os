@@ -1,0 +1,34 @@
+# Washi: handmade paper, ink and indigo
+# A Takumi theme.
+
+[meta]
+name = "washi"
+mode = "light"
+title = "Washi"
+about = "handmade paper, ink and indigo"
+
+[palette]
+accent     = "#2f4f8c"
+background = "#f4efe6"
+surface    = "#e9e2d6"
+foreground = "#2b2622"
+muted      = "#8a8178"
+red        = "#b8432f"
+yellow     = "#a57a1e"
+green      = "#4f7a3f"
+cyan       = "#2f7f84"
+blue       = "#2f5d8c"
+magenta    = "#7f4f8f"
+
+[phase.dawn]
+accent     = "#b8632f"
+background = "#f8f0e4"
+
+[phase.dusk]
+accent     = "#b8432f"
+
+[phase.night]
+accent     = "#284478"
+background = "#eae5dc"
+surface    = "#ded7cb"
+foreground = "#3f3a36"

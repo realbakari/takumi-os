@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+status=0
+scripts=$(grep -rl '^#!/usr/bin/env bash' bin commands install migrations test default lib 2>/dev/null | grep -v '/README' || true)
+for s in $scripts; do
+  bash -n "$s" || { echo "syntax: $s"; status=1; }
+done
+if command -v shellcheck >/dev/null; then
+  # shellcheck disable=SC2086
+  shellcheck -S warning -e SC1091,SC2034 $scripts || status=1
+else
+  echo "   (shellcheck not installed; skipped)"
+fi
+# bin/ holds the router and its short name; every command is commands/<group>/<name>, executable, and starts
+# with an ABOUT block that has a summary and a risk tier (docs/commands.md). No ABOUT block, no command.
+for b in bin/*; do
+  case "${b##*/}" in takumi | tk) ;; *) echo "bin/ holds only takumi and tk; commands go in commands/<group>/<name>: $b"; status=1 ;; esac
+done
+for c in commands/*/*; do
+  [[ -x "$c" ]] || { echo "not executable: $c"; status=1; }
+  [[ "$(sed -n 2p "$c")" == ": <<'ABOUT'" ]] || { echo "no ABOUT block on line 2: $c"; status=1; continue; }
+  about=$(sed -n '3,/^ABOUT$/p' "$c")
+  grep -q '^summary: .' <<< "$about" || { echo "no summary: $c"; status=1; }
+  grep -qE '^risk: [012]$' <<< "$about" || { echo "no risk tier: $c"; status=1; }
+done
+for g in commands/*/; do
+  g=${g%/}; g=${g#commands/}
+  grep -q "^$g"$'\t' commands/groups.tsv || { echo "no line for the group $g in commands/groups.tsv"; status=1; }
+done
+# Under `set -o pipefail`, `cmd | grep -q` fails when grep exits early and cmd gets SIGPIPE. Capture, then test.
+if grep -rnE '\|\s*grep -q' bin commands install default etc lib 2>/dev/null; then echo "use [[ \"\$(cmd)\" == *x* ]] or grep -q <<< \"\$(cmd)\" instead of cmd | grep -q"; status=1; fi
+
+# Every /usr/share/takumi/<name> that a command, the shell or a seed reads is put there by an install step or
+# the setup disc's build: a path nothing installs exists on no real computer.
+for p in $(grep -rhoE '/usr/share/takumi/[a-z0-9._-]+' commands lib shell default config 2>/dev/null | sort -u); do
+  grep -qF "$p" install/steps/*.sh install/iso/build.sh || { echo "read but never installed: $p"; status=1; }
+done
+
+# Every command a script, the shell, a unit or a niri bind runs must exist: `takumi <group> <name>` is
+# commands/<group>/<name>, or the group's main when the word after the group is not a command of its own.
+calls=$( { grep -rhoE '(^|[;&|(`{]|\$\(|sudo |exec |then |do |else |&& |\|\| |Exec(Start)? *= *(/usr/bin/)?|--watch /usr/bin/|command = ")\s*takumi [a-z][a-z0-9-]*( [a-z][a-z0-9-]*)?' bin commands default install etc config lib migrations 2>/dev/null \
+            | grep -oE 'takumi [a-z][a-z0-9-]*( [a-z][a-z0-9-]*)?$';
+           grep -rhoE '"takumi", ?"[a-z][a-z0-9-]*"(, ?"[a-z][a-z0-9-]*")?' shell commands lib 2>/dev/null | tr -d '" ' | tr ',' ' ';
+           grep -rhoE 'spawn "takumi"( "[a-z][a-z0-9-]*"){1,2}' config | sed 's/^spawn //' | tr -d '"'; } | sort -u)
+while read -r _ g n; do
+  [[ -n "$g" ]] || continue
+  if [[ -z "$n" ]]; then [[ -d "commands/$g" ]] || { echo "called but missing: takumi $g"; status=1; }; continue; fi
+  [[ -x "commands/$g/$n" || -x "commands/$g/main" ]] || { echo "called but missing: takumi $g $n"; status=1; }
+done <<< "$calls"
+exit $status

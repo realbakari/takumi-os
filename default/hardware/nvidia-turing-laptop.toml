@@ -1,0 +1,15 @@
+# NVIDIA Turing (GTX 16, RTX 20) in a laptop: these chips only power down when the driver is asked to; Ampere
+# and later do it by themselves.
+# NVIDIA: the driver README's chapter "PCI-Express Runtime D3 (RTD3) Power Management", NVreg_DynamicPowerManagement.
+title = "NVIDIA Turing graphics in a laptop"
+part = "graphics"
+
+[match]
+pci = ["10de:1e??", "10de:1f??", "10de:21??"]
+pci_class = ["03??"]
+laptop = true
+arch = ["x86_64"]
+
+[apply]
+modprobe = ["options nvidia NVreg_DynamicPowerManagement=0x02"]
+note = "Turing chips (GTX 16 and RTX 20) power down only when the driver is told to, as NVIDIA documents for laptops of this generation."

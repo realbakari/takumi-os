@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Show the model the assistant uses, or choose another
+usage: [model|default]
+example: takumi intent model gpt-5.2
+example: takumi intent model claude-sonnet-5-5
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/intent.sh" ]] && { . "$l/intent.sh"; break; }; done
+declare -F intent_set >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# See docs/intent.md. Without a word: the engine and its model. With one: that model from now on; `default`
+# goes back to the engine's own (claude-opus-5-5 for an Anthropic key, Claude Code's choice for Claude Code).
+# Exit status: 0 · 2 not a model name · 3 the assistant is not set up.
+engine=$(intent_engine)
+[[ -n "$engine" ]] || { echo "The assistant is not set up. Type assistant in the Palette to choose Claude or OpenAI." >&2; exit 3; }
+own="the model Claude Code chooses"
+if (( $# == 0 )); then m=$(intent_model); echo "$engine: ${m:-$own}"; exit 0; fi
+id=$1; [[ "$id" == default ]] && id=""
+re='^[A-Za-z0-9][A-Za-z0-9._:/@-]*$'
+[[ -z "$id" || "$id" =~ $re ]] || { echo "usage: takumi intent model [model|default]" >&2; exit 2; }
+intent_set model "$id"
+m=$(intent_model)
+echo "The assistant now uses ${m:-$own}."

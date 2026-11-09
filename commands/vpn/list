@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Your VPNs and Tailscale, and which one is connected
+usage: [--json]
+example: takumi vpn list
+risk: 0
+words: vpn wireguard openvpn tailscale
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/vpn.sh" ]] && { . "$l/vpn.sh"; break; }; done
+declare -F vpn_list >/dev/null || { echo "takumi: the VPN library is missing" >&2; exit 1; }
+
+# One JSON object per VPN with --json: name, kind (WireGuard, OpenVPN, Tailscale…), state (connected, connecting,
+# off, sign in) and, for Tailscale, the exit node in use.
+json=no
+case "${1:-}" in "") ;; --json) json=yes ;; *) echo "usage: takumi vpn list [--json]" >&2; exit 2 ;; esac
+command -v jq >/dev/null || { echo "takumi vpn list needs jq" >&2; exit 1; }
+rows=$(
+  if command -v nmcli >/dev/null; then
+    while IFS=$'\t' read -r uuid _ state name; do
+      [[ -n "$uuid" ]] || continue
+      N=$name K=$(vpn_kind_name "$(vpn_kind "$uuid")") S=$state jq -cn '{name: env.N, kind: env.K,
+        state: (if env.S == "activated" then "connected" elif env.S == "activating" then "connecting" else "off" end), exitNode: ""}'
+    done <<< "$(vpn_list)"
+  fi
+  st=$(vpn_ts_status)
+  if command -v tailscale >/dev/null; then
+    if [[ -n "$st" ]]; then
+      jq -c "$vpn_ts_label"'
+        ([.Peer // {} | .[] | select(.ExitNode == true)] | first // null) as $exit
+        | {name: "Tailscale", kind: "Tailscale",
+           state: ({"Running": "connected", "Starting": "connecting", "Stopped": "off"}[.BackendState // ""] // "sign in"),
+           exitNode: (if $exit then ($exit | nodename) else "" end)}' <<< "$st" 2>/dev/null || true
+    else
+      jq -cn '{name: "Tailscale", kind: "Tailscale", state: "off", exitNode: ""}'
+    fi
+  fi
+)
+if [[ $json == yes ]]; then [[ -z "$rows" ]] || printf '%s\n' "$rows"; exit 0; fi
+[[ -n "$rows" ]] || { echo "No VPNs yet. Add one from its file with: takumi vpn import <file>"; exit 0; }
+jq -r '[(if .state == "connected" then "*" else " " end), .name, .kind,
+        .state + (if .exitNode != "" then " · internet through " + .exitNode else "" end)] | join("\t")' <<< "$rows" |
+  while IFS=$'\t' read -r mark n k s; do printf ' %s %-24s %-11s %s\n' "$mark" "$n" "$k" "$s"; done

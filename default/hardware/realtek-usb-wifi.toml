@@ -1,0 +1,12 @@
+# Realtek USB Wi-Fi adapters that first appear as a disc with Windows drivers on it (0bda:1a2b): usb_modeswitch
+# turns them into Wi-Fi as they are plugged in, and the kernel's rtw88 USB drivers take over.
+# usb_modeswitch: https://www.draisberghof.de/usb_modeswitch/
+title = "Realtek USB Wi-Fi"
+part = "wifi"
+
+[match]
+usb = ["0bda:1a2b"]
+
+[apply]
+packages = ["usb_modeswitch"]
+note = "This USB Wi-Fi adapter first shows up as a disc with Windows drivers on it. usb_modeswitch turns it into Wi-Fi as soon as it is plugged in."

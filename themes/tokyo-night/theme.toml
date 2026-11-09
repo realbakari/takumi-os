@@ -1,0 +1,34 @@
+# Tokyo Night: neon city blues on midnight
+# Colours after Tokyo Night by folke (https://github.com/folke/tokyonight.nvim); phases by Takumi.
+
+[meta]
+name = "tokyo-night"
+mode = "dark"
+title = "Tokyo Night"
+about = "neon city blues on midnight"
+credit = "Tokyo Night by folke (https://github.com/folke/tokyonight.nvim)"
+
+[palette]
+accent     = "#7aa2f7"
+background = "#1a1b26"
+surface    = "#1f2030"
+foreground = "#c0caf5"
+muted      = "#5d658e"
+red        = "#f7768e"
+yellow     = "#e0af68"
+green      = "#9ece6a"
+cyan       = "#7dcfff"
+blue       = "#7aa2f7"
+magenta    = "#bb9af7"
+
+[phase.dawn]
+accent     = "#ff9e64"
+
+[phase.dusk]
+accent     = "#fc9073"
+
+[phase.night]
+accent     = "#9e83d1"
+background = "#111219"
+surface    = "#161622"
+foreground = "#acb5dc"

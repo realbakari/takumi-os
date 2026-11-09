@@ -1,0 +1,7 @@
+[Unit]
+Description=Takumi: build the next system with the waiting updates while on the charger (takumi update prepare)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/takumi update prepare --auto
+TimeoutStartSec=4h

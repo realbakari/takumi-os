@@ -1,0 +1,35 @@
+# Kanagawa Lotus: Kanagawa on aged rice paper
+# Colours after Kanagawa by rebelot (https://github.com/rebelot/kanagawa.nvim); phases by Takumi.
+
+[meta]
+name = "kanagawa-lotus"
+mode = "light"
+title = "Kanagawa Lotus"
+about = "Kanagawa on aged rice paper"
+credit = "Kanagawa by rebelot (https://github.com/rebelot/kanagawa.nvim)"
+
+[palette]
+accent     = "#4d699b"
+background = "#f2ecbc"
+surface    = "#e5ddb0"
+foreground = "#4c4c5a"
+muted      = "#87867d"
+red        = "#c84053"
+yellow     = "#77713f"
+green      = "#6f894e"
+cyan       = "#597b75"
+blue       = "#4d699b"
+magenta    = "#624c83"
+
+[phase.dawn]
+accent     = "#cc6d00"
+background = "#f7eec9"
+
+[phase.dusk]
+accent     = "#cb5d1d"
+
+[phase.night]
+accent     = "#425a85"
+background = "#eae4b7"
+surface    = "#dcd4ab"
+foreground = "#49484e"

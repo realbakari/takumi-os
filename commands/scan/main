@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Scan a page into Documents, as a PDF or a PNG picture
+usage: [pdf|png]
+example: takumi scan
+example: takumi scan png
+risk: 0
+title: Scan a document
+words: scan scanner scanning document paper pdf copy
+glyph: scan
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/printer.sh" ]] && { . "$l/printer.sh"; . "$l/core.sh"; break; }; done
+declare -F printer_scanners >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh): it says what it is doing while the scanner works, then the Core offers the
+# file a press away (takumi notice --open) and the conversation ends without a last sentence, so that offer
+# stays. The page is scanned at 300 dpi, in colour when the scanner takes the word, into Documents as
+# "Scan <date> <time>.pdf". For a PDF the scanner hands over a JPEG, which img2pdf wraps as it is (small,
+# nothing scanned again), or ImageMagick's magick when img2pdf is missing; with neither, the JPEG is kept
+# and the notice says why. A PNG is the page without loss, for a photo. The scanner found last is used
+# while it answers (SANE takes seconds to look). Exit status: 0 saved · 5 no scanner · 1 anything else.
+want=${1:-pdf}
+case "$want" in pdf|png) ;; *) echo "usage: takumi scan [pdf|png]" >&2; exit 2 ;; esac
+command -v scanimage >/dev/null || core_fail 1 "Scanning needs SANE (the sane package)"
+
+fresh=no
+if [[ ! -s "$printer_scanners_file" || -n "$(find "$printer_scanners_file" -mmin +10 2>/dev/null)" ]]; then
+  core_note "Looking for the scanner…"; printer_scanners >/dev/null; fresh=yes
+fi
+list=$(cat "$printer_scanners_file" 2>/dev/null || true)
+[[ -n "$list" ]] || core_fail 5 "No scanner found. Is it on, and on this network or plugged in?"
+first=$(head -n 1 <<< "$list"); dev=${first%%"$printer_sep"*}; sname=${first#*"$printer_sep"}
+
+dir=$(xdg-user-dir DOCUMENTS 2>/dev/null || true); [[ -n "$dir" && "$dir" != "$HOME" ]] || dir="$HOME/Documents"
+mkdir -p "$dir"
+stamp=$(date '+%Y-%m-%d %H-%M-%S')
+out="$dir/Scan $stamp.$want"; n=1
+while [[ -e "$out" ]]; do n=$((n + 1)); out="$dir/Scan $stamp $n.$want"; done
+page=$(mktemp "$dir/.takumi-scan.XXXXXX")   # beside where it goes, hidden until it is whole
+trap 'rm -f "$page"' EXIT
+limit=(); command -v timeout >/dev/null && limit=(timeout 300)
+fmt=png; [[ $want == pdf ]] && fmt=jpeg
+
+# scan_with <options...>: one try at the page; sets rc and err. A scanner that does not take an option
+# fails before it starts, so trying with fewer is quick.
+rc=0; err=""
+scan_with() { rc=0; err=$(${limit[@]+"${limit[@]}"} scanimage -d "$dev" --format="$fmt" "$@" 2>&1 >"$page") || rc=$?; }
+scan() {
+  core_note "Scanning on $sname…"
+  scan_with --resolution 300 --mode Color
+  if (( rc != 0 )) && [[ "$err" == *"--mode"* || "$err" == *"nvalid argument"* || "$err" == *"nrecognized option"* ]]; then scan_with --resolution 300; fi
+  if (( rc != 0 )) && [[ "$err" == *"--resolution"* || "$err" == *"nvalid argument"* || "$err" == *"nrecognized option"* ]]; then scan_with; fi
+  return 0
+}
+scan
+# The scanner from last time may be gone (another network, switched off): look once more, then try again.
+if (( rc != 0 )) && [[ $fresh == no ]]; then
+  core_note "Looking for the scanner…"
+  list=$(printer_scanners)
+  [[ -n "$list" ]] || core_fail 5 "No scanner found. Is it on, and on this network or plugged in?"
+  first=$(head -n 1 <<< "$list"); dev=${first%%"$printer_sep"*}; sname=${first#*"$printer_sep"}
+  scan
+fi
+if (( rc != 0 )) || [[ ! -s "$page" ]]; then
+  case "$err" in
+    *"busy"*) core_fail 1 "$sname is busy. Try again in a moment" ;;
+    *"cover is open"*) core_fail 1 "$sname has its cover open" ;;
+    *"jammed"*) core_fail 1 "Paper is stuck in $sname" ;;
+    *"out of documents"*) core_fail 1 "Put the page in $sname first" ;;
+    *"nvalid argument"*|*"I/O"*|*"o such"*) core_fail 1 "$sname did not answer. Is it on?" ;;
+    *) core_fail 1 "$sname did not scan${err:+: $(printf '%s\n' "$err" | tail -n 1 | sed 's/^scanimage: //')}" ;;
+  esac
+fi
+
+saved=$out; title="Scanned"; detail=""
+if [[ $want == pdf ]]; then
+  made=no
+  if command -v img2pdf >/dev/null && img2pdf -o "$out" "$page" >/dev/null 2>&1; then made=yes
+  elif command -v magick >/dev/null && magick "$page" "$out" >/dev/null 2>&1; then made=yes
+  fi
+  if [[ $made == no ]]; then
+    rm -f "$out"; saved="${out%.pdf}.jpg"; mv -f "$page" "$saved"; title="Scanned as a picture"
+    if command -v img2pdf >/dev/null || command -v magick >/dev/null; then detail="${saved##*/} · the PDF could not be made · press to open"
+    else detail="${saved##*/} · PDFs need img2pdf · press to open"; fi
+  fi
+else
+  mv -f "$page" "$out"
+fi
+[[ -n "$detail" ]] || detail="${saved##*/} · in Documents · press to open"
+takumi notice --open "$saved" scan "$title" "$detail" -1 8 >/dev/null 2>&1 || true
+core_in_core || echo "Saved $saved"
+exit 0

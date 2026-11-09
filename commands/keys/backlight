@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: The keyboard's light: brighter, dimmer, round its steps to off, or back as you left it before sleep
+usage: <up|down|cycle|restore>
+example: takumi keys backlight cycle
+risk: 0
+ABOUT
+set -euo pipefail
+# The keyboard light keys run this (docs/laptop-keys.md). The light is the kernel's <name>::kbd_backlight; brightnessctl
+# changes it through logind, which lets the person at the computer do it without a password. The level chosen here
+# is kept for the session, and restore, which the idle watcher runs after the computer wakes, puts it back: some
+# laptops wake with the light off. A laptop that changes the light itself never sends these keys, and restore then
+# has nothing to do. Exit status: 0 done · 2 usage · 3 this keyboard has no light · 1 the light did not change.
+leds=${TAKUMI_LEDS:-/sys/class/leds}
+mark="${XDG_RUNTIME_DIR:-$HOME/.local/state/takumi}/takumi-kbd-backlight"
+what=${1:-}
+case "$what" in up | down | cycle | restore) ;; *) echo "usage: takumi keys backlight <up|down|cycle|restore>" >&2; exit 2 ;; esac
+dev=""
+for d in "$leds"/*::kbd_backlight; do if [[ -r "$d/max_brightness" ]]; then dev=$d; break; fi; done
+max=0; [[ -z "$dev" ]] || max=$(cat "$dev/max_brightness")
+if (( max <= 0 )); then
+  [[ $what != restore ]] || exit 0
+  echo "This keyboard has no light"; exit 3
+fi
+name=${dev##*/}; now=$(cat "$dev/brightness")
+# Ten steps up and down; round in steps of a third (or one by one on a light with three levels or fewer).
+step=$(( (max + 5) / 10 )); (( step > 0 )) || step=1
+case "$what" in
+  up) new=$(( now + step > max ? max : now + step )) ;;
+  down) new=$(( now - step < 0 ? 0 : now - step )) ;;
+  cycle)
+    if (( max <= 3 )); then new=$(( (now + 1) % (max + 1) ))
+    else
+      new=0
+      for l in $(( (max + 1) / 3 )) $(( (2 * max + 1) / 3 )) "$max"; do if (( l > now )); then new=$l; break; fi; done
+    fi ;;
+  restore)
+    kept_name="" kept=""
+    if [[ -r "$mark" ]]; then read -r kept_name kept < "$mark" || true; fi
+    [[ "$kept_name" == "$name" && "$kept" =~ ^[0-9]+$ && "$kept" != "$now" ]] || exit 0
+    new=$kept ;;
+esac
+command -v brightnessctl >/dev/null || { echo "brightnessctl is not installed"; exit 1; }
+brightnessctl -q -d "$name" set "$new" >/dev/null 2>&1 || { echo "The keyboard light did not change"; exit 1; }
+[[ $what != restore ]] || exit 0
+mkdir -p "${mark%/*}"; printf '%s %s\n' "$name" "$new" > "$mark"
+pct=$(( new * 100 / max ))
+if (( new > 0 )); then
+  takumi notice keyboard "Keyboard light" "" "$pct" >/dev/null 2>&1 || true
+  echo "Keyboard light $pct%"
+else
+  takumi notice keyboard "Keyboard light off" "" 0 >/dev/null 2>&1 || true
+  echo "Keyboard light off"
+fi

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Show the login screen (greetd runs this as the greeter user)
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+g=/var/lib/takumi/greeter
+export TAKUMI_PHASE_FILE="$g/phase.toml"
+phase=$(takumi phase current 2>/dev/null || echo day)
+[[ -f "$g/$phase/palette.toml" ]] && export TAKUMI_THEME_FILE="$g/$phase/palette.toml"
+if [[ -e "$g/$phase/sky" ]]; then
+  export TAKUMI_WALLPAPER="$g/$phase/sky"
+else
+  export TAKUMI_WALLPAPER="$g/sky"
+fi
+# The first login screen since the computer started opens on the boot splash's picture (docs/boot.md); the
+# screen writes /run/takumi/desktop-ready, so a later one (after a logout) only fades in.
+[[ -e /run/takumi/desktop-ready ]] || export TAKUMI_GREETER_FROM_BOOT=1
+# The keyboard is the system's (localectl writes it to /etc/vconsole.conf; niri reads the same through
+# systemd-localed), so a password types here as it does in the desktop. A layout that cannot type Latin
+# letters gets US English first, Left Alt + Right Alt to reach it: a password is in Latin letters.
+greeter_keyboard() {
+  local k v layout="" variant="" options=""
+  [[ -r /etc/vconsole.conf ]] || return 0
+  while IFS='=' read -r k v; do
+    v=${v%\"}; v=${v#\"}
+    case "$k" in XKBLAYOUT) layout=$v ;; XKBVARIANT) variant=$v ;; XKBOPTIONS) options=$v ;; esac
+  done < /etc/vconsole.conf
+  [[ -n "$layout" ]] || return 0
+  case " am ara bd bg by et ge gr il in iq ir kg kh kz la lk mk mm mn mv np rs ru sy th tj ua " in
+    *" ${layout%%,*} "*)
+      # US English to the front (moved there when the list has it, with its variant), the rest in order.
+      local ls vs i us_v="" rest_l="" rest_v="" moved=no
+      IFS=, read -r -a ls <<< "$layout"; IFS=, read -r -a vs <<< "$variant,"
+      for i in "${!ls[@]}"; do
+        if [[ "${ls[$i]}" == us && $moved == no ]]; then us_v=${vs[$i]:-}; moved=yes; continue; fi
+        rest_l+=",${ls[$i]}"; rest_v+=",${vs[$i]:-}"
+      done
+      layout="us$rest_l"; variant="$us_v$rest_v"
+      [[ "$options" == *grp:* ]] || options="${options:+$options,}grp:alts_toggle" ;;
+  esac
+  export XKB_DEFAULT_LAYOUT=$layout XKB_DEFAULT_VARIANT=$variant XKB_DEFAULT_OPTIONS=$options
+}
+greeter_keyboard
+# A VM without 3D (install/vm/provision.sh marks it) draws with the software renderer, and the login screen
+# drops what moves for long or glows (Style.softwareDrawing).
+# The pointer stays a hardware cursor: on QEMU's virtual GPU, QEMU draws it on the host as fast as the host's own.
+[[ -f /etc/takumi/vm ]] && export WLR_RENDERER=pixman TAKUMI_DRAWING=software
+# A dense screen, a laptop's sharp panel, gets the login screen at the size niri will draw the desktop:
+# cage does not scale, so Qt does, from the screen's width in pixels and in millimetres (its EDID). The
+# built-in screen decides when there is one.
+greeter_scale() {
+  local c mode w b mm best="" pick=""
+  for c in /sys/class/drm/card*-*; do
+    [[ "$(cat "$c/status" 2>/dev/null)" == connected ]] || continue
+    [[ -z "$best" || "$c" == *-eDP-* ]] || continue
+    read -r mode < "$c/modes" 2>/dev/null || continue
+    b=$(od -An -tu1 -j66 -N3 "$c/edid" 2>/dev/null) || continue   # first detailed timing: its size in mm
+    set -- $b; (( $# == 3 )) || continue
+    w=${mode%%x*}; mm=$(( $1 + ($3 >> 4) * 256 ))
+    (( mm > 0 )) || continue
+    best=$c; pick=$(awk -v w="$w" -v mm="$mm" 'BEGIN { d = w * 25.4 / mm; print (d >= 192 ? 2 : d >= 144 ? 1.5 : 1) }')
+  done
+  printf '%s' "${pick:-1}"
+}
+# In a VM takumi vm display makes a dense screen readable instead (docs/vm.md).
+if [[ ! -f /etc/takumi/vm ]]; then s=$(greeter_scale); [[ "$s" == 1 ]] || export QT_SCALE_FACTOR=$s; fi
+# The greeter user's home is /, so its caches (compiled QML, shaders) live here, made by install/steps/40-session.sh;
+# without them every boot compiles the login screen again.
+[[ -w /var/cache/takumi/greeter ]] && export XDG_CACHE_HOME=/var/cache/takumi/greeter
+# Straight to logind, and messages to the journal (journalctl -t takumi-greeter): greetd hands the greeter
+# the text console, where anything printed shows between the splash and the login screen.
+export LIBSEAT_BACKEND=logind
+if [[ -f /etc/takumi/vm ]]; then
+  exec systemd-cat -t takumi-greeter -- cage -s -d -- sh -c 'takumi vm display --once; takumi vm display & exec qs -p /usr/share/takumi/shell/greeter.qml'
+fi
+exec systemd-cat -t takumi-greeter -- cage -s -d -- qs -p /usr/share/takumi/shell/greeter.qml

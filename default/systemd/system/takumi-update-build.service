@@ -1,0 +1,9 @@
+[Unit]
+Description=Takumi: build the next room with the waiting updates (takumi update prepare)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/takumi update prepare build
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=3h

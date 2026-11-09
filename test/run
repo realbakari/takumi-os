@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Runs every suite, or the ones named: `test/run router themes`. Keeps going past a failing suite and exits
+# non-zero if any failed. See docs/testing.md.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+every="lint router themes templates qml boot wifi intent approvals bluetooth sound display power earlier doctor firmware iso setup palette security system capture voice keys language hardware time updates recovery notices a11y apps dev backup share firewall vpn printer drives look"
+if (( $# )); then suites="$*"; else suites=$every; fi
+fail=0
+for s in $suites; do
+  s=${s#test/}
+  [[ " $every " == *" $s "* ]] || { printf 'no suite named %s; the suites: %s\n' "$s" "$every" >&2; exit 2; }
+  printf '\n== test/%s\n' "$s"
+  if bash "test/$s"; then printf '   ok\n'; else printf '   FAILED\n'; fail=1; fi
+done
+exit $fail

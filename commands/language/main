@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: The language your apps speak, and the formats they write dates, numbers and paper in
+usage: [--json]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/language.sh" ]] && { . "$l/language.sh"; break; }; done
+declare -F language_now >/dev/null || { echo "takumi: the language library is missing" >&2; exit 1; }
+# See docs/languages.md. Takumi's own words (the Core, the setup screens) stay English whatever is chosen here.
+case "${1:-}" in ""|--json) ;; *) echo "usage: takumi language [--json] | set [<code>] | formats [<code>] | list [<words>]" >&2; exit 2 ;; esac
+lang=$(language_now); fmt=$(language_formats_now)
+if [[ "${1:-}" == --json ]]; then
+  L=$lang N=$(language_name "$lang") F=$fmt P=$(language_place "$fmt") jq -cn \
+    '{language: env.L, name: env.N, formats: env.F, place: env.P, apart: (env.L != env.F)}'
+  exit 0
+fi
+printf 'Language  %-28s %s\n' "$(language_name "$lang")" "$lang"
+printf 'Formats   %-28s %s%s\n' "$(language_place "$fmt")" "$fmt" "$([[ "$fmt" == "$lang" ]] && echo ", like the language")"
+echo "Takumi's own words stay in English for now."

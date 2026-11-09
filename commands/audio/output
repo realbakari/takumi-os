@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Send sound to an output: speakers, headphones, HDMI, Bluetooth; next goes round them
+usage: <name|id|next>
+example: takumi audio output Headphones
+example: takumi audio output next
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/audio.sh" ]] && { . "$l/audio.sh"; break; }; done
+declare -F audio_switch >/dev/null || { echo "takumi: the sound library is missing" >&2; exit 1; }
+[[ -n "${1:-}" ]] || { echo "usage: takumi audio output <name|id|next>" >&2; exit 2; }
+if [[ "$1" == next ]]; then audio_next out; else audio_switch out "$1"; fi

@@ -1,0 +1,35 @@
+# Dayfox: Nightfox's daylight sibling
+# Colours after Nightfox by EdenEast (https://github.com/EdenEast/nightfox.nvim); phases by Takumi.
+
+[meta]
+name = "dayfox"
+mode = "light"
+title = "Dayfox"
+about = "Nightfox's daylight sibling"
+credit = "Nightfox by EdenEast (https://github.com/EdenEast/nightfox.nvim)"
+
+[palette]
+accent     = "#2848a9"
+background = "#f6f2ee"
+surface    = "#e4dcd4"
+foreground = "#3d2b5a"
+muted      = "#837a72"
+red        = "#a5222f"
+yellow     = "#ac5402"
+green      = "#396847"
+cyan       = "#287980"
+blue       = "#2848a9"
+magenta    = "#6e33ce"
+
+[phase.dawn]
+accent     = "#955f61"
+background = "#f9f2e9"
+
+[phase.dusk]
+accent     = "#9b4a50"
+
+[phase.night]
+accent     = "#223e91"
+background = "#ede8e7"
+surface    = "#dad1cd"
+foreground = "#503f69"

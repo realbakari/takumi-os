@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Type by speaking: your words go where you were, written down on this computer; run it again to stop
+usage: [start|stop|cancel]
+example: takumi voice
+example: takumi voice cancel
+risk: 0
+title: Dictate
+words: dictation dictate voice typing speech text speak talk transcribe microphone
+glyph: mic
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/voice.sh" ]] && { . "$l/voice.sh"; break; }; done
+declare -F voice_listening >/dev/null || { echo "takumi: the dictation library is missing" >&2; exit 1; }
+
+# Run once, it listens; run again, it stops, writes down what you said with the speech model on this computer, and
+# types it into the window you were in (lib/voice.sh, docs/dictation.md). Nothing leaves the computer: the
+# recording stays in memory and is deleted once written down. cancel stops without typing. Exit status: 0
+# listening, or written down and typed · 1 it could not listen or write it down · 2 usage · 3 dictation is not set
+# up (the Core opens on "Set up dictation") · 4 nothing was heard. The last line says it in words.
+usage() { echo "usage: takumi voice [start|stop|cancel]" >&2; exit 2; }
+(( $# <= 1 )) || usage
+what=${1:-toggle}
+case "$what" in toggle | start | stop | cancel) ;; *) usage ;; esac
+
+# The recorder finishes its file and the meter stops. Sets rec, since and wav from the marker.
+end_recording() {
+  local meter
+  read -r rec meter since wav < "$voice_marker"
+  kill -INT "$rec" 2>/dev/null || true
+  kill "$meter" 2>/dev/null || true
+  for _ in $(seq 1 30); do kill -0 "$rec" 2>/dev/null || break; sleep 0.1; done
+  if kill -0 "$rec" 2>/dev/null; then kill -TERM "$rec" 2>/dev/null || true; sleep 0.5; fi
+  rm -f "$voice_marker"
+  sleep 0.2   # the meter's last notice lands before the next one
+}
+
+nothing_heard() {
+  rm -f "$wav"
+  takumi notice micOff "Nothing heard" "speak closer to the microphone, then try again" -1 4 >/dev/null 2>&1 || true
+  echo "Nothing heard"
+  exit 4
+}
+
+finish() {
+  local win loudest text rc=0
+  win=$(voice_window)    # where you were when you stopped: the words go there
+  end_recording
+  loudest=$(cat "$voice_marker.loudest" 2>/dev/null || echo 100)
+  rm -f "$voice_marker.loudest"
+  # Under half a second, or never louder than a quiet room: no words to write down (a model given silence
+  # makes some up).
+  [[ -s "$wav" ]] || nothing_heard
+  (( $(wc -c < "$wav" | tr -d ' ') >= 44 + 16000 && ${loudest:-100} >= voice_quiet )) || nothing_heard
+  takumi notice mic "Writing it down…" "" -1 60 >/dev/null 2>&1 || true
+  if ! text=$(voice_transcribe "$wav"); then
+    rm -f "$wav"
+    takumi notice warn "That could not be written down" "the speech model did not run" -1 >/dev/null 2>&1 || true
+    echo "That could not be written down" >&2; exit 1
+  fi
+  rm -f "$wav"
+  [[ -n "$text" ]] || nothing_heard
+  voice_focus "$win"
+  sleep 0.2   # the key that stopped it is let go before the first letter
+  voice_type "$text" || rc=$?
+  case $rc in
+    0) takumi notice mic "Typed what you said" "$(voice_short "$text")" -1 >/dev/null 2>&1 || true ;;
+    2) takumi notice mic "Copied what you said" "paste it with Super+V" -1 4 >/dev/null 2>&1 || true ;;
+    *) takumi notice warn "What you said could not be typed" "$(voice_short "$text")" -1 6 >/dev/null 2>&1 || true
+       printf '%s\n' "$text"; exit 1 ;;
+  esac
+  printf '%s\n' "$text"
+}
+
+if voice_listening; then
+  case "$what" in
+    start) echo "Already listening"; exit 0 ;;
+    cancel)
+      end_recording; rm -f "$wav" "$voice_marker.loudest"
+      takumi notice micOff "Dictation stopped" "nothing was typed" -1 >/dev/null 2>&1 || true
+      echo "Stopped; nothing was typed"; exit 0 ;;
+  esac
+  finish
+  exit 0
+fi
+# A dictation that ended by itself leaves its marker and recording behind.
+if [[ -r "$voice_marker" ]]; then
+  read -r _ meter _ wav < "$voice_marker" || true
+  kill "${meter:-}" 2>/dev/null || true
+  rm -f "$voice_marker" "$voice_marker.loudest" "${wav:-}"
+fi
+case "$what" in stop | cancel) echo "Not listening"; exit 0 ;; esac
+
+# Not set up: the Core opens on the row that sets it up, with the model's size.
+if ! command -v whisper-cli >/dev/null || [[ -z "$(voice_model)" ]]; then
+  qs -c takumi ipc --any-display call core search "set up dictation" >/dev/null 2>&1 || true
+  echo "Dictation is not set up yet: takumi voice setup" >&2
+  exit 3
+fi
+if ! command -v pw-record >/dev/null; then
+  takumi notice warn "Dictation needs pw-record" "it comes with PipeWire's audio tools" -1 >/dev/null 2>&1 || true
+  echo "Dictation needs pw-record" >&2; exit 1
+fi
+if [[ -z "$(voice_mic)" ]]; then
+  takumi notice micOff "No microphone found" "plug one in, or choose one under Sound" -1 4 >/dev/null 2>&1 || true
+  echo "No microphone found" >&2; exit 1
+fi
+mkdir -p "$voice_run"
+wav="$voice_run/takumi-voice.wav"
+rm -f "$wav" "$voice_marker.loudest"
+# 16 kHz, one channel: what the speech model listens to. The name is what the Core's sound rows show while it
+# listens ("Dictation is using the microphone").
+voice_spawn pw-record --rate 16000 --channels 1 --format s16 -P '{"application.name":"Dictation","media.name":"Dictation"}' "$wav"
+rec=$voice_pid
+sleep 0.3
+if ! kill -0 "$rec" 2>/dev/null; then
+  takumi notice warn "The microphone did not start" "" -1 >/dev/null 2>&1 || true
+  echo "The microphone did not start" >&2; exit 1
+fi
+started=$(date +%s)
+( set +e; exec </dev/null >/dev/null 2>&1; voice_meter "$rec" "$wav" "$started" ) &
+printf '%s %s %s %s\n' "$rec" "$!" "$started" "$wav" > "$voice_marker"
+takumi notice mic "Listening…" "$voice_hint" 0 >/dev/null 2>&1 || true
+echo "Listening"

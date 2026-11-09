@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Prepare updates on the charger: the next system is built in the background, ready at the next restart
+usage: <on|off|status>
+example: takumi update prepare on
+risk: 1
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/rooms.sh"; . "$l/power.sh"; . "$l/core.sh"; . "$l/update.sh"; break; }; done
+declare -F updates_ready >/dev/null && declare -F power_source >/dev/null && declare -F core_done >/dev/null && declare -F update_why >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# Opt-in. While it is on, takumi-update-prepare.timer runs `takumi update prepare --auto` every half hour, as
+# the person. It goes ahead only when updates are waiting (takumi update check counted them against the
+# running system), nothing is staged yet, the computer is on the charger, online and not metered, the disk
+# has room, and no update is being prepared already (the lock takumi update holds). Then it starts
+# takumi-update-build.service, which runs `takumi update prepare build` as root: the steps takumi update
+# takes (room snapshot, upgrade, stage), so the running system is never touched and a build that fails is
+# thrown away. Unplugged halfway, the build is stopped and thrown away too. When it is done, the Core says
+# "Update ready · restart to use it". The person at the computer may start and stop that one unit without a
+# password (etc/polkit-1/rules.d/50-takumi-update.rules). See docs/updates.md.
+# Exit status: 0 · 1 it cannot here (no rooms, no build unit) or the build failed · 2 usage.
+build_unit=takumi-update-build.service
+timer=takumi-update-prepare.timer
+wants="$HOME/.config/systemd/user/timers.target.wants/$timer"
+log="$clock_state/update-prepare.log"
+# What the build (as root) did, step by step: on the shared /var/lib/takumi, readable by the person, so a build
+# that fails can be explained in words (lib/update.sh).
+build_log=${TAKUMI_UPDATE_BUILD_LOG:-/var/lib/takumi/update-build.log}
+note() { mkdir -p "${log%/*}"; printf '%s %s\n' "$(clock_date "$(clock_now)" '+%Y-%m-%d %H:%M')" "$*" >> "$log"; }
+enabled() { [[ -e "$wants" ]]; }
+can_build() { systemctl cat "$build_unit" >/dev/null 2>&1; }
+
+auto() {
+  local count checked now room job i=0
+  enabled || exit 0
+  takumi room enabled >/dev/null 2>&1 || exit 0
+  can_build || exit 0
+  [[ "$(power_source)" == power ]] || exit 0
+  if updates_ready >/dev/null; then exit 0; fi
+  count=$(updates_get count); checked=$(updates_get checked); now=$(clock_now)
+  (( ${count:-0} > 0 && now - ${checked:-0} < 172800 )) || exit 0
+  [[ "$(updates_get room)" == "$(rooms_current)" ]] || exit 0
+  updates_online || exit 0
+  if updates_metered; then exit 0; fi
+  takumi update check-space >/dev/null 2>&1 || { note "not built: the disk needs 8 GiB free"; exit 0; }
+  exec 9> "${XDG_RUNTIME_DIR:-/tmp}/takumi-update.lock"
+  flock -n 9 || exit 0
+  note "building the next system, $count updates waiting"
+  systemctl start --no-ask-password "$build_unit" >/dev/null 2>&1 & job=$!
+  trap 'systemctl stop --no-ask-password "$build_unit" >/dev/null 2>&1 || true; note "stopped; the half-built system is thrown away"; exit 0' TERM INT
+  # Every 20 seconds: still on the charger? Unplugged, the build stops and its room is thrown away.
+  while kill -0 "$job" 2>/dev/null; do
+    sleep 1; i=$((i + 1))
+    if (( i % 20 == 0 )) && [[ "$(power_source)" != power ]]; then
+      systemctl stop --no-ask-password "$build_unit" >/dev/null 2>&1 || true
+      wait "$job" 2>/dev/null || true
+      note "unplugged: stopped, the half-built system is thrown away"
+      exit 0
+    fi
+  done
+  if ! wait "$job"; then failed; exit 1; fi
+  room=$(updates_ready) || { note "the build ended with nothing staged"; exit 1; }
+  takumi migrate --stage >/dev/null 2>&1 || true
+  if [[ -x "$HOME/.config/takumi/on/update-ready" ]]; then "$HOME/.config/takumi/on/update-ready" "$room" >/dev/null 2>&1 || true; fi
+  takumi update check --local >/dev/null 2>&1 || true
+  note "ready: $room starts at the next restart"
+  takumi notice restart "Update ready" "restart to use it" -1 6 >/dev/null 2>&1 || true
+  exit 0
+}
+
+# A build that failed: why, in one sentence, kept in the log; said in the Core once a day for each cause, with
+# the next step ("Not enough space on the disk for the update · Free up space, then update again").
+failed() {
+  local why kind text next seen="$clock_state/update-prepare.said" today
+  if ! why=$(update_why "$build_log"); then note "the build did not finish: $build_log says why"; return 0; fi
+  IFS=$'\t' read -r kind text next <<< "$why"
+  note "the build did not finish: $text $next"
+  today="$kind $(clock_date "$(clock_now)" +%F)"
+  [[ "$(cat "$seen" 2>/dev/null || true)" == "$today" ]] && return 0
+  printf '%s\n' "$today" > "$seen"
+  takumi notice warn "Update not prepared" "$text $next" -1 10 >/dev/null 2>&1 || true
+}
+
+# build: as root, from takumi-update-build.service. Rooms an earlier build left half-made (cut short by a
+# shutdown or a power cut) go first; then a new room is copied from the running one, upgraded and staged, and
+# thrown away if any step fails or the build is stopped.
+build() {
+  local f r created boot
+  room="" finished=no   # read by the EXIT trap, after build has returned: not local
+  [[ $EUID -eq 0 ]] || { echo "takumi update prepare build runs as root, from $build_unit" >&2; exit 1; }
+  takumi room enabled || { echo "this computer is not using rooms" >&2; exit 1; }
+  boot=$(( $(date +%s) - $(cut -d. -f1 /proc/uptime) ))
+  for f in "$TAKUMI_STATE"/*; do
+    [[ -f "$f" ]] || continue
+    r=${f##*/}
+    [[ "$(state_get "$r" status)" == building ]] || continue
+    created=$(date -d "$(state_get "$r" created)" +%s 2>/dev/null || echo 0)
+    if (( created < boot )); then takumi room discard "$r" >/dev/null 2>&1 || true; echo "threw away the half-built room $r"; fi
+  done
+  room=$(date -u +%Y%m%d-%H%M%S)
+  # From here on, what the steps say goes to $build_log (a file of its own on /var/lib/takumi), not the journal.
+  echo "building room $room; what it does is kept in $build_log"
+  mkdir -p "${build_log%/*}"; exec > "$build_log" 2>&1; chmod 644 "$build_log"
+  power_hold_awake "Preparing an update"   # not asleep halfway (lib/power.sh)
+  trap '[[ $finished == yes ]] || takumi room discard "$room" >/dev/null 2>&1 || true' EXIT
+  trap 'exit 1' TERM INT HUP
+  takumi room snapshot "$room"
+  takumi room upgrade "$room"
+  takumi room stage "$room"
+  finished=yes
+  echo "room $room starts at the next restart"
+}
+
+case "${1:-}" in
+  on)
+    takumi room enabled >/dev/null 2>&1 || core_fail 1 "This computer updates in place, so nothing can be prepared beside it"
+    can_build || core_fail 1 "This computer cannot prepare updates by itself yet: $build_unit is not installed"
+    systemctl --user enable --now "$timer" >/dev/null 2>&1 || core_fail 1 "The half-hourly look did not start"
+    note "turned on"
+    core_done "Updates are prepared on the charger from now on · yours is not touched until you restart" ;;
+  off)
+    systemctl --user disable --now "$timer" >/dev/null 2>&1 || true
+    systemctl --user stop takumi-update-prepare.service >/dev/null 2>&1 || true
+    note "turned off"
+    core_done "Updates are no longer prepared by themselves" ;;
+  status)
+    if enabled; then echo "Updates are prepared on the charger"; else echo "Updates are prepared only when you ask"; fi
+    if r=$(updates_ready); then echo "Ready: a new system from $(rooms_label "$r") starts at the next restart"; fi
+    if [[ -s "$log" ]]; then echo "Last: $(tail -n 1 "$log")"; fi ;;
+  --auto) auto ;;
+  build) build ;;
+  *) echo "usage: takumi update prepare <on|off|status>" >&2; exit 2 ;;
+esac

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: The printers set up on this computer, how each one is, and which one apps print to
+usage: [--json]
+example: takumi printer
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/printer.sh" ]] && { . "$l/printer.sh"; break; }; done
+declare -F printer_queues >/dev/null || { echo "takumi: the printer library is missing" >&2; exit 1; }
+
+# --json prints one object per printer: queue, name, status (in words), problem (jam, paper, empty, cover,
+# offline, paused, stopped, low, or ""), default, uri.
+json=no
+for a in "$@"; do case "$a" in --json) json=yes ;; *) echo "usage: takumi printer [--json]" >&2; exit 2 ;; esac; done
+command -v lpstat >/dev/null || { echo "Printing needs CUPS (the cups package)" >&2; exit 1; }
+queues=$(printer_queues)
+if [[ -z "$queues" ]]; then
+  [[ $json == yes ]] || echo "No printers yet. Type \"printer\" in the Core to find one, or: takumi printer add <address>"
+  exit 0
+fi
+while IFS="$printer_sep" read -r q desc state alerts def uri msg; do
+  [[ -n "$q" ]] || continue
+  label=$(printer_label "$q" "$desc"); words=$(printer_status "$q" "$state" "$alerts" "$msg")
+  if [[ $json == yes ]]; then
+    Q=$q L=$label W=$words P=$(printer_problem "$state" "$alerts" "$msg") D=$def U=$uri jq -cn \
+      '{queue: env.Q, name: env.L, status: env.W, problem: env.P, default: (env.D == "1"), uri: env.U}'
+  else
+    mark=" "; [[ $def == 1 ]] && mark="*"
+    printf ' %s %-28s %s%s\n' "$mark" "$label" "$words" "$([[ $def == 1 ]] && echo "  (default)")"
+  fi
+done <<< "$queues"
+exit 0

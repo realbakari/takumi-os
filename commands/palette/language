@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for the language and the formats as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# The language your apps speak and the formats they write in (docs/languages.md). "language" shows both and the
+# languages most people pick; a language's name, in English or in its own words, finds it ("german", "deutsch",
+# "日本語"); "formats" with a country finds that country's formats. Enter on the language or the formats asks for
+# a name, in the Core. Takumi's own words stay English, and the language row says so.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/language.sh" ]] && { . "$l/language.sh"; . "$l/palette.sh"; break; }; done
+declare -F language_table >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+q=${1:-}
+palette_short "$q" && exit 0
+ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
+topic=no; formats=no; names=""; first=""
+for w in $ql; do
+  case "$w" in
+    language|languages|lang|locale|locales|translat*) topic=yes ;;
+    format|formats|region|regional|date|dates|number|numbers|currency|paper|measurement|units) formats=yes ;;
+    change|set|use|the|a|an|to|in|of|for|my|system|display|like) ;;
+    *) if [[ ${#w} -ge 3 ]]; then names="$names $w"; [[ -n "$first" ]] || first=$w; fi ;;
+  esac
+done
+# A name alone needs four letters (a word in another script, its bytes), so "fir" stays with Firefox.
+bytes=$(printf '%s' "$first" | wc -c | tr -d ' ')
+if [[ $topic == no && $formats == no ]]; then
+  (( bytes >= 4 )) || exit 0
+  # Any other search costs one look in the table of names.
+  [[ -s "$language_cache" ]] || language_table >/dev/null
+  grep -qiF -- "$first" "$language_cache" 2>/dev/null || exit 0
+fi
+
+lang=$(language_now); fmt=$(language_formats_now)
+rows() {  # <kind language|formats> <first score> [most]: rows for the table's lines on stdin, best first
+  NOW=$lang FMT=$fmt KIND=$1 TOP=$2 MOST=${3:-100} jq -Rsc '
+    split("\n") | map(select(length > 0) | split("\t")) | .[0:(env.MOST | tonumber)] | to_entries[] | .key as $i | .value as $l
+    | {code: $l[0], name: $l[1], own: $l[2], territory: $l[4]} as $k
+    | if env.KIND == "language" then
+        {id: ("language:set:" + $k.code), title: $k.name, glyph: "globe", kind: "Language", steady: true,
+         keywords: ("language languages locale translation translate " + $k.own + " " + $k.code),
+         subtitle: (($k.own | if . != "" then . + " · " else "" end) + (if $k.code == env.NOW then "In use" else "Enter to use it from your next login" end))}
+        + (if $k.code == env.NOW then {run: ["true"]} else {converse: true, run: ["takumi", "language", "set", $k.code]} end)
+      else
+        {id: ("language:formats:" + $k.code), title: ("Formats: " + $k.territory), glyph: "globe", kind: "Language", steady: true,
+         keywords: ("formats format region regional dates numbers currency paper measurement units " + $k.own + " " + $k.code),
+         subtitle: ($k.name + (if $k.code == env.FMT then " · in use" else " · Enter to write dates, numbers and paper this way" end))}
+        + (if $k.code == env.FMT then {run: ["true"]} else {converse: true, run: ["takumi", "language", "formats", $k.code]} end)
+      end
+    + {score: ((env.TOP | tonumber) - $i / 1000)}'
+}
+
+{
+  if [[ $topic == yes || $formats == yes ]]; then
+    N=$(language_name "$lang") jq -cn '{id: "language:now", title: ("Language: " + env.N), glyph: "globe", kind: "Language",
+      subtitle: "Enter to change · Takumi'"'"'s own words stay English for now",
+      keywords: "language languages locale translation translate apps", converse: true, run: ["takumi", "language", "set"], score: 0.96}'
+    sample=""; language_ready "$fmt" && sample=$(language_sample "$fmt")
+    P=$(language_place "$fmt") S=$sample jq -cn '{id: "language:formats", title: ("Formats: " + env.P), glyph: "globe", kind: "Language",
+      subtitle: ((if env.S != "" then env.S + " · " else "" end) + "Enter to change"),
+      keywords: "formats format region regional dates numbers currency paper measurement units language", converse: true,
+      run: ["takumi", "language", "formats"], score: 0.9}'
+    if [[ "$fmt" != "$lang" ]]; then
+      N=$(language_name "$lang") L=$lang jq -cn '{id: "language:formats:own", title: ("Formats like the language, " + env.N), glyph: "globe",
+        kind: "Language", subtitle: "Dates, numbers and paper as the language writes them", converse: true,
+        keywords: "formats format region regional dates numbers currency paper measurement units language", run: ["takumi", "language", "formats", env.L], score: 0.85}'
+    fi
+  fi
+  if [[ -n "$names" ]]; then
+    if [[ $formats == yes ]]; then language_find "$names" | rows formats 0.88 12
+    else language_find "$names" | rows language 0.88 12; fi
+  elif [[ $topic == yes ]]; then
+    language_table | awk -F '\t' '$6 > 0' | sort -t "$(printf '\t')" -k6,6n | rows language 0.8
+  fi
+} | palette_filter "$q"

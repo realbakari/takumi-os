@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Allow a Thunderbolt or USB4 dock or device that waits for your permission, now and whenever it comes back
+usage: [--watch | --waiting]
+example: takumi hardware dock
+risk: 1
+converse: yes
+title: Allow this dock
+words: thunderbolt usb4 dock docking station allow device authorize enroll egpu
+glyph: usb
+ABOUT
+#
+# Thunderbolt and USB4 devices reach the computer's memory directly, so a computer whose firmware asks for it keeps
+# a new one waiting until someone allows it. boltd (the bolt package) keeps the list of allowed devices; on most
+# newer laptops the firmware's IOMMU protection lets boltd allow them by itself, and nothing waits.
+# https://gitlab.freedesktop.org/bolt/bolt
+#
+#   takumi hardware dock            a conversation: each waiting device by name, "Allow <name>?", then boltctl
+#                                   enroll --policy auto, so it is allowed now and every time it is plugged in.
+#                                   polkit asks for your password in the Core (etc/polkit-1/rules.d/50-takumi-bolt.rules).
+#   takumi hardware dock --waiting  the waiting devices, one per line: uid <tab> name; exit 1 when none.
+#   takumi hardware dock --watch    run by takumi-docks.service: when a device that waits is plugged in, the Core
+#                                   says so and opens on this row. Each device once per login.
+# Devices are read from boltd over D-Bus (busctl --json=short): org.freedesktop.bolt1.Manager.ListDevices, then each
+# device's Uid, Name, Vendor, Type, Status and Stored. A peripheral whose status is "connected" is plugged in and
+# not allowed. Exit: 0 done or nothing waits, 1 not possible here, 3 you said no or the approval was refused.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; break; }; done
+declare -F core_confirm >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+tb=${TAKUMI_THUNDERBOLT:-/sys/bus/thunderbolt/devices}
+
+prop() {  # <object> <property>: its value, from boltd
+  busctl --system --json=short get-property org.freedesktop.bolt "$1" org.freedesktop.bolt1.Device "$2" 2>/dev/null | jq -r '.data // empty'
+}
+waiting() {
+  local paths p uid name vendor
+  paths=$(busctl --system --json=short call org.freedesktop.bolt /org/freedesktop/bolt org.freedesktop.bolt1.Manager ListDevices 2>/dev/null |
+          jq -r '.data[0][]?' 2>/dev/null) || return 0
+  for p in $paths; do
+    [[ "$(prop "$p" Type)" == peripheral && "$(prop "$p" Status)" == connected ]] || continue
+    uid=$(prop "$p" Uid); name=$(prop "$p" Name); vendor=$(prop "$p" Vendor)
+    [[ -n "$uid" ]] || continue
+    if [[ -n "$vendor" && "$name" != "$vendor"* ]]; then name="$vendor $name"; fi
+    printf '%s\t%s\t%s\n' "$uid" "${name:-A Thunderbolt device}" "$(prop "$p" Stored)"
+  done
+}
+
+case "${1:-}" in
+  --waiting)
+    out=$(waiting)
+    [[ -n "$out" ]] || exit 1
+    cut -f1,2 <<< "$out"
+    exit 0 ;;
+  --watch)
+    [[ -d "$tb" ]] || exit 0
+    command -v udevadm >/dev/null && command -v busctl >/dev/null || exit 0
+    asked=${XDG_RUNTIME_DIR:-/tmp}/takumi/docks-asked
+    mkdir -p "$(dirname "$asked")"; touch "$asked"
+    look() {
+      local uid name stored
+      while IFS=$'\t' read -r uid name stored; do
+        [[ -n "$uid" ]] || continue
+        grep -qxF "$uid" "$asked" && continue
+        echo "$uid" >> "$asked"
+        takumi notice usb "$name waits for your permission" "Enter allows it" -1 >/dev/null 2>&1 || true
+        if command -v qs >/dev/null; then qs -c takumi ipc --any-display call core search "allow this dock" >/dev/null 2>&1 || true; fi
+      done < <(waiting)
+    }
+    look
+    while IFS= read -r line; do
+      [[ "$line" == *" add "* ]] || continue
+      sleep "${TAKUMI_DOCK_SETTLE:-2}"   # boltd hears of it a moment after udev
+      look
+    done < <(udevadm monitor --udev --subsystem-match=thunderbolt 2>/dev/null)
+    exit 0 ;;
+  "") ;;
+  *) echo "usage: takumi hardware dock [--watch | --waiting]" >&2; exit 2 ;;
+esac
+
+command -v boltctl >/dev/null && command -v busctl >/dev/null || core_fail 1 "Thunderbolt devices need bolt, which is not installed."
+out=$(waiting)
+[[ -n "$out" ]] || { core_done "No dock or Thunderbolt device is waiting for permission"; exit 0; }
+allowed=0
+# The list comes on fd 3, so the answers keep stdin.
+while IFS=$'\t' read -r uid name stored <&3; do
+  core_confirm "Allow $name? A dock reaches deep into the computer: allow only one you know" || continue
+  rc=0
+  if [[ "$stored" == true ]]; then boltctl authorize "$uid" >/dev/null 2>&1 || rc=$?
+  else boltctl enroll --policy auto "$uid" >/dev/null 2>&1 || rc=$?; fi
+  if (( rc == 0 )); then allowed=$((allowed + 1)); core_note "$name is allowed"
+  else core_wrong "$name was not allowed"; fi
+done 3< <(printf '%s\n' "$out")
+(( allowed > 0 )) || core_fail 3 "Nothing was allowed."
+core_done "Allowed, now and whenever it is plugged in again"

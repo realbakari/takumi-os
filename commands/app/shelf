@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print the Shelf's Palette rows as JSON lines: apps to get by name, and apps to remove
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; . "$l/palette.sh"; break; }; done
+declare -F apps_shelf_file >/dev/null && declare -F palette_filter >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+
+# The Palette's shelf rows (docs/apps.md). "Get" rows: each app in install/shelf.tsv you do not have yet. A
+# Flathub ID installs from Flathub, just for you; a web address becomes a web app, in the Core because it
+# may ask which browser. "Remove" rows, only when the query asks to remove ("remove", "uninstall",
+# "delete"): your web apps, your Flatpak apps, apps installed apart from Takumi, and Windows.
+q=${1:-}
+list=$(apps_shelf_file) || exit 0
+asked=no
+read -r -a words <<< "$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')"
+for w in ${words[@]+"${words[@]}"}; do
+  (( ${#w} >= 3 )) || continue
+  for t in remove uninstall delete; do [[ "$t" != "$w"* ]] || asked=yes; done
+done
+
+{
+  jq -Rc --arg have "$(apps_flatpak_apps | cut -f1)" --arg made "$(apps_web_list | cut -f1)" '
+    ($have | split("\n")) as $have | ($made | split("\n")) as $made
+    | select(length > 0 and (startswith("#") | not)) | split("\t") | select(length >= 4)
+    | {name: .[0], src: .[1], words: .[2], line: (.[3:] | join(" "))}
+    | (.name | ascii_downcase | gsub("[^a-z0-9]+"; "-") | sub("^-"; "") | sub("-$"; "")) as $slug
+    | .src as $src
+    | if ($src | test("^https?://")) then
+        select($made | any(. == $slug) | not)
+        | {id: ("get:web:" + $slug), title: ("Get " + .name), subtitle: (.line + " · a web app in its own window"),
+           keywords: (.words + " web app get install"), glyph: "globe", kind: "Get", converse: true,
+           run: ["takumi", "app", "web", $src, .name], score: 0.7}
+      else
+        select($have | any(. == $src) | not)
+        | {id: ("get:" + $src), title: ("Get " + .name), subtitle: (.line + " · from Flathub, just for you"),
+           keywords: (.words + " get install download app store"), glyph: "down", kind: "Get",
+           run: ["takumi", "app", "get", $src, .name], risk: 1, score: 0.7}
+      end' "$list"
+  if [[ $asked == yes ]]; then
+    row='{id: ("remove:" + $id), title: ("Remove " + $name), subtitle: $sub, glyph: "cross", kind: "Remove",
+          keywords: ("remove uninstall delete app " + $id), converse: true, risk: 1, run: ["takumi", "app", "remove", $id], score: 0.75}'
+    apps_web_list | jq -Rc "split(\"\t\") | (\"takumi-web-\" + .[0]) as \$id | .[1] as \$name
+      | \"Web app · what you signed in to stays in the browser\" as \$sub | $row"
+    apps_flatpak_apps | jq -Rc "split(\"\t\") | .[0] as \$id | .[1] as \$name
+      | (if .[2] == \"system\" then \"From Flathub, for everyone here · needs your password\" else \"From Flathub, just for you\" end) as \$sub | $row"
+    apps_pacman_apps | jq -Rc "split(\"\t\") | .[0] as \$id | .[2] as \$name | \"Installed apart from Takumi · needs your password\" as \$sub | $row"
+    if apps_windows_exists; then
+      jq -cn "\"$apps_windows_name\" as \$id | \"Windows\" as \$name | \"Its disk and everything in it · ~/Windows stays\" as \$sub | $row"
+    fi
+  fi
+} | palette_filter "$q"

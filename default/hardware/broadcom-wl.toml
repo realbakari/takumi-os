@@ -1,0 +1,16 @@
+# Broadcom Wi-Fi chips that only work well with Broadcom's own driver (wl): BCM4311, 4312, 4321, 4322, 4331,
+# 43142, 43227, 43228, 4352 and 4360, found in Macs and older laptops. BCM4313, 43224 and 43225 work with the
+# kernel's brcmsmac and are left alone. broadcom-wl-dkms builds the driver for every kernel the system has,
+# so it needs the kernel's headers; its own modprobe file keeps the open drivers away from these chips.
+title = "Broadcom Wi-Fi"
+part = "wifi"
+says = "Broadcom's own driver"
+driver = "wl"
+
+[match]
+pci = ["14e4:4311", "14e4:4312", "14e4:4315", "14e4:4328", "14e4:4329", "14e4:432b", "14e4:4331", "14e4:4358", "14e4:4359", "14e4:4365", "14e4:43a0", "14e4:43b1"]
+arch = ["x86_64"]
+
+[apply]
+packages = ["broadcom-wl-dkms", "linux-headers"]
+note = "This Broadcom Wi-Fi chip, common in Macs and older laptops, works well only with Broadcom's own driver, which this installs and builds again for each new kernel."

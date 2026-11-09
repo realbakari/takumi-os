@@ -1,0 +1,34 @@
+# Shiro: high contrast on white, for the clearest reading
+# A Takumi theme.
+
+[meta]
+name = "shiro"
+mode = "light"
+title = "Shiro"
+about = "high contrast on white, for the clearest reading"
+
+[palette]
+accent     = "#0050c8"
+background = "#ffffff"
+surface    = "#f0f0f0"
+foreground = "#000000"
+muted      = "#595959"
+red        = "#b00020"
+yellow     = "#7a5c00"
+green      = "#106b21"
+cyan       = "#006b75"
+blue       = "#0050c8"
+magenta    = "#7a1fa2"
+
+[phase.dawn]
+accent     = "#a34400"
+background = "#fffaf4"
+
+[phase.dusk]
+accent     = "#a82c0b"
+
+[phase.night]
+accent     = "#0045ac"
+background = "#f7f7f7"
+surface    = "#ebebeb"
+foreground = "#000000"

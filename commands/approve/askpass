@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Ask for your password in the Core when a command runs sudo -A
+usage: [prompt]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# sudo -A runs this with SUDO_ASKPASS pointing here (the session sets it) and reads the password from our
+# stdout. The Core asks; the answer comes back through a FIFO only this user can open, never as an
+# argument. TAKUMI_SUDO_WHY, when the caller sets it, says what for. With no shell answering, it asks at
+# the terminal, if there is one.
+why=${TAKUMI_SUDO_WHY:-}
+dir=${XDG_RUNTIME_DIR:-/tmp}
+if command -v qs >/dev/null; then
+  fifo="$dir/takumi-askpass.$$"
+  rm -f "$fifo"; mkfifo -m 600 "$fifo"; trap 'rm -f "$fifo"' EXIT
+  if qs -c takumi ipc --any-display call approvals ask "$fifo" "$why" >/dev/null 2>&1; then
+    IFS= read -r answer < "$fifo" || exit 1
+    [[ -n "$answer" ]] || exit 1                 # Esc in the Core
+    printf '%s\n' "$answer"; exit 0
+  fi
+fi
+exec 3</dev/tty 2>/dev/null || exit 1
+IFS= read -rs -u 3 -p "${1:-Password: }" answer; echo >&2
+printf '%s\n' "$answer"

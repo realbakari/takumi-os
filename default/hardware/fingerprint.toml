@@ -1,0 +1,13 @@
+# Fingerprint readers: fprintd and libfprint drive most laptop readers. Matched by the makers that build only
+# fingerprint readers on USB (Elan by its reader ids, since Elan also makes touchscreens); whether libfprint
+# supports this one is asked of fprintd itself when This computer is shown.
+# fprint: https://fprint.freedesktop.org/supported-devices.html
+title = "Fingerprint reader"
+part = "fingerprint"
+
+[match]
+usb = ["06cb:00??", "06cb:01??", "27c6:*", "04f3:0c??", "04f3:090?", "138a:*", "1c7a:*", "10a5:*", "2808:*", "08ff:*", "147e:*", "298d:*"]
+
+[apply]
+packages = ["fprintd"]
+note = "fprintd drives most laptop fingerprint readers. When this one is among them, it can unlock the computer once a finger is saved."

@@ -1,0 +1,16 @@
+[Unit]
+Description=Takumi: your phone through KDE Connect (its notifications in the Core, files, the clipboard, ringing it)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# Enabled by takumi phone pair, stopped by forgetting the last phone. KDE Connect's own autostart entry is turned off
+# for the account, so this is the one kdeconnectd. It needs the Wayland display for the clipboard.
+Type=dbus
+BusName=org.kde.kdeconnect
+ExecStart=/usr/bin/kdeconnectd
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

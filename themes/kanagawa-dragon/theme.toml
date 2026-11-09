@@ -1,0 +1,34 @@
+# Kanagawa Dragon: Kanagawa in dark ink and ash
+# Colours after Kanagawa by rebelot (https://github.com/rebelot/kanagawa.nvim); phases by Takumi.
+
+[meta]
+name = "kanagawa-dragon"
+mode = "dark"
+title = "Kanagawa Dragon"
+about = "Kanagawa in dark ink and ash"
+credit = "Kanagawa by rebelot (https://github.com/rebelot/kanagawa.nvim)"
+
+[palette]
+accent     = "#8ba4b0"
+background = "#181616"
+surface    = "#201d1d"
+foreground = "#c5c9c5"
+muted      = "#737c73"
+red        = "#c4746e"
+yellow     = "#c4b28a"
+green      = "#87a987"
+cyan       = "#8ea4a2"
+blue       = "#8ba4b0"
+magenta    = "#a292a3"
+
+[phase.dawn]
+accent     = "#b6927b"
+
+[phase.dusk]
+accent     = "#c4746e"
+
+[phase.night]
+accent     = "#757c8d"
+background = "#100e0e"
+surface    = "#161414"
+foreground = "#b0b4b0"

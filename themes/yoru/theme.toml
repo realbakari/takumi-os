@@ -1,0 +1,33 @@
+# Yoru: a clear night and its stars
+# A Takumi theme.
+
+[meta]
+name = "yoru"
+mode = "dark"
+title = "Yoru"
+about = "a clear night and its stars"
+
+[palette]
+accent     = "#9fb8ff"
+background = "#05070d"
+surface    = "#0b0f19"
+foreground = "#cfd8e8"
+muted      = "#565f75"
+red        = "#ff7a8a"
+yellow     = "#f5d27a"
+green      = "#8fe0a8"
+cyan       = "#8ad8ef"
+blue       = "#9fb8ff"
+magenta    = "#d3a8ff"
+
+[phase.dawn]
+accent     = "#f5b07a"
+
+[phase.dusk]
+accent     = "#f89d80"
+
+[phase.night]
+accent     = "#ae8bd3"
+background = "#030508"
+surface    = "#080a12"
+foreground = "#b7bfce"

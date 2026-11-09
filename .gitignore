@@ -1,0 +1,5 @@
+# Local tooling, not part of Takumi
+.claude/
+CLAUDE.md
+.DS_Store
+out/

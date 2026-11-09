@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Remove an app: one from Flathub, a web app, Windows, or an app installed apart from Takumi
+usage: <app id, package or name>
+example: takumi app remove com.spotify.Client
+risk: 1
+converse: yes
+glyph: cross
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; . "$l/core.sh"; break; }; done
+declare -F apps_flatpak_apps >/dev/null && declare -F core_confirm >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh, docs/apps.md): it says what goes and asks first. The apps that come with
+# Takumi stay, because every update would bring them back. Exit status: 0 removed · 2 usage · 3 an answer
+# was needed and none came, or no · 4 nothing by that name is installed · 6 it comes with Takumi · 1
+# anything else. The last line says it in words.
+want=${1:-}
+[[ -n "$want" ]] || core_fail 2 "usage: takumi app remove <app id, package or name>"
+log="$apps_state/app-remove.log"; mkdir -p "$apps_state"
+wl=$(printf '%s' "$want" | tr '[:upper:]' '[:lower:]')
+
+# Windows in a window: the container, its disk and its entry. ~/Windows is yours and stays.
+if [[ "$want" == "$apps_windows_name" || "$wl" == windows ]] && apps_windows_exists; then
+  core_confirm "Remove Windows? Its disk, with everything installed and saved inside it, is deleted. ~/Windows stays." || core_fail 3 "Nothing changed"
+  core_note "Removing Windows…"
+  podman rm -f "$apps_windows_name" >> "$log" 2>&1 || core_fail 1 "Windows could not be removed. What happened is in $log"
+  # The disk was written from inside the container, so it goes from inside Podman's view of your files.
+  podman unshare rm -rf "$apps_windows_disk" >> "$log" 2>&1 || rm -rf "$apps_windows_disk"
+  rm -rf "$apps_windows_conf"
+  rm -f "$apps_web_dir/$apps_windows_name.desktop" "$apps_icons/scalable/apps/$apps_windows_name.svg"
+  img=$(apps_windows_image 2>/dev/null || true)
+  if [[ -n "$img" ]]; then podman rmi "$img" >> "$log" 2>&1 || true; fi
+  core_done "Removed Windows. ~/Windows is still there"
+  exit 0
+fi
+
+# A web app, by its entry or its name.
+slug=${want%.desktop}; slug=${slug#takumi-web-}
+[[ -f "$apps_web_dir/takumi-web-$slug.desktop" ]] || slug=$(apps_web_list | W="$wl" awk -F '\t' '!f && tolower($2) == ENVIRON["W"] { print $1; f = 1 }')
+if [[ -n "$slug" && -f "$apps_web_dir/takumi-web-$slug.desktop" ]]; then
+  name=$(apps_key "$apps_web_dir/takumi-web-$slug.desktop" Name); name=${name:-$slug}
+  core_confirm "Remove the $name web app? What you signed in to stays in the browser." || core_fail 3 "Nothing changed"
+  apps_web_remove "$slug"
+  core_done "Removed $name"
+  exit 0
+fi
+
+# A Flatpak app, by its ID or its name.
+line=$(apps_flatpak_apps | W="$wl" I="$want" awk -F '\t' '!f && ($1 == ENVIRON["I"] || tolower($2) == ENVIRON["W"]) { print; f = 1 }')
+if [[ -n "$line" ]]; then
+  IFS=$'\t' read -r id name where <<< "$line"
+  core_confirm "Remove $name? Its settings stay in ~/.var/app/$id, for if you get it again." || core_fail 3 "Nothing changed"
+  core_note "Removing $name…"
+  if [[ $where == system ]]; then
+    # Installed for everyone: Flatpak asks polkit, and the Core asks for your password.
+    flatpak uninstall --system --noninteractive -y "$id" >> "$log" 2>&1 || core_fail 1 "$name was not removed. What happened is in $log"
+  else
+    flatpak uninstall --user --noninteractive -y "$id" >> "$log" 2>&1 || core_fail 1 "$name was not removed. What happened is in $log"
+    flatpak uninstall --user --unused --noninteractive -y >> "$log" 2>&1 || true
+  fi
+  core_done "Removed $name"
+  exit 0
+fi
+
+# An app installed apart from Takumi, by its package or its name.
+if command -v pacman >/dev/null; then
+  line=$(apps_pacman_apps | W="$wl" I="$want" awk -F '\t' '!f && ($1 == ENVIRON["I"] || tolower($3) == ENVIRON["W"]) { print; f = 1 }')
+  if [[ -n "$line" ]]; then
+    IFS=$'\t' read -r pkg id name <<< "$line"
+    core_confirm "Remove $name? It needs your password." || core_fail 3 "Nothing changed"
+    core_note "Removing $name…"
+    # pacman: removes the package's files under /usr, the packages only it needed, and its entry in /var/lib/pacman
+    if out=$(core_sudo "Removing $name needs your password" pacman -Rs --noconfirm "$pkg" 2>&1); then
+      printf '%s\n' "$out" >> "$log"; core_done "Removed $name"; exit 0
+    fi
+    printf '%s\n' "$out" >> "$log"
+    case "$out" in *"breaks dependency"* | *"required by"*) core_fail 1 "Other apps need $name, so it stays" ;; esac
+    core_fail 1 "$name was not removed. What happened is in $log"
+  fi
+  # Installed, but not one of those: Takumi's own, or not an app at all.
+  pkg="" name=$want
+  if pacman -Q "$want" >/dev/null 2>&1; then pkg=$want
+  else
+    id=$(apps_table | W="$wl" awk -F '\t' '!f && tolower($2) == ENVIRON["W"] { print $1; f = 1 }')
+    if [[ -n "$id" ]] && f=$(apps_path "$id"); then pkg=$(LC_ALL=C pacman -Qqo "$f" 2>/dev/null || true); fi
+  fi
+  if [[ -n "$pkg" ]]; then
+    lists=" $(apps_takumi_packages | tr '\n' ' ') "
+    if [[ "$lists" == *" $pkg "* ]]; then core_fail 6 "$name comes with Takumi, so it stays: every update would bring it back"; fi
+    core_fail 4 "$name is not an app you installed, so Takumi leaves it"
+  fi
+fi
+core_fail 4 "Nothing called $want is installed"

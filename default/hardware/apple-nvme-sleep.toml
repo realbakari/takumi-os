@@ -1,0 +1,15 @@
+# Apple's own SSD controllers (106b:2001, 106b:2003) in 2015 to 2017 Macs do not come back from the PCI
+# D3cold state, so the Mac does not wake; the kernel's d3cold_allowed keeps them out of it.
+# Kernel: https://docs.kernel.org/power/pci.html
+title = "Apple SSD and sleep"
+part = "computer"
+
+[match]
+pci = ["106b:2001", "106b:2003"]
+
+[apply]
+udev = [
+  'ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x106b", ATTR{device}=="0x2001", ATTR{d3cold_allowed}="0"',
+  'ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x106b", ATTR{device}=="0x2003", ATTR{d3cold_allowed}="0"',
+]
+note = "Apple's own SSD in this Mac does not come back from its deepest sleep. Keeping it out of that state lets the Mac wake up."

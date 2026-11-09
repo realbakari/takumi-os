@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Follow print jobs and printers: say when a document has printed, and when a printer needs paper or ink
+usage: [--once]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/printer.sh" ]] && { . "$l/printer.sh"; break; }; done
+declare -F printer_queues >/dev/null || exit 0
+
+# Run by takumi-printer.service; --once looks one time (the tests). Kept light: while the print service is
+# not running there is nothing to follow, and asking systemd never starts it (cups.socket would, for anyone
+# who connects). While it runs, CUPS is asked every 3 seconds while a document of yours waits or prints,
+# else every 20.
+#
+# CUPS numbers jobs in order, across restarts. The watermark (~/.local/state/takumi/printer-watermark) is the
+# number below which every job has been dealt with; it stays just under the oldest job still waiting, so a
+# document on a slow printer is told even when a later one on a fast printer finished first. Jobs above it
+# that were told already are listed in $XDG_RUNTIME_DIR. The very first look on a computer only sets it.
+# Each problem (paper, ink, a jam) is told once until it clears; a session's first look only notes them.
+command -v lpstat >/dev/null || exit 0
+watermark_file="$HOME/.local/state/takumi/printer-watermark"
+told_file="$printer_run/takumi-printer-told"           # job numbers above the watermark already told
+titles_file="$printer_run/takumi-printer-titles"       # "<job><sep><title>" for jobs seen waiting
+problems_file="$printer_run/takumi-printer-problems"   # "<queue><sep><problem>" as last seen
+me=$(id -un)
+mkdir -p "$printer_run" "${watermark_file%/*}"
+
+say() { takumi notice "$@" >/dev/null 2>&1 || true; }
+# job_lines <lpstat -o output>: "<number><sep><queue><sep><owner><sep><alerts>" per job. A job's name in
+# lpstat is "<queue>-<number>", and with -l its job-state-reasons follow on an "Alerts:" line.
+job_lines() {
+  awk -v S="$printer_sep" '
+    function out() { if (id != "") print id S q S owner S alerts; id = "" }
+    /^[^ \t]/ { out(); q = $1; id = q; sub(/^.*-/, "", id); sub(/-[0-9]+$/, "", q); owner = $2; alerts = ""
+                if (id !~ /^[0-9]+$/) id = ""; next }
+    /^\tAlerts: / { alerts = substr($0, 10) }
+    END { out() }' <<< "$1"
+}
+
+tell_job() {  # <number> <queue> <alerts>
+  local label title desc
+  desc=$(printer_queues | awk -F "$printer_sep" -v q="$2" '$1 == q { print $2; exit }')
+  label=$(printer_label "$2" "$desc")
+  title=$(awk -F "$printer_sep" -v n="$1" '$1 == n { t = $2 } END { print t }' "$titles_file" 2>/dev/null || true)
+  case " $3 " in
+    *completed-successfully*|*completed-with-warnings*) say printer "Printed" "${title:+$title · }$label" ;;
+    *completed-with-errors*) say warn "Printed, with a problem" "${title:+$title · }look at the pages from $label" -1 8 ;;
+    *canceled*|*processing-to-stop-point*) ;;   # you stopped it, and know
+    *aborted*|*stopped*|*error*) say warn "Could not print" "${title:+$title · }$label could not take it" -1 8 ;;
+  esac
+}
+
+tell_problem() {  # <queue> <label> <problem>
+  local s=""
+  case "$3" in empty|low) s=$(printer_supply "$1") ;; esac
+  case "$3" in
+    jam) say warn "Paper is stuck in $2" "open it and take the sheet out" -1 10 ;;
+    paper) say printer "$2 is out of paper" "add paper and it goes on by itself" -1 10 ;;
+    empty) say warn "$2 is out of $s" "replace it to print again" -1 10 ;;
+    low) say printer "$2 is low on $s" "it still prints; have more ready" -1 8 ;;
+    cover) say warn "A cover is open on $2" "close it to go on" -1 10 ;;
+    offline) say warn "$2 is offline" "turn it on; your document waits for it" -1 10 ;;
+  esac
+}
+
+# One look. True while a document of yours waits or prints.
+look() {
+  local active completed jobs mine wm top low queues problems quiet=no q desc state alerts msg p old
+  printer_running || return 1
+  active=$(LC_ALL=C lpstat -W not-completed -o 2>/dev/null) || return 1
+  completed=$(LC_ALL=C lpstat -l -W completed -o 2>/dev/null) || return 1
+  jobs=$(job_lines "$completed")
+  top=$( { job_lines "$active"; printf '%s\n' "$jobs"; } | awk -F "$printer_sep" '$1 + 0 > m { m = $1 + 0 } END { print m + 0 }')
+  [[ -f "$watermark_file" ]] || echo "$top" > "$watermark_file"
+  wm=$(cat "$watermark_file"); [[ "$wm" =~ ^[0-9]+$ ]] || wm=$top
+  (( top >= wm )) || wm=$top   # CUPS started counting again: what it has now is history
+  [[ -f "$told_file" ]] || : > "$told_file"
+  [[ -f "$problems_file" ]] || quiet=yes
+  mine=$(job_lines "$active" | awk -F "$printer_sep" -v me="$me" '$3 == me')
+  # The names of your documents, while lpq still lists them ("Rank Owner Job File(s) Total Size").
+  if [[ -n "$mine" ]]; then
+    LC_ALL=C lpq -a 2>/dev/null | awk -v S="$printer_sep" 'NR > 1 && $3 ~ /^[0-9]+$/ && NF >= 6 {
+      t = $4; for (i = 5; i <= NF - 2; i++) t = t " " $i; print $3 S t }' >> "$titles_file" || true
+  fi
+  printf '%s\n' "$jobs" | awk -F "$printer_sep" -v me="$me" -v wm="$wm" '$3 == me && $1 + 0 > wm + 0' |
+    while IFS="$printer_sep" read -r n q _ alerts; do
+      grep -qx "$n" "$told_file" && continue
+      echo "$n" >> "$told_file"
+      tell_job "$n" "$q" "$alerts"
+    done
+  # The new watermark: just under the oldest job still waiting, else the newest job there is.
+  low=$(job_lines "$active" | awk -F "$printer_sep" 'NR == 1 || $1 + 0 < m { m = $1 + 0 } END { print m + 0 }')
+  if [[ -n "$active" && "$low" -gt 0 ]]; then
+    if (( low - 1 > wm )); then wm=$((low - 1)); fi
+  else
+    wm=$top
+  fi
+  echo "$wm" > "$watermark_file"
+  awk -v wm="$wm" '$1 + 0 > wm + 0' "$told_file" > "$told_file.tmp" && mv -f "$told_file.tmp" "$told_file"
+  queues=$(printer_queues); problems=""
+  while IFS="$printer_sep" read -r q desc state alerts _ _ msg; do
+    [[ -n "$q" ]] || continue
+    p=$(printer_problem "$state" "$alerts" "$msg")
+    case "$p" in
+      paused|stopped) p="" ;;   # the Palette shows it, with Enter to start it again
+      offline) awk -F "$printer_sep" -v q="$q" '$2 == q { f = 1 } END { exit !f }' <<< "$mine" || p="" ;;   # only when it keeps you waiting
+    esac
+    problems+="$q$printer_sep$p"$'\n'
+    old=$(awk -F "$printer_sep" -v q="$q" '$1 == q { print $2; exit }' "$problems_file" 2>/dev/null || true)
+    if [[ $quiet == no && -n "$p" && "$p" != "$old" ]]; then tell_problem "$q" "$(printer_label "$q" "$desc")" "$p"; fi
+  done <<< "$queues"
+  printf '%s' "$problems" > "$problems_file"
+  [[ -n "$mine" ]]
+}
+
+case "${1:-}" in
+  --once) look || true; exit 0 ;;
+  "") ;;
+  *) echo "usage: takumi printer watch [--once]" >&2; exit 2 ;;
+esac
+while :; do
+  if look; then sleep 3; else sleep 20; fi
+done

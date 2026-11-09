@@ -1,0 +1,34 @@
+# Hinoki: pale cypress wood and moss
+# A Takumi theme.
+
+[meta]
+name = "hinoki"
+mode = "light"
+title = "Hinoki"
+about = "pale cypress wood and moss"
+
+[palette]
+accent     = "#6f8a2a"
+background = "#f3ece1"
+surface    = "#e6dccd"
+foreground = "#33281d"
+muted      = "#8f8170"
+red        = "#b5452e"
+yellow     = "#a87a1c"
+green      = "#5f7d2d"
+cyan       = "#2f7d77"
+blue       = "#3a6795"
+magenta    = "#87508a"
+
+[phase.dawn]
+accent     = "#b8642e"
+background = "#f7eee1"
+
+[phase.dusk]
+accent     = "#b7592e"
+
+[phase.night]
+accent     = "#5f7724"
+background = "#e9e2d7"
+surface    = "#dbd1c2"
+foreground = "#463c31"

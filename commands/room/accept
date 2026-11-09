@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Make a room that started well the default
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_current >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+# Runs after boot-complete.target (takumi-room-accept.service): the room on its first start reached it.
+cur=$(rooms_current); [[ -n "$cur" ]] || exit 0
+[[ "$(state_get "$cur" status)" == staged ]] || exit 0
+state_set "$cur" status good
+state_set "$cur" accepted "$(date -u +%FT%TZ)"
+bootctl set-default "takumi-$cur.conf"
+takumi room prune --auto || true

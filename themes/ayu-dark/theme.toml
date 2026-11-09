@@ -1,0 +1,34 @@
+# Ayu Dark: bright gold on near black
+# Colours after Ayu by dempfi (https://github.com/ayu-theme/ayu-colors); phases by Takumi.
+
+[meta]
+name = "ayu-dark"
+mode = "dark"
+title = "Ayu Dark"
+about = "bright gold on near black"
+credit = "Ayu by dempfi (https://github.com/ayu-theme/ayu-colors)"
+
+[palette]
+accent     = "#e6b450"
+background = "#0b0e14"
+surface    = "#11151c"
+foreground = "#bfbdb6"
+muted      = "#5d626c"
+red        = "#f07178"
+yellow     = "#e6b450"
+green      = "#aad94c"
+cyan       = "#95e6cb"
+blue       = "#59c2ff"
+magenta    = "#d2a6ff"
+
+[phase.dawn]
+accent     = "#ff8f40"
+
+[phase.dusk]
+accent     = "#fa8454"
+
+[phase.night]
+accent     = "#4ba2d5"
+background = "#07090d"
+surface    = "#0c0f14"
+foreground = "#a9a8a3"

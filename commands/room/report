@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Say once, at login, what happened to the last update
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_current >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+cur=$(rooms_current); [[ -n "$cur" ]] || exit 0
+newest=$(rooms_names | tail -n 1)
+[[ -n "$newest" && "$newest" != "$cur" ]] || exit 0
+seen="$HOME/.local/state/takumi/room-reported-$newest"
+[[ -e "$seen" ]] && exit 0
+when=$(rooms_label "$cur")
+case "$(state_get "$newest" status)" in
+  failed) takumi notice restart "Update undone, nothing lost" "$(state_get "$newest" reason) · back on $when" -1 10 ;;
+  staged) takumi notice restart "Update did not start, nothing lost" "back on $when" -1 10 ;;
+  *) exit 0 ;;
+esac
+mkdir -p "${seen%/*}"; : > "$seen"

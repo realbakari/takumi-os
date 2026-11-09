@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Make a room the one to try at the next start, once
+usage: <name>
+risk: 2
+sudo: yes
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_current >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || { echo "run via sudo" >&2; exit 1; }
+name=${1:?room name}
+rooms_mount_top
+[[ -d "$(rooms_path "$name")" ]] || { echo "no room $name" >&2; exit 1; }
+rooms_carry "$name"
+rooms_write_entry "$name" 3
+state_set "$name" status staged
+state_set "$name" staged "$(date -u +%FT%TZ)"
+# Once: if the new room does not start, the very next start is the default (the last good room) again.
+bootctl set-oneshot "takumi-$name.conf"
+echo "room $name will be tried at the next start"

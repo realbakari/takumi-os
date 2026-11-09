@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Re-render the theme if the phase changed (run by a user timer)
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+state="$HOME/.local/state/takumi"; mkdir -p "$state"
+phase=$(takumi phase current)
+last=$(cat "$state/phase" 2>/dev/null || true)
+[[ "$phase" == "$last" && "${1:-}" != "--force" ]] && exit 0
+printf '%s\n' "$phase" > "$state/phase"
+takumi theme render "$(cat "$HOME/.config/takumi/theme" 2>/dev/null || echo ion)" "$phase"
+takumi theme apply

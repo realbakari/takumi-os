@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Sound: Studio quality or Balanced, at once and kept; with no word, the one in use
+usage: <studio|balanced>
+example: takumi audio quality studio
+risk: 0
+ABOUT
+set -euo pipefail
+# Studio quality is for hi-res music, recording and instruments; Balanced, the first choice, uses less
+# battery and never crackles. It takes effect at once and stays (docs/sound.md). Exit 2 for other words.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/audio.sh" ]] && { . "$l/audio.sh"; break; }; done
+declare -F audio_quality_set >/dev/null || { echo "takumi: the sound library is missing" >&2; exit 1; }
+case "${1:-}" in
+  '') echo "Sound: $(audio_quality_name "$(audio_quality_now)")"; exit 0 ;;
+  studio) detail="songs at their own sample rate, a short delay" ;;
+  balanced) detail="one sample rate, a longer buffer, less battery" ;;
+  *) echo "usage: takumi audio quality <studio|balanced>" >&2; exit 2 ;;
+esac
+audio_quality_set "$1"
+takumi notice vol "Sound: $(audio_quality_name "$1")" "$detail" >/dev/null 2>&1 || true
+echo "Sound: $(audio_quality_name "$1")"

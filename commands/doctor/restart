@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Restart Wi-Fi, Bluetooth, sound or the desktop when one stops working, and say what was done
+usage: <wifi|bluetooth|sound|desktop>
+example: takumi doctor restart wifi
+risk: 1
+glyph: restart
+converse: yes
+ABOUT
+set -euo pipefail
+# The Palette's fix-it rows (commands/palette/doctor, docs/doctor.md), each a conversation in the Core that
+# ends in one sentence. Wi-Fi: the wireless card's driver is unloaded and loaded again, then the radio is
+# switched on; without a driver module, NetworkManager is restarted. Bluetooth: the Bluetooth service is
+# restarted and paired, trusted devices are connected again. Sound: the user's PipeWire. The desktop:
+# takumi-shell.service, without ending the session; apps stay open.
+# Exit status: 0 done · 2 usage · 3 nothing here to restart · 1 it did not come back.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; . "$l/bluetooth.sh"; break; }; done
+declare -F core_note >/dev/null && declare -F bt_ctl >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+wait_s=${TAKUMI_DOCTOR_WAIT:-15}
+# up_to <seconds> <test...>: run the test once a second until it passes; false when time runs out.
+up_to() { local n=$1; shift; while :; do "$@" && return 0; (( n-- > 0 )) || return 1; sleep 1; done; }
+
+wifi() {
+  local sys=${TAKUMI_NET_SYS:-/sys/class/net} w dev="" mod="" holders=() h net
+  for w in "$sys"/*/wireless; do [[ -d "$w" ]] && { dev=${w%/wireless}; dev=${dev##*/}; break; }; done
+  [[ -n "$dev" ]] || core_fail 3 "This computer has no Wi-Fi to restart"
+  if [[ -e "$sys/$dev/device/driver/module" ]]; then
+    mod=$(basename "$(readlink -f "$sys/$dev/device/driver/module")")
+    # Modules built on the driver (iwlmvm on iwlwifi) hold it, so they go first and come back after it.
+    for h in "$sys/$dev/device/driver/module/holders"/*; do [[ -e "$h" ]] && holders+=("${h##*/}"); done
+  fi
+  if [[ -n "$mod" ]]; then
+    core_note "Reloading the Wi-Fi driver ($mod)"
+    # sudo: modprobe removes, then loads, the kernel modules $mod and its holders (/lib/modules/<kernel>/…/$mod.ko*)
+    if core_sudo "Restarting Wi-Fi needs your password" modprobe -r ${holders[@]+"${holders[@]}"} "$mod" >/dev/null 2>&1; then
+      # sudo: modprobe loads the kernel modules $mod and its holders again (/lib/modules/<kernel>/…/$mod.ko*)
+      core_sudo "Restarting Wi-Fi needs your password" modprobe -a "$mod" ${holders[@]+"${holders[@]}"} >/dev/null 2>&1 \
+        || core_fail 1 "The Wi-Fi driver ($mod) did not load again: restart the computer"
+      how="its driver was reloaded"
+    else
+      mod=""   # busy, or not ours to unload: the network service instead
+    fi
+  fi
+  if [[ -z "$mod" ]]; then
+    core_note "Restarting the network service"
+    # sudo: systemctl restarts NetworkManager.service (/usr/lib/systemd/system/NetworkManager.service)
+    core_sudo "Restarting Wi-Fi needs your password" systemctl restart NetworkManager.service >/dev/null 2>&1 \
+      || core_fail 1 "Wi-Fi could not be restarted: the network service did not restart (journalctl -u NetworkManager says why)"
+    how="the network service was restarted"
+  fi
+  nm_up() { [[ "$(LC_ALL=C nmcli -t -f RUNNING general 2>/dev/null)" == running ]]; }
+  up_to "$wait_s" nm_up || true
+  nmcli radio wifi on >/dev/null 2>&1 || true
+  core_note "Wi-Fi is on; joining your network"
+  joined() { net=$(LC_ALL=C nmcli -g GENERAL.STATE,GENERAL.CONNECTION device show "$dev" 2>/dev/null | sed 's/\\:/:/g' | tr '\n' '|'); [[ "$net" == 100* ]]; }
+  if up_to "$wait_s" joined; then net=${net#*|}; net=${net%|}; core_done "Wi-Fi restarted ($how) and joined ${net:-your network}"
+  else core_done "Wi-Fi restarted ($how); choose a network in Quick settings, Wi-Fi"; fi
+}
+
+bluetooth() {
+  command -v bluetoothctl >/dev/null || core_fail 3 "Bluetooth is not set up on this computer"
+  core_note "Restarting Bluetooth"
+  # sudo: systemctl restarts bluetooth.service (/usr/lib/systemd/system/bluetooth.service)
+  core_sudo "Restarting Bluetooth needs your password" systemctl restart bluetooth.service >/dev/null 2>&1 \
+    || core_fail 1 "Bluetooth did not restart (journalctl -u bluetooth says why)"
+  up_to "$wait_s" bt_present || core_fail 1 "Bluetooth restarted, but no adapter answers: if this computer has a Bluetooth switch or key, turn it on"
+  bt_on || bt_ctl power on >/dev/null 2>&1 || true
+  local back=() missed=() addr name
+  while IFS=$'\t' read -r addr name; do
+    [[ -n "$addr" && "$(bt_field "$addr" Trusted)" == yes ]] || continue
+    bt_named "$addr" "$name" || name="a device"
+    core_note "Connecting $name"
+    if TAKUMI_BT_WAIT=${TAKUMI_BT_CONNECT_WAIT:-10} bt_ctl connect "$addr" >/dev/null 2>&1 \
+       && [[ "$(bt_field "$addr" Connected)" == yes ]]; then back+=("$name"); else missed+=("$name"); fi
+  done < <(bt_devices Paired)
+  local said="Bluetooth restarted"
+  if (( ${#back[@]} )); then said="$said; $(join "${back[@]}") connected again"; fi
+  if (( ${#missed[@]} )); then said="$said; $(join "${missed[@]}") did not answer (turn it on, or hold it near)"; fi
+  (( ${#back[@]} + ${#missed[@]} )) || said="$said; no paired device to connect"
+  core_done "$said"
+}
+# join a b c: "a, b and c".
+join() { local out=$1; shift; while (( $# > 1 )); do out="$out, $1"; shift; done; (( $# )) && out="$out and $1"; printf '%s\n' "$out"; }
+
+sound() {
+  core_note "Restarting sound"
+  systemctl --user restart pipewire.service pipewire-pulse.service wireplumber.service >/dev/null 2>&1 \
+    || core_fail 1 "Sound did not restart (journalctl --user -u pipewire says why)"
+  local out=""
+  sink() { out=$(wpctl inspect @DEFAULT_AUDIO_SINK@ 2>/dev/null) && [[ -n "$out" ]]; }
+  if command -v wpctl >/dev/null && up_to "$wait_s" sink; then
+    local name; name=$(sed -n 's/.*node\.description = "\(.*\)"/\1/p' <<< "$out" | head -n 1)
+    core_done "Sound restarted and plays on ${name:-the default output}; an app that was playing may need to start again"
+  else
+    core_done "Sound restarted, but there is no output to play on: plug in speakers or headphones, or choose one with \"sound\""
+  fi
+}
+
+desktop() {
+  systemctl --user cat takumi-shell.service >/dev/null 2>&1 || core_fail 3 "The desktop does not run as takumi-shell.service here, so there is nothing to restart"
+  # The Core is the desktop: say it first, then ask systemd without waiting, since restarting it ends this
+  # conversation (and this command, when the Core ran it).
+  core_done "The desktop is restarting; it is back in a moment, with your apps still open"
+  systemctl --user --no-block restart takumi-shell.service >/dev/null 2>&1 || exit 1
+}
+
+case "${1:-}" in
+  wifi | wi-fi) wifi ;;
+  bluetooth) bluetooth ;;
+  sound) sound ;;
+  desktop | shell) desktop ;;
+  *) echo "usage: takumi doctor restart <wifi|bluetooth|sound|desktop>" >&2; exit 2 ;;
+esac
+exit 0

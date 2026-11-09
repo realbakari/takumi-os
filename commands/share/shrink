@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Make photos and videos small enough to send: photos to JPEG at most 2560 pixels, videos to 1080p MP4, next to the originals
+usage: [file...]
+example: takumi share shrink ~/Pictures/IMG_0042.HEIC
+example: takumi share shrink holiday.mov
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/share.sh" ]] && { . "$l/core.sh"; . "$l/share.sh"; break; }; done
+declare -F share_kind >/dev/null && declare -F core_note >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# Without files: the files you copied in Files, else the ones picked there a moment ago. Photos (HEIC from an
+# iPhone too) become JPEG no bigger than 2560 pixels on the long side, turned the right way up, through ImageMagick;
+# videos become H.264 and AAC in an MP4 with the short side at most 1080, through ffmpeg, which every phone, mail
+# and chat app plays. Each copy is written next to its original as "<name> (small).jpg" or ".mp4"; the originals
+# are never changed. The first time, it offers to install what it needs from Arch (imagemagick with libheif and
+# libjpeg-turbo, ffmpeg). Notes say how far it got; the last word is one sentence with the sizes before and after.
+# Run from Files (right-click › Scripts › Make smaller to send) it works in the background and says it in the
+# Core; when something needs installing, the Core opens on the row that asks. Exit status: 0 made smaller · 2 no
+# photo or video to shrink · 3 what it needs was not installed · 1 one or more did not shrink (in the log).
+log="$HOME/.local/state/takumi/share-shrink.log"; mkdir -p "$(dirname "$log")" "$share_run"
+quiet=no; core_in_core || core_at_tty || quiet=yes      # from Files: nobody reads stdout
+files=()
+add() { local f=$1; case "$f" in /*) ;; *) f="$PWD/$f" ;; esac; [[ -f "$f" && -n "$(share_kind "$f")" ]] && files+=("$f"); return 0; }
+if (( $# )); then
+  for f in "$@"; do [[ -e "$f" ]] || core_fail 2 "$(basename "$f") is not there."; add "$f"; done
+else
+  while IFS= read -r f; do [[ -n "$f" ]] && add "$f"; done <<< "$(share_copied)"
+  if (( ! ${#files[@]} )) && [[ -f "$share_picked" ]]; then
+    while IFS= read -r f; do [[ -n "$f" ]] && add "$f"; done < "$share_picked"
+  fi
+fi
+(( ${#files[@]} )) || core_fail 2 "No photo or video to make smaller. Copy them in Files first, or right-click them: Scripts, Make smaller to send"
+photos=0 videos=0 heic=no
+for f in "${files[@]}"; do
+  case "$(share_kind "$f")" in photo) photos=$((photos + 1)) ;; video) videos=$((videos + 1)) ;; esac
+  case "$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')" in *.heic|*.heif) heic=yes ;; esac
+done
+what=$(share_counted "$photos" "$videos")
+
+# --- What it needs, from Arch's packages ---
+
+need=()
+if (( photos )); then
+  command -v magick >/dev/null || need+=(imagemagick libjpeg-turbo)
+  if [[ $heic == yes ]] && { ! command -v magick >/dev/null || ! grep -qi '^ *HEIC' <<< "$(magick -list format 2>/dev/null)"; }; then need+=(libheif); fi
+fi
+if (( videos )); then command -v ffmpeg >/dev/null || need+=(ffmpeg); fi
+if (( ${#need[@]} )); then
+  if [[ $quiet == yes ]]; then
+    printf '%s\n' "${files[@]}" > "$share_picked"
+    qs -c takumi ipc --any-display call core search "shrink" >/dev/null 2>&1 || true
+    takumi notice picture "Making $what smaller needs ${need[*]}" "choose the row in the Core to install it" -1 8 >/dev/null 2>&1 || true
+    exit 3
+  fi
+  core_confirm "Making $what smaller needs ${need[*]} from Arch's packages. Install now? It asks for your password." ||
+    core_fail 3 "Nothing changed. Making them smaller needs ${need[*]}."
+  core_note "Installing ${need[*]}…"
+  # installs /usr/bin/magick and /usr/bin/ffmpeg with the libraries named in need
+  core_sudo "Installing what makes photos and videos smaller needs your password" pacman -S --needed --noconfirm "${need[@]}" >> "$log" 2>&1 ||
+    core_fail 1 "${need[*]} did not install. What happened is in $log"
+fi
+
+# --- Shrinking ---
+
+bytes() { wc -c < "$1" 2>/dev/null | tr -d ' '; }
+human() { LC_ALL=C awk -v b="${1:-0}" 'function d(x) { return (x < 10) ? sprintf("%.1f", x) : sprintf("%d", x + 0.5) }
+  BEGIN { if (b >= 1e9) print d(b / 1e9) " GB"; else if (b >= 1e6) print d(b / 1e6) " MB"; else print d(b / 1e3) " kB" }'; }
+say() { if [[ $quiet == yes ]]; then :; else core_note "$1"; fi; }
+[[ $quiet == no ]] || takumi notice picture "Making $what smaller…" "the copies go next to the originals" -1 4 >/dev/null 2>&1 || true
+
+photo() {  # <in> <out>
+  magick "$1[0]" -auto-orient -resize '2560x2560>' -background white -flatten -quality 82 -sampling-factor 4:2:0 "$2" 2>> "$log"
+}
+video() {  # <in> <out> <name>: notes every tenth of the way
+  local dur us last=0 p line
+  dur=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null | head -n 1)
+  ffmpeg -nostdin -hide_banner -loglevel error -y -i "$1" -map 0:v:0 -map '0:a:0?' \
+    -vf "scale='if(gt(iw,ih),-2,min(1080,trunc(iw/2)*2))':'if(gt(iw,ih),min(1080,trunc(ih/2)*2),-2)'" \
+    -c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart \
+    -progress pipe:1 -nostats "$2" 2>> "$log" |
+  while IFS= read -r line; do
+    case "$line" in out_time_us=[0-9]*) us=${line#out_time_us=} ;; *) continue ;; esac
+    [[ -n "$dur" ]] || continue
+    p=$(LC_ALL=C awk -v u="$us" -v d="$dur" 'BEGIN { if (d > 0) printf "%d", u / 10000 / d; else print 0 }')
+    if (( p >= last + 10 && p < 100 )); then last=$(( p / 10 * 10 )); say "Making $3 smaller · $last%"; fi
+  done
+  return "${PIPESTATUS[0]}"
+}
+
+before=0 after=0 made=0 pm=0 vm=0 failed=0 n=0 dir=""
+for f in "${files[@]}"; do
+  n=$((n + 1)); base=$(basename "$f"); out=$(share_small_name "$f")
+  [[ -w "$(dirname "$f")" ]] || out="$HOME/Downloads/$(basename "$out")"
+  mkdir -p "$(dirname "$out")"; dir=$(dirname "$out")
+  say "Making $base smaller ($n of ${#files[@]})…"
+  printf '%s: %s -> %s\n' "$(date '+%F %T')" "$f" "$out" >> "$log"
+  rc=0
+  case "$(share_kind "$f")" in photo) photo "$f" "$out" || rc=$? ;; video) video "$f" "$out" "$base" || rc=$? ;; esac
+  if (( rc != 0 )) || [[ ! -s "$out" ]]; then rm -f "$out"; failed=$((failed + 1)); continue; fi
+  b=$(bytes "$f"); a=$(bytes "$out")
+  # A JPEG or an MP4 that was small already stays as it was: a copy as big helps nobody.
+  case "$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')" in
+    *.jpg|*.jpeg|*.mp4) if (( a >= b )); then rm -f "$out"; continue; fi ;;
+  esac
+  before=$((before + b)); after=$((after + a)); made=$((made + 1))
+  case "$(share_kind "$f")" in photo) pm=$((pm + 1)) ;; video) vm=$((vm + 1)) ;; esac
+done
+rm -f "$share_picked"
+
+if (( made == 0 )); then
+  if (( failed )); then words="$(share_counted "$photos" "$videos")"; words="$(printf '%s' "${words:0:1}" | tr '[:lower:]' '[:upper:]')${words:1} could not be made smaller. What happened is in $log"; rc=1
+  else words="$(if (( n == 1 )); then echo "It is"; else echo "They are"; fi) small enough to send already"; rc=0; fi
+else
+  words="$(share_counted "$pm" "$vm")"
+  words="$(printf '%s' "${words:0:1}" | tr '[:lower:]' '[:upper:]')${words:1} $(if (( made == 1 )); then echo is; else echo are; fi) smaller: $(human "$before") became $(human "$after"), next to the original$( (( made > 1 )) && echo s || true)"
+  (( failed == 0 )) || words="$words; $failed could not be made smaller (see $log)"
+  rc=0; (( failed == 0 )) || rc=1
+fi
+if [[ $quiet == yes ]]; then
+  takumi notice --open "$dir" picture "$words" "" -1 10 >/dev/null 2>&1 || true
+  echo "$words"; exit "$rc"
+fi
+(( rc == 0 )) || core_fail "$rc" "$words"
+core_done "$words"

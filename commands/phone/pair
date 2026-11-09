@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Pair your phone through KDE Connect, checking the code both screens show
+usage: [device id]
+example: takumi phone pair
+risk: 1
+converse: yes
+title: Connect your phone
+words: phone iphone android mobile kde connect kdeconnect pair notifications link
+glyph: phone
+ABOUT
+set -euo pipefail
+# A conversation in the Core. The first time it installs KDE Connect from Arch's packages (your password, asked in the
+# Core) and runs it as this account's service, takumi-phone.service. Then it waits for a phone with the KDE Connect
+# app open on the same network, asks it to pair (or answers the phone that asked), and asks whether both screens show
+# the same code; the phone's Accept finishes it. Exit status: 0 paired · 1 not paired · 3 an answer was needed and none
+# came · 5 no phone showed up. See docs/sharing.md.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/share.sh" ]] && { . "$l/core.sh"; . "$l/share.sh"; break; }; done
+declare -F phone_devices >/dev/null && declare -F core_note >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+command -v jq >/dev/null || core_fail 1 "Your phone needs jq."
+want=${1:-}
+log="$share_state/phone.log"; mkdir -p "$share_state"; : > "$log"
+again() { core_wrong "$1"; core_in_core || core_fail 3 "$1"; }
+
+if ! phone_have; then
+  core_confirm "Your phone connects through KDE Connect, from Arch's packages. Install it? It asks for your password; the phone needs the KDE Connect app too." ||
+    core_fail 3 "Nothing changed. Your phone needs KDE Connect."
+  core_note "Installing KDE Connect…"
+  # /usr/bin/kdeconnectd, /usr/bin/kdeconnect-cli and the rest of the kdeconnect package.
+  core_sudo "Installing KDE Connect needs your password" pacman -S --needed --noconfirm kdeconnect >> "$log" 2>&1 ||
+    core_fail 1 "KDE Connect did not install. What happened is in $log"
+  phone_have || core_fail 1 "KDE Connect did not install."
+fi
+# KDE Connect starts only as takumi-phone.service: its own start at login is turned off for this account.
+mkdir -p "$HOME/.config/autostart"
+printf '[Desktop Entry]\nType=Application\nName=KDE Connect\nHidden=true\n' > "$HOME/.config/autostart/org.kde.kdeconnect.daemon.desktop"
+systemctl --user enable "$phone_unit" >/dev/null 2>&1 || true
+core_note "Starting KDE Connect…"
+phone_start || core_fail 1 "KDE Connect did not start. What happened: journalctl --user -u $phone_unit"
+# The phone and this computer find and reach each other on ports 1714 to 1764 (KDE Connect's own ufw profile,
+# KDEConnect): with the firewall on, takumi firewall allow asks to let it in.
+if core_in_core || core_at_tty; then
+  fw=$(takumi firewall --json 2>/dev/null || true)
+  if jq -e '(.state == "on" or .state == "restart") and ((.apps // []) | index("KDEConnect") | not)' >/dev/null 2>&1 <<< "$fw"; then
+    takumi firewall allow KDEConnect || core_fail 1 "Your phone cannot reach this computer while the firewall blocks KDE Connect."
+  fi
+fi
+
+core_note "Open KDE Connect on your phone, on the same Wi-Fi as this computer…"
+kdeconnect-cli --refresh >/dev/null 2>&1 || true
+start=$(date +%s); line=""
+while [[ -z "$line" ]]; do
+  devs=$(phone_devices)
+  if [[ -n "$want" ]]; then
+    line=$(awk -F'\t' -v w="$want" '($1 == w || tolower($2) == tolower(w)) && ($3 == 1 || $4 == 1 || $5 == 1) { print; exit }' <<< "$devs")
+    if [[ -n "$line" && "$(cut -f3 <<< "$line")" == 1 ]]; then core_done "Already paired with $(cut -f2 <<< "$line")."; exit 0; fi
+  else
+    asking=$(awk -F'\t' '$3 == 0 && $5 == 1' <<< "$devs")
+    nearby=$(awk -F'\t' '$3 == 0 && $4 == 1' <<< "$devs")
+    if [[ -n "$asking" ]]; then line=$(head -n 1 <<< "$asking")
+    elif [[ "$(grep -c . <<< "$nearby" || true)" == 1 ]]; then line=$nearby
+    elif [[ -n "$nearby" ]]; then
+      core_ask answer "Pair with $(cut -f2 <<< "$nearby" | paste -sd, - | sed 's/,/, /g; s/, \([^,]*\)$/ or \1/')?" || core_fail 3 "Nothing changed."
+      line=$(awk -F'\t' -v a="$answer" 'a != "" && index(tolower($2), tolower(a)) == 1 { print; exit }' <<< "$nearby")
+      [[ -n "$line" ]] || again "That is not one of them"
+      continue
+    elif (( $(date +%s) - start >= 10 )) && paired=$(awk -F'\t' '$3 == 1 { print $2; exit }' <<< "$devs") && [[ -n "$paired" ]]; then
+      core_done "Already paired with $paired. To add another phone, open KDE Connect on it and try again."
+      exit 0
+    fi
+  fi
+  [[ -n "$line" ]] && break
+  (( $(date +%s) - start < 120 )) || core_fail 5 "No phone showed up. Open KDE Connect on it, on the same Wi-Fi as this computer, and try again."
+  sleep 2
+done
+
+id=$(cut -f1 <<< "$line"); name=$(cut -f2 <<< "$line"); asked=$(cut -f5 <<< "$line")
+device=/modules/kdeconnect/devices/$id
+call() { busctl --user --auto-start=no call org.kde.kdeconnect "$device" org.kde.kdeconnect.device "$1" >/dev/null 2>&1; }
+if [[ $asked != 1 ]]; then
+  core_note "Asking $name to pair…"
+  kdeconnect-cli -d "$id" --pair >> "$log" 2>&1 || core_fail 1 "$name did not answer. Open KDE Connect on it and try again."
+fi
+code=""
+for _ in 1 2 3 4 5; do code=$(phone_prop "$id" verificationKey); [[ -n "$code" ]] && break; sleep 1; done
+if [[ $asked == 1 ]]; then question="$name asks to pair. Does it show ${code:-the same code as here}?"
+elif [[ -n "$code" ]]; then question="Does $name show $code? Tap Accept there"
+else question="Tap Accept on $name, then press Enter"; fi
+if ! core_confirm "$question"; then
+  call cancelPairing || kdeconnect-cli -d "$id" --unpair >/dev/null 2>&1 || true
+  core_fail 1 "Not paired: the codes did not match, or you said no."
+fi
+[[ $asked == 1 ]] && { call acceptPairing || true; }
+core_note "Waiting for $name…"
+for _ in $(seq 1 30); do
+  [[ "$(phone_prop "$id" isPaired)" == true ]] && break
+  sleep 1
+done
+if [[ "$(phone_prop "$id" isPaired)" != true ]]; then
+  call cancelPairing || true
+  core_fail 1 "$name did not accept in time. Try again, and tap Accept on the phone."
+fi
+share_script "Send to phone" takumi phone send
+core_done "Paired with $name. Its notifications show here; type phone in the Core for the rest."

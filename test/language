@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# Contract checks for the desktop's language and formats (lib/language.sh, commands/language/*, the Palette's
+# language rows, default/takumi-session) against a fake glibc, systemd-localed, sudo and pacman: names from glibc's
+# own sources, a language picked from what is typed, the locale made first when it has to be, Firefox's and
+# LibreOffice's language packs, the formats kept apart, and the rows.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; language checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-language.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run TAKUMI_I18N=$t/i18n TAKUMI_LOCALE_CONF=$t/locale.conf TAKUMI_LOCALE_GEN=$t/locale.gen
+unset XDG_CACHE_HOME LC_ALL
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR" "$TAKUMI_I18N/locales"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice"
+
+# --- glibc: SUPPORTED as it installs it, and the sources' names (some as <Uxxxx>, as older sources write them).
+printf '%s\n' "C.UTF-8 UTF-8" "de_AT.UTF-8 UTF-8" "de_AT ISO-8859-1" "de_DE.UTF-8 UTF-8" "de_DE ISO-8859-1" "de_DE@euro ISO-8859-15" \
+  "en_GB.UTF-8 UTF-8" "en_US.UTF-8 UTF-8" "en_US ISO-8859-1" "fr_FR.UTF-8 UTF-8" "hi_IN UTF-8" "ja_JP.EUC-JP EUC-JP" "ja_JP.UTF-8 UTF-8" \
+  "nds_DE UTF-8" "pt_BR.UTF-8 UTF-8" "pt_PT.UTF-8 UTF-8" "sr_RS@latin UTF-8" > "$TAKUMI_I18N/SUPPORTED"
+src() {  # <file> <language> <territory> <own language> <own territory>
+  printf '%s\n' "comment_char %" "escape_char /" "" "LC_IDENTIFICATION" "title      \"A locale\"" "language   \"$2\"" "territory  \"$3\"" \
+    "END LC_IDENTIFICATION" "" "LC_TIME" "d_fmt   \"%d.%m.%Y\"" "END LC_TIME" "" "LC_ADDRESS" "postal_fmt    \"%f%N%a%N\"" \
+    "country_name	\"$5\"" "lang_name     \"$4\"" "lang_ab       \"xx\"" "END LC_ADDRESS" > "$TAKUMI_I18N/locales/$1"
+}
+src de_DE German Germany Deutsch Deutschland
+src de_AT German Austria Deutsch Österreich
+src nds_DE "Low German" Germany Plattdüütsch Deutschland
+src en_US "American English" "United States" English "United States"
+src en_GB "British English" "United Kingdom" English "United Kingdom"
+src fr_FR French France français France
+src hi_IN Hindi India "<U0939><U093F><U0928><U094D><U0926><U0940>" "<U092D><U093E><U0930><U0924>"
+src ja_JP Japanese Japan "<U65E5><U672C><U8A9E>" "<U65E5><U672C>"
+src pt_BR Portuguese Brazil português Brasil
+src pt_PT Portuguese Portugal português Portugal
+src sr_RS@latin Serbian Serbia srpski Srbija
+
+cat > "$t/bin/locale" <<'FAKE'
+#!/usr/bin/env bash
+# `locale -a` from $FAKE/made; a locale's numbers and paper by its language.
+[[ "${1:-}" == -a ]] && { cat "$FAKE/made"; exit 0; }
+case "${LC_ALL:-}" in de_*) dp=, ts=. h=297 ;; *) dp=. ts=, h=279 ;; esac
+for k in "$@"; do case "$k" in decimal_point) echo "$dp" ;; thousands_sep) echo "$ts" ;; height) echo "$h" ;; esac; done
+FAKE
+printf '#!/bin/sh\ncase "$LC_ALL" in de_*) echo 31.12.2026 ;; *) echo 12/31/2026 ;; esac\n' > "$t/bin/date"
+cat > "$t/bin/locale-gen" <<'FAKE'
+#!/usr/bin/env bash
+printf 'locale-gen %s\n' "$*" >> "$FAKE/calls"
+awk '$1 !~ /^#/ && NF >= 2 { c = $1; sub(/\.UTF-8/, ".utf8", c); print c }' "$TAKUMI_LOCALE_GEN" >> "$FAKE/made"
+FAKE
+cat > "$t/bin/localectl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'localectl %s\n' "$*" >> "$FAKE/calls"
+[[ -e "$FAKE/localectl-refuse" ]] && { echo "Failed to issue method call: Access denied" >&2; exit 1; }
+[[ "$1" == set-locale ]] || { echo "fake localectl: unexpected: $*" >&2; exit 99; }
+shift; printf '%s\n' "$@" > "$TAKUMI_LOCALE_CONF"
+FAKE
+cat > "$t/bin/sudo" <<'FAKE'
+#!/usr/bin/env bash
+printf 'sudo %s\n' "$*" >> "$FAKE/calls"
+while [[ "${1:-}" == -* ]]; do [[ "$1" == -p ]] && shift; shift; done
+[[ -e "$FAKE/sudo-refuse" ]] && exit 1
+(( $# )) || exit 0
+exec "$@"
+FAKE
+cat > "$t/bin/pacman" <<'FAKE'
+#!/usr/bin/env bash
+printf 'pacman %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  -Q) grep -qx "$2" "$FAKE/installed" ;;
+  -Si) grep -qx "$2" "$FAKE/repo" ;;
+  -S) [[ -e "$FAKE/pacman-fail" ]] && { echo "error: failed retrieving file"; exit 1; }
+      shift; for p in "$@"; do [[ "$p" == -* ]] || echo "$p" >> "$FAKE/installed"; done ;;
+  *) exit 1 ;;
+esac
+FAKE
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+chmod +x "$t/bin/"* "$t/commands/notice/main"
+
+reset() {
+  rm -rf "${FAKE:?}"/* "${HOME:?}"/.cache "${HOME:?}"/.local
+  printf '%s\n' "LANG=en_US.UTF-8" > "$TAKUMI_LOCALE_CONF"
+  { echo "# Configuration file for locale-gen"; echo "#"; sed 's/^/#/; s/$/  /' "$TAKUMI_I18N/SUPPORTED"; } > "$TAKUMI_LOCALE_GEN"
+  sed -i.bak 's/^#\(en_US.UTF-8 UTF-8\)/\1/; s/^#\(de_DE.UTF-8 UTF-8\)/\1/' "$TAKUMI_LOCALE_GEN"; rm -f "$TAKUMI_LOCALE_GEN.bak"
+  printf '%s\n' C.utf8 en_US.utf8 de_DE.utf8 > "$FAKE/made"
+  printf '%s\n' firefox-i18n-de firefox-i18n-pt-br firefox-i18n-fr libreoffice-fresh-de libreoffice-fresh-pt-br libreoffice-fresh-fr > "$FAKE/repo"
+  : > "$FAKE/calls"; : > "$FAKE/notices"; : > "$FAKE/installed"
+}
+check() { if eval "$2"; then :; else echo "language: $1"; status=1; fi; }
+lib() { bash -c '. lib/language.sh; "$@"' _ "$@"; }
+run() { local out rc=0; out=$(commands/language/"$@" 2>&1 </dev/null) || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+talk() { local answers=$1; shift; printf '%b' "$answers" | TAKUMI_CORE=1 "$@" 2>&1; echo "rc=$?"; }
+rows() { commands/palette/language "$1"; }
+calls() { grep "^$1" "$FAKE/calls" || true; }
+tab=$(printf '\t')
+field() { lib language_table | awk -F '\t' -v c="$1" -v f="$2" '$1 == c { print $f }'; }
+
+# --- lib/language.sh
+reset
+check "only the UTF-8 locales, C left out" '[[ "$(lib language_supported | tr "\n" " ")" == "de_AT.UTF-8 de_DE.UTF-8 en_GB.UTF-8 en_US.UTF-8 fr_FR.UTF-8 hi_IN ja_JP.UTF-8 nds_DE pt_BR.UTF-8 pt_PT.UTF-8 sr_RS@latin " ]]'
+cp "$TAKUMI_I18N/SUPPORTED" "$t/installed"; sed 's|^\([^ ]*\) \(.*\)$|\1/\2 \\|' "$t/installed" > "$TAKUMI_I18N/SUPPORTED"
+check "SUPPORTED as glibc's sources write it too" '[[ "$(lib language_supported | wc -l | tr -d " ")" == 11 ]]'
+cp "$t/installed" "$TAKUMI_I18N/SUPPORTED"; reset
+check "names in English, the US and the UK short" '[[ "$(field de_DE.UTF-8 2)|$(field en_US.UTF-8 2)|$(field en_GB.UTF-8 2)|$(field nds_DE 2)" == "German (Germany)|English (US)|English (UK)|Low German (Germany)" ]]'
+check "names in their own words, escapes read, none where they say the same" '[[ "$(field de_AT.UTF-8 3)|$(field ja_JP.UTF-8 3)|$(field hi_IN 3)|$(field en_US.UTF-8 3)" == "Deutsch (Österreich)|日本語 (日本)|हिन्दी (भारत)|" ]]'
+check "a variant of a language says which" '[[ "$(field sr_RS@latin 2)" == "Serbian (Serbia, Latin)" ]]'
+check "the table is kept, and made again when glibc's list changes" '[[ -s "$HOME/.cache/takumi/languages-1.tsv" ]] && touch "$TAKUMI_I18N/SUPPORTED" && echo stale > "$HOME/.cache/takumi/languages-1.tsv" && touch -t 200001010000 "$HOME/.cache/takumi/languages-1.tsv" && [[ "$(lib language_table | wc -l | tr -d " ")" == 11 ]]'
+check "found by any name: German first, then by name" '[[ "$(lib language_find german | cut -f1 | tr "\n" " ")" == "de_DE.UTF-8 de_AT.UTF-8 nds_DE " && "$(lib language_find deutsch | cut -f1 | head -n 1)" == de_DE.UTF-8 && "$(lib language_find 日本 | cut -f1)" == ja_JP.UTF-8 ]]'
+check "a language's name picks its own country" '[[ "$(lib language_pick language german)" == "one${tab}de_DE.UTF-8${tab}German (Germany)" ]]'
+check "two popular ones ask which" '[[ "$(lib language_pick language portuguese)" == "several${tab}Portuguese (Brazil), Portuguese (Portugal)" ]]'
+check "more words narrow it" '[[ "$(lib language_pick language "portuguese brazil")" == "one${tab}pt_BR.UTF-8${tab}Portuguese (Brazil)" ]]'
+check "its own words find it" '[[ "$(lib language_pick language 日本語)" == "one${tab}ja_JP.UTF-8${tab}Japanese (Japan)" && "$(lib language_pick language klingon)" == none ]]'
+check "a place picks the formats of its own language" '[[ "$(lib language_pick place germany)" == "one${tab}de_DE.UTF-8${tab}German (Germany)" ]]'
+check "codes in every usual spelling" '[[ "$(lib language_resolve de_DE.UTF-8)|$(lib language_resolve de)|$(lib language_resolve de-AT)|$(lib language_resolve pt_br.utf8)|$(lib language_resolve hi_IN)|$(lib language_resolve sr_RS@latin)|$(lib language_resolve xx)" == "de_DE.UTF-8|de_DE.UTF-8|de_AT.UTF-8|pt_BR.UTF-8|hi_IN|sr_RS@latin|" ]]'
+check "made already, or not" 'lib language_ready de_DE.UTF-8 && ! lib language_ready fr_FR.UTF-8'
+check "locale.gen with a line turned on, and one added that was missing" '[[ "$(lib language_gen_with fr_FR.UTF-8 | grep -c "^fr_FR.UTF-8 UTF-8")" == 1 && "$(lib language_gen_with zz_ZZ.UTF-8 | tail -n 1)" == "zz_ZZ.UTF-8 UTF-8" ]]'
+echo firefox >> "$FAKE/installed"; echo libreoffice-fresh >> "$FAKE/installed"
+check "language packs: the country's when there is one, else the language's, none for US English" '[[ "$(lib language_packs de_DE.UTF-8 | tr "\n" " ")" == "firefox-i18n-de libreoffice-fresh-de " && "$(lib language_packs pt_BR.UTF-8 | tr "\n" " ")" == "firefox-i18n-pt-br libreoffice-fresh-pt-br " && -z "$(lib language_packs en_US.UTF-8)" ]]'
+check "a sample of the formats" '[[ "$(lib language_sample de_DE.UTF-8)" == "31.12.2026 · 1.234,56 · A4 paper" && "$(lib language_sample en_US.UTF-8)" == "12/31/2026 · 1,234.56 · Letter paper" ]]'
+
+# --- takumi language
+reset
+check "what is in use" '[[ "$(commands/language/main | sed "s/  */ /g" | tr "\n" "|")" == "Language English (US) en_US.UTF-8|Formats United States en_US.UTF-8, like the language|Takumi'"'"'s own words stay in English for now.|" ]]'
+check "  and as JSON" '[[ "$(commands/language/main --json | jq -c "[.language, .name, .formats, .apart]")" == "[\"en_US.UTF-8\",\"English (US)\",\"en_US.UTF-8\",false]" ]]'
+check "list: English says its name once" '[[ "$(commands/language/list english | sed "s/  */ /g" | tr "\n" "|")" == "en_US.UTF-8 English (US)|en_GB.UTF-8 English (UK)|" ]]'
+check "list: by name, in its own words" '[[ "$(commands/language/list portuguese | sed "s/  */ /g" | tr "\n" "|")" == "pt_BR.UTF-8 Portuguese (Brazil) · português (Brasil)|pt_PT.UTF-8 Portuguese (Portugal) · português (Portugal)|" ]]'
+
+# --- set: through polkit when the locale is made and nothing is to be installed
+res=$(run set de_DE.UTF-8)
+check "set a made language: one localectl call as you, no sudo ($res)" '[[ "$res" == "0|Your apps speak German (Germany) from your next login. Takumi'"'"'s own words stay in English for now." ]] && [[ "$(calls localectl)" == "localectl set-locale LANG=de_DE.UTF-8" && -z "$(calls sudo)" ]]'
+reset
+res=$(run set fr)
+check "set one not made: one password, locale.gen, locale-gen, then localectl ($res)" '[[ "$res" == 0* ]] && [[ "$(calls sudo | sed "s/^sudo -A /sudo /" | tr "\n" "|")" == "sudo -v|sudo tee $TAKUMI_LOCALE_GEN|sudo locale-gen|sudo localectl set-locale LANG=fr_FR.UTF-8|" ]] && grep -q "^fr_FR.UTF-8 UTF-8" "$TAKUMI_LOCALE_GEN" && grep -q "^#de_AT.UTF-8 UTF-8" "$TAKUMI_LOCALE_GEN" && grep -qx "LANG=fr_FR.UTF-8" "$TAKUMI_LOCALE_CONF"'
+reset; printf '%s\n' LANG=en_US.UTF-8 LANGUAGE=en_US:en LC_MESSAGES=en_US.UTF-8 LC_COLLATE=C.UTF-8 LC_TIME=de_DE.UTF-8 LC_NUMERIC=de_DE.UTF-8 LC_MONETARY=de_DE.UTF-8 LC_PAPER=de_DE.UTF-8 LC_MEASUREMENT=de_DE.UTF-8 > "$TAKUMI_LOCALE_CONF"
+run set de_AT >/dev/null || true
+check "a new language keeps the formats set apart and what it does not touch, and drops what would speak over it" '[[ "$(calls localectl)" == "localectl set-locale LANG=de_AT.UTF-8 LC_COLLATE=C.UTF-8 LC_TIME=de_DE.UTF-8 LC_NUMERIC=de_DE.UTF-8 LC_MONETARY=de_DE.UTF-8 LC_PAPER=de_DE.UTF-8 LC_MEASUREMENT=de_DE.UTF-8" ]]'
+reset; printf '%s\n' firefox libreoffice-fresh > "$FAKE/installed"
+res=$(run set pt-BR)
+check "Firefox and LibreOffice get the language packs, with the same password ($res)" '[[ "$res" == 0* ]] && [[ "$(calls sudo | tail -n 1 | sed "s/^sudo -A /sudo /")" == "sudo pacman -S --needed --noconfirm firefox-i18n-pt-br libreoffice-fresh-pt-br" ]]'
+res=$(run set pt-BR)
+check "set what is in use, packs and all: nothing to do ($res)" '[[ "$res" == "0|Your apps already speak Portuguese (Brazil)." ]]'
+reset; printf '%s\n' firefox libreoffice-fresh > "$FAKE/installed"; touch "$FAKE/pacman-fail"
+res=$(run set de)
+check "no network for the packs: the language changes all the same, and says how to finish ($res)" '[[ "$res" == "0|Your apps speak German (Germany) from your next login. Firefox and LibreOffice follow once this runs again with the internet. Takumi'"'"'s own words stay in English for now." ]] && grep -qx "LANG=de_DE.UTF-8" "$TAKUMI_LOCALE_CONF"'
+reset
+res=$(run set klingon)
+check "a language this computer does not know: 5 ($res)" '[[ "$res" == "5|This computer knows no language called klingon" && -z "$(calls localectl)" ]]'
+res=$(run set -x)
+check "an option it does not know: 2" '[[ "$res" == 2* ]]'
+touch "$FAKE/localectl-refuse"
+res=$(run set de)
+check "the password not given to polkit: 3 ($res)" '[[ "$res" == "3|Nothing changed: the password was not given" ]]'
+reset; touch "$FAKE/sudo-refuse"; cp "$TAKUMI_LOCALE_GEN" "$t/gen-before"
+res=$(run set fr)
+check "the password not given to sudo: 3, locale.gen untouched ($res)" '[[ "$res" == "3|Nothing changed: the password was not given" ]] && cmp -s "$TAKUMI_LOCALE_GEN" "$t/gen-before" && [[ -z "$(calls localectl)" ]]'
+reset
+said=$(talk 'portuguese\nbrazil\n' commands/language/set)
+check "which language: asked, narrowed, done ($said)" '[[ "$said" == *"ask Which language? Its name, like German or Deutsch"*"wrong Several match: Portuguese (Brazil), Portuguese (Portugal). Type more, like a country"*"done Your apps speak Portuguese (Brazil) from your next login."*"rc=0" ]]'
+reset
+said=$(talk 'klingon\n日本語\n' commands/language/set)
+check "which language: none, then in its own words" '[[ "$said" == *"wrong Nothing here is called klingon"*"done Your apps speak Japanese (Japan) from your next login."*"rc=0" ]]'
+said=$(talk '' commands/language/set)
+check "which language: no answer is 3" '[[ "$said" == *"rc=3" ]]'
+
+# --- formats
+reset
+res=$(run formats de_DE.UTF-8)
+check "formats apart from the language: all five, together ($res)" '[[ "$res" == "0|Dates, numbers and paper as in Germany from your next login." ]] && [[ "$(calls localectl)" == "localectl set-locale LANG=en_US.UTF-8 LC_TIME=de_DE.UTF-8 LC_NUMERIC=de_DE.UTF-8 LC_MONETARY=de_DE.UTF-8 LC_PAPER=de_DE.UTF-8 LC_MEASUREMENT=de_DE.UTF-8" ]]'
+: > "$FAKE/calls"
+res=$(run formats en_US.UTF-8)
+check "the language's own formats again: none set apart ($res)" '[[ "$res" == "0|Dates, numbers and paper follow the language again from your next login." && "$(calls localectl)" == "localectl set-locale LANG=en_US.UTF-8" ]]'
+reset
+said=$(talk 'germany\n' commands/language/formats)
+check "which place: a country, its own language's formats" '[[ "$said" == *"ask Formats of which place? A country, like Germany"*"done Dates, numbers and paper as in Germany from your next login."*"rc=0" ]]'
+
+# --- the rows
+reset
+r=$(rows language)
+check "rows are JSON with an id, a title and a kind" '[[ -n "$r" ]] && jq -e "select(.id and .title and .kind) | true" <<< "$r" >/dev/null'
+check "the language: Enter changes it in the Core, and Takumi's own words say they stay English" '[[ "$(jq -c "select(.id == \"language:now\") | [.title, .subtitle, .converse, .run]" <<< "$r")" == "[\"Language: English (US)\",\"Enter to change · Takumi'"'"'s own words stay English for now\",true,[\"takumi\",\"language\",\"set\"]]" ]]'
+check "the formats, with how they write" '[[ "$(jq -c "select(.id == \"language:formats\") | [.title, .subtitle, .run]" <<< "$r")" == "[\"Formats: United States\",\"12/31/2026 · 1,234.56 · Letter paper · Enter to change\",[\"takumi\",\"language\",\"formats\"]]" ]]'
+check "the popular languages, in their order, the one in use says so" '[[ "$(jq -r "select(.id | startswith(\"language:set:\")) | .title + \"/\" + .subtitle" <<< "$r" | head -n 3 | tr "\n" "|")" == "English (US)/In use|English (UK)/Enter to use it from your next login|Portuguese (Brazil)/português (Brasil) · Enter to use it from your next login|" ]]'
+r=$(rows german)
+check "a name finds it, in the Core, from your next login" '[[ "$(jq -c "select(.id == \"language:set:de_DE.UTF-8\") | [.title, .subtitle, .converse, .run]" <<< "$r")" == "[\"German (Germany)\",\"Deutsch (Deutschland) · Enter to use it from your next login\",true,[\"takumi\",\"language\",\"set\",\"de_DE.UTF-8\"]]" ]]'
+check "its own name finds it, in any script" '[[ "$(rows deutsch | jq -r .id | head -n 1)" == "language:set:de_DE.UTF-8" && "$(rows 日本語 | jq -r .id)" == "language:set:ja_JP.UTF-8" ]]'
+check "\"language german\": only German, not the summary" '[[ "$(rows "language german" | jq -r .id | tr "\n" " ")" == "language:set:de_DE.UTF-8 language:set:de_AT.UTF-8 language:set:nds_DE " ]]'
+check "\"formats germany\": its formats, in the Core" '[[ "$(rows "formats germany" | jq -c "select(.id == \"language:formats:de_DE.UTF-8\") | [.title, .run]")" == "[\"Formats: Germany\",[\"takumi\",\"language\",\"formats\",\"de_DE.UTF-8\"]]" ]]'
+check "unrelated words, and short ones: nothing" '[[ -z "$(rows zebra)" && -z "$(rows ger)" && -z "$(rows la)" && -z "$(rows firefox)" ]]'
+printf '%s\n' LANG=en_US.UTF-8 LC_TIME=de_DE.UTF-8 LC_NUMERIC=de_DE.UTF-8 LC_MONETARY=de_DE.UTF-8 LC_PAPER=de_DE.UTF-8 LC_MEASUREMENT=de_DE.UTF-8 > "$TAKUMI_LOCALE_CONF"
+r=$(rows formats)
+check "formats set apart: they say so, and a row puts them back with the language" '[[ "$(jq -r "select(.id == \"language:formats\") | .title + \"/\" + .subtitle" <<< "$r")" == "Formats: Germany/31.12.2026 · 1.234,56 · A4 paper · Enter to change" && "$(jq -c "select(.id == \"language:formats:own\") | .run" <<< "$r")" == "[\"takumi\",\"language\",\"formats\",\"en_US.UTF-8\"]" ]]'
+
+# --- the session hands the next login's apps what /etc/locale.conf says
+s=default/takumi-session
+check "takumi-session gives the shell and its apps the language and formats from /etc/locale.conf, before the shell starts" '[[ "$(grep -n "/etc/locale.conf | tr" "$s" | cut -d: -f1)" -lt "$(grep -n "start takumi-shell.service" "$s" | cut -d: -f1)" ]] && grep -q "set-environment \"\${locale_vars\[@\]}\"" "$s"'
+
+echo "   $(grep -c '^check ' "$0") language checks against a fake glibc, localed, sudo and pacman"
+exit $status

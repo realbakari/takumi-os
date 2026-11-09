@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Delete old rooms, keeping the last three good ones
+usage: [--auto]
+risk: 2
+sudo: yes
+interactive: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_current >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
+auto=0; [[ "${1:-}" == --auto ]] && auto=1
+rooms_mount_top
+keep=${TAKUMI_ROOMS_KEEP:-3}
+cur=$(rooms_current); def=$(rooms_default); good=0; doomed=()
+for n in $(rooms_names | sort -r); do
+  st=$(state_get "$n" status)
+  if [[ "$n" == "$cur" || "$n" == "$def" || "$(state_get "$n" pinned)" == yes || "$st" == staged || "$st" == building ]]; then continue; fi
+  if [[ "$st" == good || "$st" == left ]] && (( good < keep )); then good=$((good + 1)); continue; fi
+  # A failed room newer than the running one is kept until the login report has told you about it.
+  if [[ "$st" == failed && "$n" > "$cur" ]]; then continue; fi
+  doomed+=("$n")
+done
+(( ${#doomed[@]} )) || { (( auto )) || echo "Nothing to delete."; exit 0; }
+if (( ! auto )); then
+  printf 'Delete these rooms?\n'; for n in "${doomed[@]}"; do printf '  %s  %s\n' "$n" "$(rooms_label "$n")"; done
+  read -r -p "[y/N] " a; [[ "$a" == [yY] ]] || exit 1
+fi
+for n in "${doomed[@]}"; do rooms_delete "$n"; echo "deleted room $n"; done

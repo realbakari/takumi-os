@@ -1,0 +1,11 @@
+[Unit]
+Description=Takumi: a Thunderbolt or USB4 dock that waits for permission is said in the Core
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionPathExists=/sys/bus/thunderbolt/devices
+
+[Service]
+# Follows udev's Thunderbolt events and asks boltd which devices wait (takumi hardware dock, docs/hardware.md).
+ExecStart=/usr/bin/takumi hardware dock --watch
+Restart=on-failure
+RestartSec=5

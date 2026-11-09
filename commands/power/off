@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Close every app, then turn the computer off
+risk: 1
+title: Shut down
+words: shutdown turn off power off halt
+glyph: power
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; break; }; done
+# Every app is asked to close first, as its own close button does: one with unsaved work asks you, and the
+# computer waits for you (lib/power.sh, power_leave).
+if declare -F power_leave >/dev/null; then power_leave "shut down"; fi
+systemctl poweroff

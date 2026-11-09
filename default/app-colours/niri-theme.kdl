@@ -1,0 +1,10 @@
+// rendered by takumi theme render
+layout {
+    focus-ring { active-color "{{accent}}"; inactive-color "{{muted}}"; }
+    shadow { color "#00000070"; }
+}
+// The focus ring is drawn as a ring, never as a plate behind the window, so a window that lets the sky
+// through (a theme with glass = true) shows the sky, not the ring's colour. Opaque windows look the same.
+window-rule {
+    draw-border-with-background false
+}

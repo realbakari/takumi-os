@@ -1,0 +1,34 @@
+# GitHub Dark: the colours of code review at night
+# Colours after GitHub's Primer colours (https://primer.style/foundations/color); phases by Takumi.
+
+[meta]
+name = "github-dark"
+mode = "dark"
+title = "GitHub Dark"
+about = "the colours of code review at night"
+credit = "GitHub's Primer colours (https://primer.style/foundations/color)"
+
+[palette]
+accent     = "#58a6ff"
+background = "#0d1117"
+surface    = "#161b22"
+foreground = "#e6edf3"
+muted      = "#7d8590"
+red        = "#ff7b72"
+yellow     = "#d29922"
+green      = "#3fb950"
+cyan       = "#76e3ea"
+blue       = "#58a6ff"
+magenta    = "#bc8cff"
+
+[phase.dawn]
+accent     = "#ffa657"
+
+[phase.dusk]
+accent     = "#ff9760"
+
+[phase.night]
+accent     = "#9d76d5"
+background = "#080b0f"
+surface    = "#0f1318"
+foreground = "#ccd3d9"

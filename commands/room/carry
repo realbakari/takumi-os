@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Carry what changed since an update was prepared into the room that starts next
+risk: 0
+sudo: yes
+hidden: yes
+ABOUT
+set -euo pipefail
+# Run as the computer stops (takumi-room-carry.service). A room is carried into when it is staged; whatever
+# changed after that (TAKUMI_CARRY in lib/rooms.sh: networks, pairings, accounts, the clock) would be lost at
+# the restart into it, a changed password coming back as the old one. So it is carried again here.
+for l in /usr/share/takumi/lib/rooms.sh "$(dirname "$(readlink -f "$0")")/../../lib/rooms.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F rooms_carry >/dev/null || { echo "takumi: the rooms library is missing" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || { echo "run via sudo" >&2; exit 1; }
+takumi room enabled >/dev/null 2>&1 || exit 0
+rooms_mount_top
+current=$(rooms_current)
+for s in "$TAKUMI_STATE"/*; do
+  [[ -f "$s" ]] || continue
+  name=$(basename "$s")
+  [[ "$name" != "$current" && "$(state_get "$name" status)" == staged ]] || continue
+  [[ -d "$(rooms_path "$name")" ]] || continue
+  rooms_carry "$name" && echo "carried today's changes into room $name"
+done

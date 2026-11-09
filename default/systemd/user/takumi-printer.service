@@ -1,0 +1,11 @@
+[Unit]
+Description=Takumi: say when a document has printed, and when a printer needs paper or ink
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# Asks CUPS only while the print service runs (never starting it): every 3 seconds while a document of
+# yours waits or prints, else every 20 (docs/printing.md).
+ExecStart=/usr/bin/takumi printer watch
+Restart=on-failure
+RestartSec=10

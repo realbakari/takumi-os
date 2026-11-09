@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Forget everything in the clipboard history
+risk: 1
+title: Clear the clipboard history
+words: clipboard history clear forget wipe paste copied
+glyph: cross
+ABOUT
+set -euo pipefail
+command -v cliphist >/dev/null && cliphist wipe
+takumi notice check "Clipboard history cleared" "" -1
+echo "Clipboard history cleared"

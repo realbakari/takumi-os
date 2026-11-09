@@ -1,0 +1,12 @@
+[Unit]
+Description=Takumi speaker tuning (takumi audio tuning)
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+ExecStart=/usr/bin/takumi audio tuning run
+Restart=on-failure
+RestartSec=5

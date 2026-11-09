@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+# Contract checks for the look (lib/theme.sh, lib/font.sh, commands/theme/*, commands/font/*,
+# commands/about/main, the Palette's font rows) against fake tools: themes made from pictures that hold
+# their contrast in every phase from fixed colours, the theme's folder written and shown, fonts chosen and
+# fetched, the browsers coloured and given back, the prompt, folder icons in the accent, and About this
+# computer from a fake /sys and /proc. See docs/look.md.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; look checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-look.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state BIN=$t/bin HOME=$t/home XDG_RUNTIME_DIR=$t/run TAKUMI_ICONS=$t/icons TAKUMI_ETC=$t/etc TZ=UTC
+mkdir -p "$BIN" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR" "$t/pics" "$t/commands/notice"
+export PATH="$BIN:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"   # fake takumi commands go in front of the real ones
+unset TAKUMI_CORE SHELL
+
+# A picture is a file whose first line says so and whose other lines are what ImageMagick's quantiser
+# prints for it; the fake magick prints those, or copies the file where a conversion would write.
+cat > "$BIN/magick" <<'FAKE'
+#!/usr/bin/env bash
+printf 'magick %s\n' "$*" >> "$FAKE/calls"
+for out; do case "$out" in *\[0\]) src=${out%\[0\]} ;; esac; done   # the picture is the argument read as its first frame
+[[ -f "$src" && "$(head -n 1 "$src")" == PICTURE ]] || { echo "magick: no decode delegate for this image format" >&2; exit 1; }
+case " $* " in *" histogram:info:- "*) tail -n +2 "$src" ;; *) cp "$src" "$out" ;; esac
+FAKE
+cat > "$BIN/pacman" <<'FAKE'
+#!/usr/bin/env bash
+printf 'pacman %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  -Q) grep -qx "$2" "$FAKE/pkgs" ;;
+  -Qq) shift; rc=0; for p; do if grep -qx "$p" "$FAKE/pkgs"; then echo "$p"; else rc=1; fi; done; exit $rc ;;
+  -S) for p; do :; done; [[ -f "$FAKE/pacman-fails" ]] && exit 1
+      echo "$p" >> "$FAKE/pkgs"; [[ $p == starship ]] && { printf '#!/bin/sh\n' > "$BIN/starship"; chmod +x "$BIN/starship"; }; exit 0 ;;
+esac
+FAKE
+printf '#!/usr/bin/env bash\nprintf "sudo %%s\\n" "$*" >> "$FAKE/calls"\n[[ -f "$FAKE/refuse" ]] && exit 1\n[[ "$1" == -A ]] && shift\nexec "$@"\n' > "$BIN/sudo"
+printf '#!/bin/sh\nprintf "gsettings %%s\\n" "$*" >> "$FAKE/calls"\n[ "$1" = get ] && { cat "$FAKE/icon-theme" 2>/dev/null || echo "'"'"'Adwaita'"'"'"; }\nexit 0\n' > "$BIN/gsettings"
+printf '#!/bin/sh\nprintf "qs %%s\\n" "$*" >> "$FAKE/calls"\n[ -f "$FAKE/noshell" ] && exit 1\nexit 0\n' > "$BIN/qs"
+printf '#!/bin/sh\ncat "$FAKE/fonts"\n' > "$BIN/fc-list"
+printf '#!/bin/sh\nprintf "zenity %%s\\n" "$*" >> "$FAKE/calls"\ncat "$FAKE/chosen" 2>/dev/null\nexit "$(cat "$FAKE/zenity-rc" 2>/dev/null || echo 0)"\n' > "$BIN/zenity"
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+chmod +x "$BIN"/* "$t/commands/notice/main"
+
+picture() {  # <file> <count #rrggbb>...: a fake picture with those colours
+  local f=$1; shift
+  { echo PICTURE; while (( $# )); do printf '%10s: (0,0,0) %s srgb(0,0,0)\n' "${1%% *}" "$(printf '%s' "${1#* }" | tr '[:lower:]' '[:upper:]')"; shift; done; } > "$f"
+}
+picture "$t/pics/beach.jpg" "3100 #e8d8b8" "2200 #7fb3d5" "1500 #3a6e8f" "900 #f2ede4" "400 #c9a074"
+picture "$t/pics/night city.png" "2800 #0d0f1a" "1400 #1d2236" "600 #e0457b" "300 #33d6c4" "200 #f5f0e6"
+picture "$t/pics/white.jpg" "4096 #ffffff"
+picture "$t/pics/black.jpg" "4096 #000000"
+picture "$t/pics/grey.jpg" "4096 #808080"
+picture "$t/pics/yellow.jpg" "4096 #ffff00"
+picture "$t/pics/blue.jpg" "4096 #0000ff"
+picture "$t/pics/nord.png" "2000 #2e3440" "1000 #88c0d0"
+picture "$t/pics/IMG_2041.HEIC" "3000 #203040" "1000 #d08040"
+echo "not a picture" > "$t/pics/notes.txt"
+
+reset() {
+  rm -rf "${FAKE:?}"/* "${HOME:?}"/.[a-z]* "$HOME"/* "${TAKUMI_ETC:?}" "$BIN/starship" "$BIN/chromium" "$BIN/firefox"
+  mkdir -p "$HOME/.config/takumi"; echo ion > "$HOME/.config/takumi/theme"
+  : > "$FAKE/calls"; : > "$FAKE/notices"
+  printf '%s\n' inter-font ttf-jetbrains-mono noto-fonts > "$FAKE/pkgs"
+  printf 'Inter\t\nInter\t\nInter\t\nJetBrains Mono\t100\nJetBrains Mono\t100\nFira Code\t100\nNoto Sans\t\nNoto Sans Mono\t100\nCantarell\t\n' > "$FAKE/fonts"
+}
+checks=0
+check() { checks=$((checks + 1)); if eval "$2"; then :; else echo "look: $1"; status=1; fi; }
+lib() { bash -c '. lib/theme.sh; . lib/font.sh; "$@"' _ "$@"; }
+talk() { local answers=$1; shift; printf '%b' "$answers" | TAKUMI_CORE=1 "$@" 2>&1; echo "rc=$?"; }
+run() { local out rc=0; out=$("$@" 2>&1) || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+meta() { lib theme_meta "$HOME/.config/takumi/themes/$1/theme.toml" "$2"; }
+keys="accent background surface foreground muted red yellow green cyan blue magenta"
+shaped() {  # <theme.toml>: shaped as test/themes wants: every key, #rrggbb, a mode, phases of palette keys
+  local k
+  for k in $keys; do grep -Eq "^$k += +\"#[0-9a-f]{6}\"" "$1" || return 1; done
+  grep -Eq '^mode = "(dark|light)"' "$1" || return 1
+  awk '/^\[phase\./ { p = 1; next } /^\[/ { p = 0 } p && /^[a-z_]+ *=/ { print $1 }' "$1" | while read -r k; do [[ " $keys " == *" $k "* ]] || exit 1; done
+}
+
+reset
+check "contrast: black on white is 21:1, #777 on white 4.48:1" '[[ "$(lib theme_contrast "#000000" "#ffffff")" == 21.00 && "$(lib theme_contrast "#777777" "#ffffff")" == 4.48 ]]'
+
+# Fixed colours in, readable themes out: text at 4.5:1 or better on background and surface, the accent at
+# 3:1 or better on both, in all four phases, whatever the picture: bright, dark, one colour, no colour.
+for case in "beach.jpg light" "night city.png dark" "white.jpg light" "black.jpg dark" "grey.jpg dark" "yellow.jpg light" "blue.jpg dark"; do
+  f=${case% *}; want=${case##* }
+  lib theme_histogram "$t/pics/$f" | lib theme_derive auto | lib theme_toml x X "test" true > "$t/derived.toml"
+  rc=0; lib theme_check "$t/derived.toml" > "$t/derived.check" || rc=$?
+  check "from $f: a $want theme, readable in every phase ($(tr '\n' ' ' < "$t/derived.check"))" \
+    '(( rc == 0 )) && [[ "$(grep -c " ok$" "$t/derived.check")" == 4 ]] && grep -qx "mode = \"$want\"" "$t/derived.toml" && shaped "$t/derived.toml"'
+done
+lib theme_histogram "$t/pics/beach.jpg" | lib theme_derive dark | lib theme_toml x X "test" true > "$t/derived.toml"
+check "a light picture made dark on request, still readable" 'grep -qx "mode = \"dark\"" "$t/derived.toml" && lib theme_check "$t/derived.toml" >/dev/null'
+check "the histogram: counts and colours, most first" '[[ "$(lib theme_histogram "$t/pics/beach.jpg" | head -n 2 | tr "\n" "|")" == "3100 #e8d8b8|2200 #7fb3d5|" ]]'
+
+# takumi theme from: the folder, its name, its sky, and the Core opened on it.
+reset
+out=$(run takumi theme from "$t/pics/beach.jpg")
+d="$HOME/.config/takumi/themes/beach"
+check "from a picture: made ($out)" '[[ "$out" == "0|Made Beach in $d: takumi theme set beach uses it" ]]'
+check "its folder: theme.toml, the picture as its sky, a sample for its row" '[[ -f "$d/theme.toml" && -f "$d/skies/default.jpg" && -f "$d/sample.png" ]] && shaped "$d/theme.toml"'
+check "its name, title and where it came from" '[[ "$(meta beach name)|$(meta beach title)|$(meta beach about)|$(meta beach glass)" == "beach|Beach|made from beach.jpg|true" ]]'
+check "nothing in it runs" '[[ -z "$(find "$d" -type f -perm -u+x)" ]]'
+check "the sky made safe: turned upright, at most 4K, no camera details" 'grep -q "^magick $t/pics/beach.jpg\[0\] -auto-orient -resize 3840x2160> -strip .*/skies/default.jpg$" "$FAKE/calls"'
+check "shown in the Core on its own row" 'grep -qx "qs -c takumi ipc --any-display call core search theme beach" "$FAKE/calls"'
+check "takumi theme check agrees" '[[ "$(takumi theme check beach | tail -n 1)" == "Beach reads well in every phase" ]]'
+render_ok=yes
+for p in dawn day dusk night; do
+  TAKUMI_RENDER_OUT=$t/look-$p takumi theme render beach "$p" >/dev/null || render_ok=no
+  grep -q '{{' "$t/look-$p"/* && render_ok=no
+done
+check "it renders in every phase, no token left" '[[ $render_ok == yes && -L "$t/look-day/sky" ]]'
+out=$(run takumi theme from "$t/pics/beach.jpg")
+check "made again: a second theme beside it ($out)" '[[ "$out" == 0\|Made\ Beach\ 2\ in* && -f "$HOME/.config/takumi/themes/beach-2/theme.toml" ]] && grep -qx "qs -c takumi ipc --any-display call core search theme beach 2" "$FAKE/calls"'
+takumi theme from "$t/pics/beach.jpg" "Beach house" >/dev/null; takumi theme from "$t/pics/night city.png" "Beach house" >/dev/null
+check "a name you give again makes that theme anew" '[[ ! -d "$HOME/.config/takumi/themes/beach-house-2" && "$(meta beach-house mode)|$(meta beach-house about)" == "dark|made from night city.png" ]]'
+takumi theme from "$t/pics/nord.png" >/dev/null
+check "one of Takumi's own names gets a number, never hides it" '[[ "$(meta nord-2 title)" == "Nord 2" && ! -d "$HOME/.config/takumi/themes/nord" && -f "$HOME/.config/takumi/themes/nord-2/skies/default.png" ]]'
+takumi theme from "$t/pics/IMG_2041.HEIC" >/dev/null
+check "a phone's HEIC becomes a JPEG sky, named for the file" '[[ -f "$HOME/.config/takumi/themes/img-2041/skies/default.jpg" && "$(meta img-2041 title)" == "IMG 2041" ]]'
+takumi theme from "$t/pics/beach.jpg" --dark >/dev/null
+check "--dark: dark whatever the picture" '[[ "$(meta beach-3 mode)" == dark ]]'
+out=$(run takumi theme from "$t/pics/notes.txt")
+check "not a picture: 3 ($out)" '[[ "$out" == "3|Not a picture ImageMagick can read: notes.txt" ]]'
+out=$(run takumi theme from "$t/pics/missing.jpg")
+check "no file there: 3" '[[ "$out" == "3|No picture there: $t/pics/missing.jpg" ]]'
+out=$(run takumi theme from --sepia)
+check "usage: 2" '[[ "${out%%|*}" == 2 ]]'
+reset
+out=$(run takumi theme from)
+check "my background, when the sky is painted: 3 and a notice ($out)" '[[ "${out%%|*}" == 3 && "$out" == *"No picture on the sky"* ]] && grep -q "^drop|No picture on the sky|" "$FAKE/notices"'
+mkdir -p "$HOME/.local/state/takumi/look"; cp "$t/pics/beach.jpg" "$t/pics/default.jpg"; ln -s "$t/pics/default.jpg" "$HOME/.local/state/takumi/look/sky"
+out=$(run takumi theme from)
+check "my background: the sky's picture, named for the theme it came with ($out)" '[[ "$(meta ion-sky title)|$(meta ion-sky about)" == "Ion sky|made from the Ion sky" ]]'
+touch "$FAKE/noshell"; takumi theme from "$t/pics/white.jpg" >/dev/null
+check "no shell to show it: a notice says it is made" 'grep -q "^drop|Theme White made|type its name in the Core to see it|" "$FAKE/notices"'
+rm -f "$FAKE/noshell"
+mv "$BIN/magick" "$BIN/magick.off"
+if ! command -v magick >/dev/null; then   # a computer with ImageMagick of its own cannot show this
+  out=$(run takumi theme from "$t/pics/beach.jpg")
+  check "no ImageMagick: 4 ($out)" '[[ "$out" == "4|Making a theme from a picture needs ImageMagick: it is not installed" ]]'
+fi
+mv "$BIN/magick.off" "$BIN/magick"
+
+# takumi theme pick: zenity's chooser, then takumi theme from.
+reset
+printf '%s\n' "$t/pics/beach.jpg" > "$FAKE/chosen"
+out=$(run takumi theme pick)
+check "a picture chosen: its theme made ($out)" '[[ -f "$HOME/.config/takumi/themes/beach/theme.toml" ]] && grep -q "^zenity --file-selection --title=Choose a picture for your theme" "$FAKE/calls"'
+: > "$FAKE/chosen"; echo 1 > "$FAKE/zenity-rc"
+out=$(run takumi theme pick)
+check "the chooser closed: nothing made, no failure" '[[ "$out" == "0|No picture chosen" ]]'
+mv "$BIN/zenity" "$BIN/zenity.off"
+if ! command -v zenity >/dev/null; then out=$(run takumi theme pick); check "no zenity: 4 ($out)" '[[ "${out%%|*}" == 4 ]]'; fi
+mv "$BIN/zenity.off" "$BIN/zenity"
+
+# takumi theme check: Takumi's own themes pass; a theme with grey text on grey says what is wrong.
+mkdir -p "$HOME/.config/takumi/themes/murky"
+printf '[meta]\nname = "murky"\nmode = "dark"\ntitle = "Murky"\n\n[palette]\n' > "$HOME/.config/takumi/themes/murky/theme.toml"
+for k in $keys; do printf '%s = "#777777"\n' "$k"; done >> "$HOME/.config/takumi/themes/murky/theme.toml"
+sed -i.bak 's/^background = .*/background = "#555555"/; s/^surface = .*/surface = "#5a5a5a"/' "$HOME/.config/takumi/themes/murky/theme.toml"
+out=$(run takumi theme check murky)
+check "a theme that does not read: 1 and why ($out)" '[[ "$out" == "1|Murky is hard to read at dawn: text is 1.54:1, under 4.5:1" ]]'
+check "Takumi's ion reads well; no such theme: 3" '[[ "$(run takumi theme check ion)" == "0|Ion reads well in every phase" && "$(run takumi theme check nosuch)" == "3|No theme called nosuch" ]]'
+
+# Fonts.
+reset
+check "the families here, with their styles, monospaced or not" '[[ "$(lib font_families | tr "\t\n" ",|")" == "Cantarell,1,no|Fira Code,1,yes|Inter,3,no|JetBrains Mono,2,yes|Noto Sans,1,no|Noto Sans Mono,1,yes|" ]]'
+check "point sizes: 11 at 13, 12.5 at 15, 17 at 20" '[[ "$(lib font_points 13) $(lib font_points 15) $(lib font_points 20)" == "11 12.5 17" ]]'
+out=$(run takumi font set ui "noto sans")
+check "the interface font, by any case ($out)" '[[ "$out" == "0|Interface font: Noto Sans" ]] && grep -qx "font_ui = \"Noto Sans\"" "$HOME/.config/takumi/shell.toml"'
+check "GTK gets it from GNOME's settings" 'grep -qx "gsettings set org.gnome.desktop.interface font-name Noto Sans 11" "$FAKE/calls" && grep -qx "gsettings set org.gnome.desktop.interface document-font-name Noto Sans 11" "$FAKE/calls"'
+check "every other app through fontconfig: the link and the alias" '[[ "$(readlink "$HOME/.config/fontconfig/conf.d/60-takumi-fonts.conf")" == "$HOME/.local/state/takumi/look/fontconfig.conf" ]] && grep -q "<prefer><family>Noto Sans</family></prefer>" "$HOME/.local/state/takumi/look/fontconfig.conf"'
+takumi font set mono "fira code" >/dev/null
+check "the code font reaches foot and GTK" 'grep -qx "font=Fira Code:size=11" "$HOME/.local/state/takumi/look/foot-theme.ini" && grep -qx "gsettings set org.gnome.desktop.interface monospace-font-name Fira Code 11" "$FAKE/calls"'
+check "the other lines of shell.toml are kept" '[[ "$(grep -c "^font_" "$HOME/.config/takumi/shell.toml")" == 2 ]]'
+check "a font that is not here: 3 and where to get it" '[[ "$(run takumi font set ui "IBM Plex")" == "3|IBM Plex is not on this computer. Get it: takumi font get \"IBM Plex\"" && "$(run takumi font set ui Nope)" == "3|No font called Nope on this computer. takumi font list shows the ones here" ]]'
+check "usage: 2" '[[ "$(run takumi font set serif Inter)" == 2\|* ]]'
+out=$(run takumi font size 15)
+check "text size 15: the Core, GTK's scale and foot ($out)" '[[ "$out" == "0|Text size 15" ]] && grep -qx "font_size = 15" "$HOME/.config/takumi/shell.toml" && grep -q "^size = 15" "$HOME/.config/takumi/display.toml" && grep -qx "gsettings set org.gnome.desktop.interface text-scaling-factor 1.15" "$FAKE/calls" && grep -qx "font=Fira Code:size=12.5" "$HOME/.local/state/takumi/look/foot-theme.ini"'
+check "bigger walks the Core's steps; past the end it says so" '[[ "$(run takumi font size bigger)" == "0|Text size 17" ]] && takumi font size 20 >/dev/null && [[ "$(run takumi font size bigger)" == "0|Text is as big as it goes" ]]'
+check "size out of range: 2" '[[ "$(run takumi font size 25)" == 2\|* ]]'
+said=$(talk '' takumi font get "ibm plex")
+want=$(printf '%s\n' "note Getting IBM Plex…" "done IBM Plex is here (ttf-ibm-plex, from Arch's extra repository): type “fonts” to choose IBM Plex Sans" "rc=0")
+check "getting a family in the Core: pacman asks for the password there" '[[ "$said" == "$want" ]] && grep -qx "sudo -A pacman -S --needed --noconfirm ttf-ibm-plex" "$FAKE/calls"'
+check "a family already here says so, no password" '[[ "$(run takumi font get inter)" == "0|Inter is already here: choose it with: takumi font set ui \"Inter\"" ]]'
+check "a family Takumi does not know: 3; several: which one" '[[ "$(run takumi font get comic)" == 3\|Takumi\ does\ not\ know* && "$(run takumi font get cascadia)" == "3|Which one: Cascadia Code, Cascadia Code Nerd Font, Cascadia Mono Nerd Font?" ]]'
+touch "$FAKE/pacman-fails"; said=$(talk '' takumi font get hack); rm -f "$FAKE/pacman-fails"
+check "pacman fails: 1 and where the log is" '[[ "$said" == *"Hack did not install: $HOME/.local/state/takumi/install.log"*"rc=1" ]]'
+l=$(takumi font get)
+check "the list says where each comes from, and which are here" 'grep -q "^  Inter  *inter-font  *extra  .*(here)$" <<< "$l" && grep -q "^  IBM Plex  *ttf-ibm-plex  *extra  *IBM.*(here)$" <<< "$l" && grep -q "^  Hack  *ttf-hack  *extra  *a face for code grown from DejaVu Sans Mono$" <<< "$l"'
+r=$(takumi palette fonts fonts)
+check "rows are JSON with an id, a title and a kind" '[[ -n "$r" ]] && jq -e "select(.id and .title and .kind == \"Font\") | true" <<< "$r" >/dev/null'
+check "the fonts in use, then every family with its line to preview it" '[[ "$(jq -r "select(.id == \"font:ui\" or .id == \"font:mono\") | .title" <<< "$r" | tr "\n" "|")" == "Interface font: Noto Sans|Code font: Fira Code|" && "$(jq -r "select(.id == \"font:family:Inter\") | .font + \"|\" + .subtitle" <<< "$r")" == "Inter|Sphinx of black quartz, judge my vow · 3 styles" ]]'
+check "Enter: a monospaced family for code, a proportional one for the interface" '[[ "$(jq -c "select(.id == \"font:family:JetBrains Mono\") | .run" <<< "$r")" == "[\"takumi\",\"font\",\"set\",\"mono\",\"JetBrains Mono\"]" && "$(jq -c "select(.id == \"font:family:Cantarell\") | .run" <<< "$r")" == "[\"takumi\",\"font\",\"set\",\"ui\",\"Cantarell\"]" ]]'
+check "the family in use says so and does nothing" '[[ "$(jq -c "select(.id == \"font:family:Fira Code\") | [.subtitle, .run]" <<< "$r")" == "[\"In use · 0O 1lI {} [] => Sphinx of black quartz · 1 style\",[\"true\"]]" ]]'
+g=$(takumi palette fonts hack)
+check "a family to get: from where, asked first, a conversation" '[[ "$(jq -c "select(.id == \"font:get:ttf-hack\") | [.title, .subtitle, .converse, .risk, .run]" <<< "$g")" == "[\"Get Hack\",\"A face for code grown from DejaVu Sans Mono · ttf-hack, from Arch'"'"'s extra repository\",true,1,[\"takumi\",\"font\",\"get\",\"Hack\"]]" ]]'
+check "no row to get what is here; under three letters, nothing" '[[ -z "$(takumi palette fonts "get inter" | jq -r "select(.id == \"font:get:inter-font\") | .id")" && -z "$(takumi palette fonts in)" ]]'
+
+# The browsers: Firefox profiles wired one line each, Chromium's policy written with the password.
+reset
+mkdir -p "$HOME/.mozilla/firefox/abcd.default-release" "$t/elsewhere/work"
+printf '[Profile0]\nName=default\nIsRelative=1\nPath=abcd.default-release\n\n[Profile1]\nName=work\nIsRelative=0\nPath=%s\n\n[General]\nVersion=2\n' "$t/elsewhere/work" > "$HOME/.mozilla/firefox/profiles.ini"
+mkdir -p "$t/elsewhere/work/chrome"; printf '#urlbar { font-size: 14px; }\n' > "$t/elsewhere/work/chrome/userChrome.css"
+printf 'user_pref("browser.startup.page", 3);\n' > "$t/elsewhere/work/user.js"
+printf '#!/bin/sh\n' > "$BIN/chromium"; printf '#!/bin/sh\n' > "$BIN/firefox"; chmod +x "$BIN/chromium" "$BIN/firefox"
+said=$(talk '' takumi theme browsers)
+want=$(printf '%s\n' "note Colouring Chromium…" "done The browsers wear the theme: Chromium now, Firefox from its next start" "rc=0")
+check "both browsers, as a conversation" '[[ "$said" == "$want" ]]'
+p1="$HOME/.mozilla/firefox/abcd.default-release"; p2="$t/elsewhere/work"
+check "each Firefox profile may read a stylesheet, and imports the theme's" 'for p in "$p1" "$p2"; do grep -q "^user_pref(\"toolkit.legacyUserProfileCustomizations.stylesheets\", true);" "$p/user.js" && [[ "$(head -n 1 "$p/chrome/userChrome.css")" == "@import \"takumi.css\";"* && "$(readlink "$p/chrome/takumi.css")" == "$HOME/.local/state/takumi/look/firefox-userChrome.css" ]] || exit 1; done'
+check "your own Firefox lines are kept" 'grep -qx "#urlbar { font-size: 14px; }" "$p2/chrome/userChrome.css" && grep -qx "user_pref(\"browser.startup.page\", 3);" "$p2/user.js"'
+check "Chromium's colour: a policy only root writes, from the theme's accent" '[[ "$(cat "$TAKUMI_ETC/chromium/policies/managed/takumi-theme.json")" == "{\"BrowserThemeColor\": \"#5ad7ff\"}" ]] && grep -q "^sudo -A sh -c" "$FAKE/calls"'
+check "Chromium dark like the theme" 'grep -qx -- "--force-dark-mode" "$HOME/.config/chromium-flags.conf"'
+talk '' takumi theme browsers >/dev/null
+check "again: one line each, no more" '[[ "$(grep -c "takumi theme browsers" "$p2/user.js")" == 1 && "$(grep -c "^@import \"takumi.css\"" "$p2/chrome/userChrome.css")" == 1 && "$(grep -c -- "--force-dark-mode" "$HOME/.config/chromium-flags.conf")" == 1 ]]'
+mkdir -p "$HOME/.mozilla/firefox/newp.later"; printf '[Profile2]\nIsRelative=1\nPath=newp.later\n' >> "$HOME/.mozilla/firefox/profiles.ini"
+: > "$FAKE/notices"; takumi theme set kiln >/dev/null
+check "a new theme: a profile made since is wired, Chromium light again, and told it is behind" '[[ -L "$HOME/.mozilla/firefox/newp.later/chrome/takumi.css" && ! -e "$HOME/.config/chromium-flags.conf" ]] && grep -q "^sun|Theme Kiln|Chromium keeps the last colours until you colour the browsers again|" "$FAKE/notices"'
+touch "$FAKE/refuse"; said=$(talk '' takumi theme browsers); rm -f "$FAKE/refuse"
+check "no password: Chromium keeps its colours, 3" '[[ "$said" == *"Chromium keeps its own colours: no password. Firefox wears the theme from its next start"*"rc=3" ]]'
+said=$(talk '' takumi theme browsers off)
+check "off: Takumi's lines and files go, yours stay" '[[ "$said" == *"done The browsers have their own colours again, Firefox from its next start"* && ! -e "$p2/chrome/takumi.css" && ! -e "$TAKUMI_ETC/chromium/policies/managed/takumi-theme.json" && ! -e "$HOME/.config/takumi/browsers" ]] && ! grep -q Takumi "$p2/user.js" "$p2/chrome/userChrome.css" && grep -qx "#urlbar { font-size: 14px; }" "$p2/chrome/userChrome.css" && [[ ! -e "$p1/user.js" ]]'
+rm -f "$BIN/chromium" "$BIN/firefox"; rm -rf "$HOME/.mozilla"
+none() { local c; for c in "$@"; do command -v "$c" >/dev/null && return 1; done; return 0; }
+if none firefox chromium google-chrome-stable brave brave-browser; then   # none on this computer either
+  said=$(talk '' takumi theme browsers)
+  check "no browser at all: 1" '[[ "$said" == *"No browser to colour: Firefox, Chromium, Chrome or Brave"*"rc=1" ]]'
+fi
+
+# The prompt.
+reset
+printf 'add_newline = true\n' > "$HOME/.config/starship.toml"; printf 'alias ll="ls -l"\n' > "$HOME/.bashrc"
+host_starship=no; command -v starship >/dev/null && host_starship=yes
+said=$(talk '' takumi theme prompt)
+check "on: starship fetched in the Core, then the prompt" '[[ "$said" == *"done The prompt wears the theme in new terminals"*"rc=0" ]] && { [[ $host_starship == yes ]] || { [[ "$said" == *"note Getting starship…"* ]] && grep -qx "sudo -A pacman -S --needed --noconfirm starship" "$FAKE/calls"; }; }'
+check "starship reads the look's settings; yours set aside" '[[ "$(readlink "$HOME/.config/starship.toml")" == "$HOME/.local/state/takumi/look/starship.toml" && "$(cat "$HOME/.config/starship.toml.before-takumi")" == "add_newline = true" ]] && grep -q "^accent = \"#5ad7ff\"" "$HOME/.config/starship.toml"'
+talk '' takumi theme prompt on >/dev/null
+check "bash starts it, one line, and your lines stay" '[[ "$(grep -c "starship init bash" "$HOME/.bashrc")" == 1 ]] && grep -qx "alias ll=\"ls -l\"" "$HOME/.bashrc"'
+said=$(talk '' takumi theme prompt)
+check "again, without a word: off, and yours back" '[[ "$said" == *"done The plain prompt is back in new terminals"* && "$(cat "$HOME/.config/starship.toml")" == "add_newline = true" && ! -e "$HOME/.config/takumi/prompt" ]] && ! grep -q starship "$HOME/.bashrc"'
+: > "$HOME/.zshrc"; talk '' takumi theme prompt on >/dev/null
+check "zsh, when it is used here" '[[ "$(grep -c "starship init zsh" "$HOME/.zshrc")" == 1 ]]'
+
+# Folder icons in the accent, from a fake Papirus.
+reset
+for c in blue cyan orange grey green; do
+  for s in 16x16 48x48; do
+    mkdir -p "$TAKUMI_ICONS/Papirus/$s/places"
+    : > "$TAKUMI_ICONS/Papirus/$s/places/folder-$c.svg"; : > "$TAKUMI_ICONS/Papirus/$s/places/folder-$c-documents.svg"; : > "$TAKUMI_ICONS/Papirus/$s/places/user-$c-home.svg"
+  done
+done
+: > "$TAKUMI_ICONS/Papirus/48x48/places/folder-bluegrey.svg"
+check "the nearest folder colour, among those installed" '[[ "$(lib theme_folder_colour "#5ad7ff") $(lib theme_folder_colour "#ff8a30") $(lib theme_folder_colour "#8e8e8e")" == "blue orange grey" ]]'
+takumi theme render ion day >/dev/null; takumi theme apply
+icons="$HOME/.local/share/icons/Takumi"
+check "Takumi's icon theme points at Papirus's blue folders" '[[ "$(readlink "$icons/48x48/places/folder.svg")" == "$TAKUMI_ICONS/Papirus/48x48/places/folder-blue.svg" && "$(readlink "$icons/16x16/places/folder-documents.svg")" == "$TAKUMI_ICONS/Papirus/16x16/places/folder-blue-documents.svg" && -L "$icons/48x48/places/user-home.svg" ]]'
+l=$(ls "$icons/48x48/places")
+check "never a blue-grey folder for blue" '[[ "$l" != *bluegrey* && "$l" != *grey* ]]'
+check "it inherits the rest of Papirus, dark for a dark theme, and GTK uses it" 'grep -qx "Inherits=Papirus-Dark,Papirus,hicolor" "$icons/index.theme" && grep -qx "Directories=16x16/places,48x48/places" "$icons/index.theme" && grep -qx "gsettings set org.gnome.desktop.interface icon-theme Takumi" "$FAKE/calls"'
+touch -t 202001010000 "$icons/index.theme"; before=$(ls -l "$icons/index.theme"); takumi theme apply
+check "the same colour again: nothing rewritten" '[[ "$(ls -l "$icons/index.theme")" == "$before" ]]'
+echo "'Yaru'" > "$FAKE/icon-theme"; : > "$FAKE/calls"; takumi theme set kiln >/dev/null
+check "a light theme, and an icon theme you chose yourself is left alone" 'grep -qx "Inherits=Papirus-Light,Papirus,hicolor" "$icons/index.theme" && ! grep -q "icon-theme Takumi" "$FAKE/calls"'
+rm -rf "$TAKUMI_ICONS" "$icons"
+check "no Papirus: no icon theme, and the theme still applies" 'takumi theme apply && [[ ! -e "$icons" ]]'
+
+# About this computer, from a fake /sys and /proc.
+reset
+export TAKUMI_SYSFS=$t/sys TAKUMI_PROCFS=$t/proc
+mkdir -p "$t/about" "$t/sys/class/dmi/id" "$t/proc"
+printf 'Framework\n' > "$t/sys/class/dmi/id/sys_vendor"; printf 'Laptop 13 (AMD Ryzen 7040Series)\n' > "$t/sys/class/dmi/id/product_name"
+printf 'A7\n' > "$t/sys/class/dmi/id/product_version"
+printf 'processor\t: 0\nmodel name\t: AMD Ryzen 7 7840U w/ Radeon  780M Graphics\ncpu cores\t: 8\nprocessor\t: 1\n' > "$t/proc/cpuinfo"
+printf 'MemTotal:       32000000 kB\nMemFree:  100 kB\n' > "$t/proc/meminfo"
+printf '11520.55 40000.00\n' > "$t/proc/uptime"
+printf '#!/bin/sh\ncase "$*" in *OPTIONS*) echo "rw,relatime,compress=zstd:1,subvol=/@rooms/20261108-093000" ;; *SOURCE*) echo "/dev/mapper/root[/@rooms/20261108-093000]" ;; esac\n' > "$t/about/findmnt"
+printf '#!/bin/sh\nprintf "root crypt 999653638144\\nnvme0n1p2 part 999653638144\\nnvme0n1 disk 1000204886016\\n"\n' > "$t/about/lsblk"
+printf '#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/mapper/root 976224256 573880000 402343750 59%% /\\n"\n' > "$t/about/df"
+printf '#!/bin/sh\ncat "$FAKE/lspci"\n' > "$t/about/lspci"
+printf '#!/bin/sh\ncase "$1" in -r) echo 6.17.7-arch1-1 ;; *) echo x86_64 ;; esac\n' > "$t/about/uname"
+chmod +x "$t/about"/*
+printf '%s\n' 'c1:00.0 "VGA compatible controller" "Advanced Micro Devices, Inc. [AMD/ATI]" "Phoenix1" -rc4 -p00 "Framework Computer Inc." "Device 0005"' > "$FAKE/lspci"
+about() { PATH="$t/about:$PATH" takumi about "$@"; }
+want=$(printf '%-10s %s\n' Takumi "$(cat version), room from 8 Nov 2026, 09:30" Computer "Framework Laptop 13 (AMD Ryzen 7040Series)" Processor "AMD Ryzen 7 7840U, 8 cores" \
+  Memory "32 GB" Disk "412 GB free of 1 TB" Graphics "AMD Phoenix1" Kernel "Linux 6.17.7-arch1-1" Up "3 h 12 min")
+check "one fact a line: version and room, model, processor, memory, disk, graphics, kernel, time up" '[[ "$(about)" == "$want" ]]'
+check "--json: the same facts" '[[ "$(about --json | jq -r "[.takumi, .computer, .memory, .disk, .up] | join(\"|\")")" == "$(cat version), room from 8 Nov 2026, 09:30|Framework Laptop 13 (AMD Ryzen 7040Series)|32 GB|412 GB free of 1 TB|3 h 12 min" ]]'
+said=$(TAKUMI_CORE=1 PATH="$t/about:$PATH" takumi about)
+check "in the Core: a card, the model as its title, three lines and every fact" '[[ "$said" == "card {"* ]] && [[ "$(jq -r ".kicker + \"|\" + .title + \"|\" + (.detail | split(\"\n\") | length | tostring) + \"|\" + (.facts | length | tostring)" <<< "${said#card }")" == "About this computer|Framework Laptop 13 (AMD Ryzen 7040Series)|3|8" ]] && [[ "$(jq -r ".detail" <<< "${said#card }" | sed -n 2p)" == "AMD Ryzen 7 7840U, 8 cores · 32 GB memory · AMD Phoenix1" ]]'
+printf 'LENOVO\n' > "$t/sys/class/dmi/id/sys_vendor"; printf '21CBCTO1WW\n' > "$t/sys/class/dmi/id/product_name"; printf 'ThinkPad X1 Carbon Gen 10\n' > "$t/sys/class/dmi/id/product_version"
+printf '%s\n' '01:00.0 "3D controller" "NVIDIA Corporation" "AD107M [GeForce RTX 4060 Max-Q / Mobile]" -ra1 -p00 "Lenovo" "Device 3b41"' '00:02.0 "VGA compatible controller" "Intel Corporation" "Alder Lake-P GT2 [Iris Xe Graphics]" -r0c -p00 "Lenovo" "Device 3b41"' > "$FAKE/lspci"
+check "Lenovo by its name, not its type code; two graphics chips by their product names" '[[ "$(about | sed -n "s/^Computer *//p")" == "Lenovo ThinkPad X1 Carbon Gen 10" && "$(about | sed -n "s/^Graphics *//p")" == "NVIDIA GeForce RTX 4060 Max-Q / Mobile and Intel Iris Xe Graphics" ]]'
+printf 'To Be Filled By O.E.M.\n' > "$t/sys/class/dmi/id/sys_vendor"; printf 'To Be Filled By O.E.M.\n' > "$t/sys/class/dmi/id/product_name"; : > "$t/sys/class/dmi/id/product_version"
+printf '#!/bin/sh\necho rw,relatime\n' > "$t/about/findmnt"
+check "placeholders in the firmware, and no rooms: said plainly" '[[ "$(about | sed -n "s/^Computer *//p")" == "This computer" && "$(about | sed -n "s/^Takumi *//p")" == "$(cat version), updates happen in place" ]]'
+check "usage: 2" '[[ "$(run takumi about --everything)" == 2\|* ]]'
+unset TAKUMI_SYSFS TAKUMI_PROCFS
+
+echo "   $checks look checks against fake tools"
+exit $status

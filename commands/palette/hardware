@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for this computer's hardware as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "computer", "hardware", "drivers", "graphics", "camera", "fingerprint", "nvidia"…: what is in this computer and
+# whether each part works (docs/hardware.md). Enter on a part shows a card that says it in a sentence; when
+# Takumi has a fix this system lacks, one row offers the update that sets it up. A Wi-Fi network, a sound output
+# or a Bluetooth device stays with its own provider ("wifi" alone lists networks, "wifi card" the chip), and the
+# computer's facts (version, disk, kernel) are takumi about's.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/hardware.sh" ]] && { . "$l/hardware.sh"; . "$l/palette.sh"; break; }; done
+declare -F hw_rows >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+q=${1:-}
+palette_short "$q" && exit 0
+ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
+topic=no
+read -r -a words <<< "$ql"
+for w in ${words[@]+"${words[@]}"}; do
+  (( ${#w} >= 3 )) || continue
+  for t in hardware computer laptop desktop parts driver drivers graphics gpu nvidia geforce radeon intel amd \
+           camera webcam fingerprint touchpad trackpad processor cpu chip card adapter broadcom realtek mediatek marvell; do
+    [[ "$t" == "$w"* ]] && topic=yes
+  done
+done
+[[ $topic == yes ]] || exit 0
+# Finding the parts takes a moment (lspci, lsusb, the kernel's messages), so the rows are kept for a minute, and
+# made again at once when an apply has written the record since.
+cache=""; rows=""
+[[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR:-}" ]] && cache="$XDG_RUNTIME_DIR/takumi-hardware-rows.jsonl"
+if [[ -n "$cache" && -s "$cache" ]] && ! [[ "$(hw_record)" -nt "$cache" ]]; then
+  age=$(( $(date +%s) - $(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache") ))
+  (( age < 60 )) && rows=$(cat "$cache")
+fi
+if [[ -z "$rows" ]]; then
+  rows=$(hw_rows 2>/dev/null || true)
+  [[ -n "$cache" && -n "$rows" ]] && printf '%s\n' "$rows" > "$cache"
+fi
+[[ -n "$rows" ]] || exit 0
+printf '%s\n' "$rows" | jq -c '{id, title, subtitle, glyph, kind: "Hardware", keywords, steady: true, score}
+  + (if .run then {run, converse: true, risk: 2} else {card: true, run: ["takumi", "hardware", "--card", .id]} end)' | palette_filter "$q"

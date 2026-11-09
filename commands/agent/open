@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Open a coding agent in a terminal, in ~/Work: Claude Code, Codex or OpenCode
+usage: <claude|codex|opencode>
+example: takumi agent open claude
+risk: 1
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; . "$l/core.sh"; break; }; done
+declare -F apps_agent_bin >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh, docs/development.md). An agent that is not here yet is installed first, after
+# asking: Claude Code from Anthropic's installer, in your home folder; Codex and OpenCode from Arch's
+# packages. From the Core it opens in a terminal window (your terminal, takumi app default terminal); typed
+# at a terminal, it runs right there. It starts in ~/Work, so what it makes lands in one folder. Each agent
+# signs you in the first time it runs. Exit status: 0 · 2 not an agent · 3 an answer was needed and none
+# came, or no · 1 anything else.
+a=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+case "$a" in claude-code | claudecode) a=claude ;; open-code) a=opencode ;; esac
+apps_agent_ok "$a" || core_fail 2 "usage: takumi agent open <claude|codex|opencode>"
+label=$(apps_agent_label "$a")
+log="$apps_state/agents.log"; mkdir -p "$apps_state"
+run() { if core_in_core; then "$@" >> "$log" 2>&1; else "$@"; fi; }
+
+if ! bin=$(apps_agent_bin "$a"); then
+  if [[ $a == claude ]]; then ask="$label is not on this computer. Install it from Anthropic? It goes in your home folder; no password needed."
+  else ask="$label is not on this computer. Install it from Arch's packages? It needs your password."; fi
+  core_confirm "$ask" || core_fail 3 "Nothing changed"
+  core_note "Installing $label…"
+  run apps_agent_install "$a" || core_fail 1 "$label did not install. What happened is in $log"
+  bin=$(apps_agent_bin "$a") || core_fail 1 "$label did not install. What happened is in $log"
+fi
+work="$HOME/Work"; mkdir -p "$work"
+if ! core_in_core && [[ -t 0 && -t 1 ]]; then cd "$work"; exec "$bin"; fi
+if command -v setsid >/dev/null; then (cd "$work" && exec setsid takumi app open terminal "$bin") </dev/null >/dev/null 2>&1 &
+else (cd "$work" && exec takumi app open terminal "$bin") </dev/null >/dev/null 2>&1 & fi
+core_done "$label is open in ~/Work"

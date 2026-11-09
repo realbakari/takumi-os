@@ -1,0 +1,15 @@
+# Laptop sound through Intel's audio processor (Smart Sound Technology): it needs Sound Open Firmware, and
+# ALSA's use-case profiles name its speakers, headphones and microphones.
+# SOF: https://thesofproject.github.io/latest/  ALSA UCM: https://github.com/alsa-project/alsa-ucm-conf
+title = "Laptop sound"
+part = "sound"
+
+[match]
+pci = ["8086:*"]
+pci_class = ["040?"]
+laptop = true
+arch = ["x86_64"]
+
+[apply]
+packages = ["sof-firmware", "alsa-ucm-conf"]
+note = "Most laptops play sound through a small audio processor that needs its own firmware, and profiles that name the speakers and microphones; without them there is no sound."

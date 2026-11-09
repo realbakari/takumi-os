@@ -1,0 +1,11 @@
+[Unit]
+Description=Takumi shell (the Sky, the Core and the Lock on Quickshell)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# The shell is part of the desktop, not one of your apps: systemd-oomd never picks it (docs/tuning.md).
+Slice=session.slice
+ExecStart=/usr/bin/qs -c takumi
+Restart=on-failure
+RestartSec=1

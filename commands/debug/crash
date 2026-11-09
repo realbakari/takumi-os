@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Show why an app quit unexpectedly: what stopped, when, and where in its code
+usage: [pid|latest] [--copy]
+example: takumi debug crash
+example: takumi debug crash 4242 --copy
+risk: 0
+title: Why an app quit
+words: crash crashed quit unexpectedly closed stopped froze report backtrace bug
+glyph: warn
+converse: yes
+ABOUT
+set -euo pipefail
+# systemd-coredump keeps a record of every program that crashes, with the top of its stack. This reads the
+# record of your latest crash, or the one with that pid: in the Core it ends on a card, at a terminal it prints
+# the whole report, and --copy puts the report on the clipboard. --follow is takumi-crash.service: it watches
+# for new records and says in the Core when one of your apps quits (docs/notifications.md).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; break; }; done
+declare -F core_card >/dev/null || { echo "takumi: lib/core.sh is missing" >&2; exit 1; }
+command -v jq >/dev/null || { echo "takumi: jq is missing" >&2; exit 1; }
+uid=$(id -u)
+
+# The app's own name and icon, from its .desktop file: by the systemd unit it ran in
+# (app-gnome-org.gnome.Nautilus-1234.scope), else by its program in Exec= or TryExec=.
+app_dirs() {
+  if [[ -n "${TAKUMI_APPLICATIONS:-}" ]]; then tr ':' '\n' <<< "$TAKUMI_APPLICATIONS"; return; fi
+  printf '%s\n' "$HOME/.local/share/applications" /usr/share/applications \
+    "$HOME/.local/share/flatpak/exports/share/applications" /var/lib/flatpak/exports/share/applications
+}
+app_entry() {  # <exe> <unit>: prints the .desktop file, or nothing
+  local exe=$1 unit=$2 base id d f rest
+  if [[ "$unit" == app-* ]]; then
+    rest=$(sed -e 's/^app-//' -e 's/@[^.]*\.service$//' -e 's/\.service$//' -e 's/-[0-9]*\.scope$//' -e 's/\.scope$//' -e 's/\\x2d/-/g' <<< "$unit")
+    for id in "$rest" "${rest#*-}"; do
+      while IFS= read -r d; do [[ -f "$d/$id.desktop" ]] && { printf '%s\n' "$d/$id.desktop"; return 0; }; done < <(app_dirs)
+    done
+  fi
+  base=${exe##*/}
+  [[ -n "$base" ]] || return 0
+  while IFS= read -r d; do
+    for f in "$d"/*.desktop; do
+      [[ -f "$f" ]] || continue
+      if grep -qE "^(TryExec|Exec)=([^ ]*/)?$base( |$)" "$f"; then printf '%s\n' "$f"; return 0; fi
+      if grep -qE "^Exec=.* --command=$base( |$)" "$f"; then printf '%s\n' "$f"; return 0; fi
+    done
+  done < <(app_dirs)
+  return 0
+}
+desktop_key() { awk -v k="$1" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' "$2"; }
+
+# Plain words for the signal that stopped it.
+signal_words() {
+  case "$1" in
+    SEGV) echo "It tried to use memory it does not have" ;;
+    ABRT) echo "It found a problem it could not get past and stopped itself" ;;
+    BUS)  echo "It reached for memory that was not there" ;;
+    FPE)  echo "A calculation went wrong, such as a division by zero" ;;
+    ILL)  echo "It ran an instruction this processor does not know" ;;
+    TRAP) echo "It stopped at a check its makers put in" ;;
+    SYS)  echo "It asked the system for something it is not allowed" ;;
+    QUIT) echo "It was told to quit and leave a report" ;;
+    XCPU|XFSZ) echo "It went past a limit on time or file size" ;;
+    *)    echo "It stopped by itself" ;;
+  esac
+}
+
+# "Mon 2026-11-09 14:02:11 CET (2min ago)" -> "today at 14:02".
+when_words() {
+  local d t y m day today yday s months
+  read -r _ d t _ <<< "$1"
+  [[ "$d" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "recently"; return; }
+  t=${t%:*}
+  today=$(date +%F); yday=$(date -d yesterday +%F 2>/dev/null || date -v-1d +%F 2>/dev/null || true)
+  if [[ "$d" == "$today" ]]; then echo "today at $t"; return; fi
+  if [[ "$d" == "$yday" ]]; then echo "yesterday at $t"; return; fi
+  y=${d%%-*}; m=${d#*-}; m=${m%-*}; day=${d##*-}
+  months=(January February March April May June July August September October November December)
+  s="on $((10#$day)) ${months[$((10#$m - 1))]}"
+  [[ "$y" == "$(date +%Y)" ]] || s+=" $y"
+  echo "$s at $t"
+}
+
+# A field of `coredumpctl info` ("Signal: 11 (SEGV)"), from the lines above its message.
+field() { awk -v k="$1" '/^ *Message: / { exit } { i = index($0, ": "); if (!i) next; key = substr($0, 1, i - 1); sub(/^ +/, "", key); if (key == k) { print substr($0, i + 2); exit } }' <<< "$info"; }
+# The crashing thread's frames, "name (library + 0x1f2)", from the first stack trace in the message.
+frames() { awk '/^ *Message: / { on = 1; next } on && /Stack trace of thread/ { if (seen++) exit; next } on && seen && /^ *#[0-9]+ / { sub(/^ *#[0-9]+ +(0x[0-9a-f]+ )?/, ""); print }' <<< "$info"; }
+# "name (/usr/lib/libgtk-4.so.1 + 0x2c4f1a)" -> "name in libgtk-4.so.1", and "somewhere in" for no name.
+frame_words() { sed -E -e 's/ \+ 0x[0-9a-f]+\)$/)/' -e 's/^n\/a \((.*)\)$/somewhere in \1/' -e 's/^([^ ]+) \(([^()]*)\)$/\1 in \2/' -e 's/ in [^ ]*\/([^/ ]+)$/ in \1/'; }
+# Where it stopped, in its own code: the first frames past the C library's own way of stopping a program.
+top_frames() { frames | grep -vE '^(raise|abort|gsignal|__GI_raise|__GI_abort|__pthread_kill[a-z_]*|pthread_kill|__libc_message[a-z_]*|__assert_fail[a-z_]*|__fortify_fail|__stack_chk_fail|__libc_start[a-z_]*|_start) ' | head -n 2 | frame_words || true; }
+
+# Reads the record into $info and the words about it. Returns 1 when there is none.
+read_record() {  # <pid|latest>
+  local match=() sig
+  [[ "$1" == latest ]] || match=("COREDUMP_PID=$1")
+  info=$(LC_ALL=C coredumpctl --no-pager -q info -1 "COREDUMP_UID=$uid" ${match[@]+"${match[@]}"} 2>/dev/null) || return 1
+  [[ -n "$info" ]] || return 1
+  pid=$(field PID); comm=${pid#* (}; comm=${comm%)}; pid=${pid%% *}
+  sig=$(field Signal); signame=${sig#*(}; signame=${signame%)}; signum=${sig%% *}
+  stamp=$(field Timestamp); cmdline=$(field "Command Line"); exe=$(field Executable)
+  unit=$(field "User Unit"); [[ -n "$unit" ]] || unit=$(field Unit)
+  entry=$(app_entry "$exe" "$unit")
+  name=""; [[ -n "$entry" ]] && name=$(desktop_key Name "$entry")
+  [[ -n "$name" ]] || name=${comm:-${exe##*/}}
+  when=$(when_words "$stamp"); why=$(signal_words "$signame")
+  return 0
+}
+
+# The whole report, for a bug report or someone helping.
+report() {
+  local package="" kernel all
+  if command -v pacman >/dev/null; then package=$(LC_ALL=C pacman -Qo "$exe" 2>/dev/null | sed -n 's/.* is owned by //p' || true); fi
+  kernel="$(uname -sr) ($(uname -m))"
+  all=$(frames | awk 'NR <= 16 { printf "#%d %s\n", NR - 1, $0 }')
+  printf '%s quit unexpectedly %s.\n%s (signal %s, %s).\n\n' "$name" "$when" "$why" "$signum" "$signame"
+  printf 'Program: %s\n' "${cmdline:-$exe}"
+  [[ -n "$package" ]] && printf 'Package: %s\n' "$package"
+  printf 'Process: %s\nTime: %s\nSystem: Takumi %s, %s\n\n' "$pid" "$stamp" "$(takumi --version 2>/dev/null || echo dev)" "$kernel"
+  if [[ -n "$all" ]]; then printf 'Where it stopped:\n%s\n\n' "$all"; else printf 'The system kept no trace of where it stopped.\n\n'; fi
+  printf 'The whole record: coredumpctl info %s\n' "$pid"
+}
+
+# The card's words: what happened, then where.
+detail() {
+  local top first second
+  top=$(top_frames); first=$(head -n 1 <<< "$top"); second=$(sed -n 2p <<< "$top")
+  if [[ -z "$first" ]]; then printf '%s. The system kept no trace of where it stopped.' "$why"
+  elif [[ -n "$second" ]]; then printf '%s. It stopped in %s, called from %s.' "$why" "$first" "$second"
+  else printf '%s. It stopped in %s.' "$why" "$first"; fi
+}
+
+# takumi-crash.service: one notice for each crash of yours, at most one a minute for the same program. The
+# notice's buttons come back from notify-send: "See why" opens the Core on this command's row, "Copy details"
+# copies the report.
+tell() {  # <pid> <exe> <comm> <unit>
+  local pid=$1 exe=$2 comm=$3 unit=$4 entry name icon="" chosen args
+  entry=$(app_entry "$exe" "$unit")
+  name=""; [[ -n "$entry" ]] && { name=$(desktop_key Name "$entry"); icon=$(desktop_key Icon "$entry"); }
+  [[ -n "$name" ]] || name=${comm:-${exe##*/}}
+  args=(--app-name="$name" --action=default="See why" --action=why="See why" --action=copy="Copy details")
+  [[ -n "$icon" ]] && args+=(--icon="$icon")
+  chosen=$(notify-send "${args[@]}" "$name quit unexpectedly" 2>/dev/null) || true
+  case "$chosen" in
+    default|why) qs -c takumi ipc --any-display call core search crash >/dev/null 2>&1 || true ;;
+    copy) takumi debug crash "$pid" --copy >/dev/null 2>&1 || true ;;
+  esac
+}
+follow() {
+  local line cuid cpid cexe ccomm cunit last="" lastat=0 now
+  command -v journalctl >/dev/null || { echo "takumi: journalctl is missing" >&2; exit 4; }
+  command -v notify-send >/dev/null || { echo "takumi: notify-send is missing (libnotify)" >&2; exit 4; }
+  while IFS= read -r line; do
+    IFS=$'\t' read -r cuid cpid cexe ccomm cunit < <(jq -r '[.COREDUMP_UID, .COREDUMP_PID, .COREDUMP_EXE, .COREDUMP_COMM, (.COREDUMP_USER_UNIT // .COREDUMP_UNIT)]
+      | map(if . == null or . == "" then "-" elif type == "string" then . else tostring end) | join("\t")' <<< "$line" 2>/dev/null) || continue
+    [[ "$cuid" == "$uid" && "$cpid" =~ ^[0-9]+$ ]] || continue
+    [[ "$cunit" == - ]] && cunit=""; [[ "$ccomm" == - ]] && ccomm=""; [[ "$cexe" == - ]] && cexe=""
+    now=$(date +%s)
+    if [[ "$cexe" == "$last" ]] && (( now - lastat < 60 )); then continue; fi
+    last=$cexe; lastat=$now
+    tell "$cpid" "$cexe" "$ccomm" "$cunit" &
+  done < <(journalctl -f -n 0 -o json --output-fields=COREDUMP_UID,COREDUMP_PID,COREDUMP_EXE,COREDUMP_COMM,COREDUMP_USER_UNIT,COREDUMP_UNIT \
+             MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1)
+  wait
+}
+
+which=latest copy=no
+for a in "$@"; do
+  case "$a" in
+    --follow) follow; exit 0 ;;
+    --copy) copy=yes ;;
+    latest) which=latest ;;
+    *[!0-9]*|"") echo "usage: takumi debug crash [pid|latest] [--copy]" >&2; exit 2 ;;
+    *) which=$a ;;
+  esac
+done
+
+if ! command -v coredumpctl >/dev/null; then core_fail 4 "This computer keeps no crash records (coredumpctl is missing)"; fi
+core_in_core && core_note "Reading the crash record…"
+if ! read_record "$which"; then
+  if [[ "$which" != latest ]]; then core_fail 3 "No crash record for $which"; fi
+  if core_in_core; then
+    core_card "$(jq -cn '{kicker: "Why an app quit", title: "Nothing has quit unexpectedly", detail: "When an app quits by itself, the Core says so, and this shows why.", secretLabel: "", secret: "", qr: []}')"
+  else echo "Nothing has quit unexpectedly"; fi
+  exit 0
+fi
+
+if [[ $copy == yes ]]; then
+  command -v wl-copy >/dev/null || core_fail 1 "Copying needs wl-copy (wl-clipboard)"
+  report | wl-copy
+  takumi notice check "Crash details copied" "$name · paste them where you ask for help" >/dev/null 2>&1 || true
+  core_done "Crash details copied"
+  exit 0
+fi
+if core_in_core; then
+  card=$(T="$name quit $when" D=$(detail) R=$(report) jq -cn '{kicker: "Why it quit", title: env.T, detail: env.D, secretLabel: "", secret: "", qr: [],
+    copyLabel: "Copy details", copy: env.R}')
+  core_card "$card"
+  exit 0
+fi
+report

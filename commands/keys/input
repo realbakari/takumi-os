@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Type Japanese, Korean or Chinese through an input method: add or remove one, switch it on or off
+usage: [add <japanese|korean|pinyin|zhuyin|cangjie> | remove <name> | toggle | state | start]
+example: takumi keys input add japanese
+example: takumi keys input remove japanese
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/keys.sh" ]] && { . "$l/core.sh"; . "$l/setup.sh"; . "$l/keys.sh"; break; }; done
+declare -F keys_input_table >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# fcitx5 with one engine per way of typing, on top of the keyboard a password is typed with
+# (docs/harmony-keys.md). Adding installs fcitx5 and the engine (the password asked in the Core), writes
+# fcitx5's profile and starts it; the session starts it at every login from then on (takumi keys input start,
+# from takumi-session). Exit status: 0 done · 2 usage · 3 the password was needed and none came · 5 not set up
+# · 1 anything else. The last line says it in words.
+usage() { echo "usage: takumi keys input [add <$(printf '%s' "$KEYS_INPUT_NAMES" | tr ' ' '|')> | remove <name> | toggle | state | start]" >&2; exit 2; }
+log="$HOME/.local/state/takumi/install.log"
+
+# The keyboard under the engines: the one a password is typed with ("us" when the settings do not answer).
+base() {
+  local pairs="us$(printf '\t')"
+  keys_load && pairs=$(keys_pairs "$KEYS_LAYOUTS" "$KEYS_VARIANTS")
+  keys_input_base "$pairs"
+}
+
+action=${1:-}
+case "$action" in
+  "")
+    engines=$(keys_input_engines)
+    if [[ -z "$engines" ]]; then echo "No input method. Add one: takumi keys input add <$(printf '%s' "$KEYS_INPUT_NAMES" | tr ' ' '|')>"; exit 0; fi
+    on=""; keys_input_running && [[ "$(fcitx5-remote 2>/dev/null || true)" == 2 ]] && on=$(fcitx5-remote -n 2>/dev/null || true)
+    for e in $engines; do
+      title=$(keys_input_get "$e" 5); [[ -n "$title" ]] || title=$e
+      printf '%s %s\n' "$([[ "$e" == "$on" ]] && echo '*' || echo ' ')" "$title"
+    done
+    exit 0 ;;
+  state)
+    # One JSON line for the Core's mark: whether fcitx5 runs, the engine it would type with, whether that engine
+    # is on now, and its mark (あ, 한, 拼, 注, 倉).
+    engines=$(keys_input_engines); running=no; st=0; im=""
+    if keys_input_running; then running=yes; st=$(fcitx5-remote 2>/dev/null || echo 0); im=$(fcitx5-remote -n 2>/dev/null || true); fi
+    engine=$im
+    [[ "$st" == 2 && -n "$im" ]] || engine=$(awk -F '=' '$1 == "DefaultIM" { print $2; exit }' "$keys_input_dir/profile" 2>/dev/null || true)
+    [[ -z "$engines" || "$engine" == keyboard-* || -z "$engine" ]] && engine=$(head -n 1 <<< "$engines")
+    E=$engine R=$running S=$st SET=$engines M=$(keys_input_get "$engine" 4) T=$(keys_input_get "$engine" 5) jq -cn '
+      {setUp: (env.SET | split("\n") | map(select(length > 0))), running: (env.R == "yes"), engine: env.E,
+       on: (env.R == "yes" and env.S == "2"), mark: (if env.R == "yes" and env.S == "2" then env.M else "" end), name: env.T}'
+    exit 0 ;;
+  toggle)
+    keys_input_running || core_fail 1 "No input method is running"
+    fcitx5-remote -t >/dev/null 2>&1 || core_fail 1 "The input method did not answer"
+    exit 0 ;;
+  start) keys_input_start; exit 0 ;;
+  add|remove) ;;
+  *) usage ;;
+esac
+
+name=${2:-}
+[[ " $KEYS_INPUT_NAMES " == *" $name "* && -n "$name" ]] || usage
+engine=$(keys_input_get "$name" 2); package=$(keys_input_get "$name" 3); title=$(keys_input_get "$name" 5)
+what=$(keys_input_get "$name" 6); switch=$(keys_input_get "$name" 7)
+engines=$(keys_input_engines)
+has() { grep -qxF "$engine" <<< "$engines"; }
+
+if [[ $action == remove ]]; then
+  has || core_fail 5 "$title typing is not set up"
+  keys_input_stop
+  rest=$(grep -vxF "$engine" <<< "$engines" || true)
+  keys_input_write "$(base)" "$rest" "$(head -n 1 <<< "$rest")"
+  keys_input_start
+  if [[ -n "$rest" ]]; then core_done "Stopped $title typing."
+  else core_done "Stopped $title typing. Its software stays installed; nothing runs while no input method is set up."; fi
+  exit 0
+fi
+
+# Add: what is missing of fcitx5, its doors into GTK and Qt apps, and the engine, from the package repositories.
+missing=""
+for p in $KEYS_INPUT_BASE $package; do pacman -Q "$p" >/dev/null 2>&1 || missing="$missing $p"; done
+if [[ -n "$missing" ]]; then
+  admin() { core_sudo "Adding $title typing needs your password" "$@"; }
+  admin -v 2>/dev/null || core_fail 3 "Nothing changed: the password was not given"
+  core_note "Getting $title typing…"
+  mkdir -p "${log%/*}"
+  # shellcheck disable=SC2086
+  admin pacman -S --needed --noconfirm $missing >> "$log" 2>&1 \
+    || core_fail 1 "$title typing did not install. Is the computer online? The details: $log"   # /usr (pacman's packages)
+fi
+command -v fcitx5 >/dev/null || core_fail 1 "fcitx5 is not installed"
+if has; then
+  keys_input_start
+  core_done "$title typing is already set up. $switch switches between it and your keyboard."
+  exit 0
+fi
+keys_input_stop
+keys_input_config
+keys_input_write "$(base)" "$(printf '%s\n%s' "$engines" "$engine" | sed '/^$/d')" "$engine"
+keys_input_start
+core_done "$title typing is ready, with $what. $switch switches between it and your keyboard."

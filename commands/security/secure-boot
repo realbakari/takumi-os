@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Secure Boot in words; with the firmware ready for keys, this computer's own keys, Microsoft's kept, and Takumi signed with them
+risk: 2
+sudo: yes
+converse: yes
+words: secure boot uefi firmware keys signed signature sbctl security
+ABOUT
+#
+# A conversation (lib/core.sh). Reads Secure Boot's state from the firmware's own variables. On: says so. Ready
+# for keys (setup mode): asks once, then, as root, makes this computer's keys with sbctl, signs systemd-boot,
+# fwupd's UEFI program and every room's kernel, and enrolls the keys with Microsoft's beside them, so Windows and
+# graphics cards whose own programs Microsoft signed still start. Off, with the maker's keys: says how to put the
+# firmware in setup mode and offers to restart into its settings. Each new room's kernel is signed as the room is
+# made (lib/rooms.sh), and sbctl's pacman hook signs each new systemd-boot. Exit codes: 0 done or nothing to do,
+# 1 not possible here or cancelled. See docs/security.md.
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do
+  [[ -f "$l/security.sh" ]] && { . "$l/core.sh"; . "$l/rooms.sh"; . "$l/disk.sh"; . "$l/security.sh"; break; }
+done
+declare -F security_boot_state >/dev/null && declare -F core_note >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# As root (core_sudo, below). Exit 5: the firmware is not waiting for keys. 6: it refused them.
+if [[ "${1:-}" == --root ]]; then
+  [[ "$(id -u)" == 0 && "${2:-}" == enroll ]] || exit 1
+  command -v sbctl >/dev/null || exit 1
+  [[ "$(security_boot_state)" == setup ]] || exit 5
+  esp=$(security_esp) || exit 1
+  boot=$(rooms_esp) || boot=$esp
+  security_own_keys || sbctl create-keys >/dev/null || exit 1
+  security_sign_all "$esp" "$boot" || exit 1
+  sbctl enroll-keys --microsoft --ignore-immutable >/dev/null || exit 6
+  security_fwupd_own_keys || exit 1
+  systemctl try-restart fwupd.service >/dev/null 2>&1 || true
+  exit 0
+fi
+
+self=$(readlink -f "$0")
+command -v sbctl >/dev/null || core_fail 1 "Secure Boot needs sbctl, which is not installed."
+case "$(security_boot_state)" in
+  none) core_fail 1 "This computer starts the old way (BIOS), which has no Secure Boot." ;;
+  unsupported) core_fail 1 "This computer's firmware has no Secure Boot." ;;
+  on)
+    core_done "Secure Boot is on: this computer starts only what its own keys signed, and Takumi signs every new system"
+    exit 0 ;;
+  off)
+    core_note "In the firmware settings, under Secure Boot, choose Reset to Setup Mode or Clear All Keys, keep Secure Boot on, then come back here"
+    core_confirm "Restart into the firmware settings now?" || core_fail 1 "Nothing changed. Secure Boot is off."
+    systemctl reboot --firmware-setup >/dev/null 2>&1 \
+      || core_fail 1 "This computer cannot be sent to its firmware settings. Restart and press its setup key, often F2, F10, F12 or Delete."
+    core_done "Restarting into the firmware settings"
+    exit 0 ;;
+esac
+
+# The firmware has forgotten its keys and takes new ones.
+if security_windows; then core_note "The firmware is ready for new keys. Windows keeps starting; if it uses BitLocker, it asks for its recovery key once"
+else core_note "The firmware is ready for this computer's own keys. Microsoft's stay, so graphics cards that need them keep working"; fi
+core_confirm "Make this computer's own keys and sign Takumi with them?" || core_fail 1 "Nothing changed."
+core_note "Making the keys and signing Takumi…"
+rc=0
+core_sudo "Setting up Secure Boot needs your password" "$self" --root enroll >/dev/null 2>&1 || rc=$?   # the firmware's PK, KEK and db; systemd-boot and each room's kernel on the boot partitions; /etc/fwupd/fwupd.conf
+case "$rc" in
+  0) ;;
+  5) core_fail 1 "The firmware is no longer waiting for keys. Nothing changed." ;;
+  6) core_fail 1 "The firmware refused the keys. Takumi is signed, but Secure Boot stays off." ;;
+  *) core_fail 1 "Secure Boot was not set up." ;;
+esac
+after=""
+disk_opens_by_itself && after=" The disk asks for your password once; then turn on Open the disk by itself again."
+if core_confirm "The keys are in place. Restart now?"; then
+  systemctl reboot >/dev/null 2>&1 || true
+  core_done "Restarting.$after"
+  exit 0
+fi
+core_done "The keys are in place. Secure Boot is on from the next start; if the firmware still says it is off, turn it on there.$after"

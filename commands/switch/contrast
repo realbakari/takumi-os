@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: High contrast: the clearest theme, white on black or black on white, and back to yours
+usage: [on|off]
+example: takumi switch contrast
+risk: 0
+title: High contrast
+words: accessibility a11y high contrast clearer readable vision see kuro shiro
+glyph: sun
+ABOUT
+set -euo pipefail
+# High contrast is a theme: Kuro (white on black) after a dark theme, Shiro (black on white) after a light one.
+# The theme you had waits in ~/.local/state/takumi/contrast and comes back when you turn it off. Apps built on
+# GTK 4 and libadwaita take their own high-contrast look too (gsettings high-contrast) (docs/accessibility.md).
+saved="$HOME/.local/state/takumi/contrast"
+here=$(dirname "$(readlink -f "$0")")
+cur=$(head -n 1 "$HOME/.config/takumi/theme" 2>/dev/null || true)
+theme_file() {
+  local d
+  for d in "$HOME/.config/takumi/themes" /usr/share/takumi/themes "$here/../../themes"; do
+    [[ -f "$d/$1/theme.toml" ]] && { printf '%s\n' "$d/$1/theme.toml"; return 0; }
+  done
+  return 0
+}
+mode_of() {  # <theme>: light or dark, from its [meta]
+  local f; f=$(theme_file "$1")
+  [[ -n "$f" ]] || { echo dark; return; }
+  sed -n '/^\[meta\]/,/^\[/s/^mode *= *"\(.*\)"/\1/p' "$f" | head -n 1 | grep -x light || echo dark
+}
+high() { [[ "$1" == kuro || "$1" == shiro ]]; }
+apps() { if command -v gsettings >/dev/null; then gsettings set org.gnome.desktop.a11y.interface high-contrast "$1" 2>/dev/null || true; fi; }
+
+want=${1:-}
+case "$want" in
+  on|off) ;;
+  "") if high "$cur"; then want=off; else want=on; fi ;;
+  *) echo "usage: takumi switch contrast [on|off]" >&2; exit 2 ;;
+esac
+
+if [[ $want == on ]]; then
+  if ! high "$cur"; then
+    pick=kuro; [[ "$(mode_of "${cur:-ion}")" == light ]] && pick=shiro
+    mkdir -p "${saved%/*}"
+    printf '%s\n' "${cur:-ion}" > "$saved"
+    takumi theme set "$pick" >/dev/null
+  fi
+  apps true
+  takumi notice sun "High contrast on" "Super+U to turn it off" >/dev/null 2>&1 || true
+  echo "High contrast on"
+else
+  back=$(head -n 1 "$saved" 2>/dev/null || true)
+  if [[ -z "$back" ]] || high "$back" || [[ -z "$(theme_file "$back")" ]]; then back=ion; fi
+  high "$cur" && takumi theme set "$back" >/dev/null
+  rm -f "$saved"
+  apps false
+  takumi notice sun "High contrast off" >/dev/null 2>&1 || true
+  echo "High contrast off"
+fi

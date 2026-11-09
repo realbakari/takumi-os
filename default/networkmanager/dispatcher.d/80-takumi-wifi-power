@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Steady Wi-Fi on the charger: the Wi-Fi card's power saving is off while the computer is plugged in, so a call or
+# a game does not stutter, and on again on battery, where it saves power (docs/wifi.md). NetworkManager's own
+# wifi.powersave is one choice per connection, not per power source, so this sets the card itself with
+# `iw dev <card> set power_save on|off` (https://wireless.docs.kernel.org/en/latest/en/users/documentation/iw.html).
+# Run two ways, as root:
+#   by NetworkManager (NetworkManager-dispatcher(8)) with <interface> up: a card that just joined a network,
+#     since a driver may turn its power saving back on when it connects;
+#   by udev when the charger comes or goes (/usr/lib/udev/rules.d/80-takumi-wifi-power.rules), with no
+#     arguments: every Wi-Fi card.
+# Plugged in means a mains or USB power supply is online, or there is no battery at all (a desktop).
+# TAKUMI_POWER_SUPPLY and TAKUMI_NET point the tests at a fake /sys/class/power_supply and /sys/class/net.
+set -euo pipefail
+supply=${TAKUMI_POWER_SUPPLY:-/sys/class/power_supply}
+net=${TAKUMI_NET:-/sys/class/net}
+case "${2:-}" in
+  "") ifaces=$(for d in "$net"/*; do [[ -d "$d/wireless" || -d "$d/phy80211" ]] && basename "$d"; done; true) ;;
+  up) [[ -d "$net/${1:-}/wireless" || -d "$net/${1:-}/phy80211" ]] || exit 0; ifaces=$1 ;;
+  *) exit 0 ;;
+esac
+[[ -n "$ifaces" ]] || exit 0
+command -v iw >/dev/null || exit 0
+plugged=no battery=no
+for s in "$supply"/*; do
+  [[ -r "$s/type" ]] || continue
+  case "$(cat "$s/type")" in
+    Battery) battery=yes ;;
+    Mains|USB) [[ "$(cat "$s/online" 2>/dev/null || echo 0)" == 1 ]] && plugged=yes ;;
+  esac
+done
+[[ $battery == no ]] && plugged=yes
+if [[ $plugged == yes ]]; then want=off; else want=on; fi
+for i in $ifaces; do iw dev "$i" set power_save "$want" >/dev/null 2>&1 || true; done
+exit 0

@@ -1,0 +1,34 @@
+# Kanagawa Wave: Hokusai's wave: ink, foam and indigo
+# Colours after Kanagawa by rebelot (https://github.com/rebelot/kanagawa.nvim); phases by Takumi.
+
+[meta]
+name = "kanagawa"
+mode = "dark"
+title = "Kanagawa Wave"
+about = "Hokusai's wave: ink, foam and indigo"
+credit = "Kanagawa by rebelot (https://github.com/rebelot/kanagawa.nvim)"
+
+[palette]
+accent     = "#7e9cd8"
+background = "#1f1f28"
+surface    = "#2a2a37"
+foreground = "#dcd7ba"
+muted      = "#727169"
+red        = "#e46876"
+yellow     = "#e6c384"
+green      = "#98bb6c"
+cyan       = "#7aa89f"
+blue       = "#7e9cd8"
+magenta    = "#957fb8"
+
+[phase.dawn]
+accent     = "#ffa066"
+
+[phase.dusk]
+accent     = "#ff9e3b"
+
+[phase.night]
+accent     = "#587381"
+background = "#14141a"
+surface    = "#1d1d26"
+foreground = "#c5c1a8"

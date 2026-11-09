@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Start a stopped printer again, so the documents waiting for it print
+usage: <name>
+example: takumi printer resume "HP LaserJet M110w"
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/printer.sh" ]] && { . "$l/printer.sh"; . "$l/core.sh"; break; }; done
+declare -F printer_queues >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# CUPS stops a printer that failed (one set up by another tool, without "keep trying"), and then nothing
+# prints until it is started again. Exit status: 0 · 3 no password came · 5 no such printer · 6 this account
+# may not · 1 anything else.
+name=${1:-}
+[[ -n "$name" ]] || { echo "usage: takumi printer resume <name>" >&2; exit 2; }
+command -v cupsenable >/dev/null || core_fail 1 "Printing needs CUPS (the cups package)"
+q=$(printer_find "$name")
+[[ -n "$q" ]] || core_fail 5 "No printer called $name"
+desc=$(printer_queues | awk -F "$printer_sep" -v q="$q" '$1 == q { print $2; exit }')
+label=$(printer_label "$q" "$desc")
+why="Starting a printer again needs your password"
+for step in cupsenable cupsaccept; do
+  if ! out=$(printer_admin "$why" "$step" "$q"); then
+    printer_unanswered "$out" && core_fail 3 "Without the password, $label was not started again"
+    printer_refused "$out" && core_fail 6 "Only an administrator of this computer can start printers again"
+    core_fail 1 "Could not start $label again: $(printer_said "$out")"
+  fi
+done
+core_done "$label is started again"

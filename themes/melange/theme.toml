@@ -1,0 +1,34 @@
+# Melange: warm, earthy, easy on the eyes
+# Colours after Melange by savq (https://github.com/savq/melange-nvim); phases by Takumi.
+
+[meta]
+name = "melange"
+mode = "dark"
+title = "Melange"
+about = "warm, earthy, easy on the eyes"
+credit = "Melange by savq (https://github.com/savq/melange-nvim)"
+
+[palette]
+accent     = "#e49b5d"
+background = "#292522"
+surface    = "#34302c"
+foreground = "#ece1d7"
+muted      = "#867462"
+red        = "#d47766"
+yellow     = "#ebc06d"
+green      = "#85b695"
+cyan       = "#89b3b6"
+blue       = "#a3a9ce"
+magenta    = "#cf9bc2"
+
+[phase.dawn]
+accent     = "#ebc06d"
+
+[phase.dusk]
+accent     = "#d47766"
+
+[phase.night]
+accent     = "#8d91af"
+background = "#1b1816"
+surface    = "#24221f"
+foreground = "#d5cac1"

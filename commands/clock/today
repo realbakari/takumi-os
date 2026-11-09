@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print what Today shows beside the month as one JSON line: the clocks, the weather, what is coming
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/weather.sh"; break; }; done
+declare -F clock_zone >/dev/null && declare -F weather_cached >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+# Read by shell/Core/Today.qml when it opens and every half minute while it is open. Offsets are seconds east
+# of UTC, so Today can tell the time anywhere from its own clock: {format, zone, city, offset, clocks: [{city,
+# zone, offset, diff}], weather: "Lisbon 19° · light rain" or "", coming: [{id, kind, at, made, text}]}.
+# Nothing here waits on the network: the weather is the kept one, asked again in the background when it is
+# older than half an hour (at most once a minute).
+now=$(clock_now); zone=$(clock_zone); here=$(clock_offset)
+clocks=$(while IFS='|' read -r city z; do
+  [[ -n "$city" && -n "$z" ]] || continue
+  off=$(clock_offset "$z")
+  C=$city Z=$z D=$(clock_diff $(( off - here ))) jq -cn --argjson o "$off" '{city: env.C, zone: env.Z, offset: $o, diff: env.D}'
+done <<< "$(clock_cities)" | jq -sc '.')
+weather=""
+if weather_shown; then
+  weather=$(weather_cached "" "$weather_stale" | jq -r '.line // empty' 2>/dev/null || true)
+  if ! weather_cached >/dev/null; then
+    mark="$clock_cache/takumi-weather-asked"; last=$(cat "$mark" 2>/dev/null || echo 0); [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    if (( now - last >= 60 )); then
+      mkdir -p "$clock_cache"; echo "$now" > "$mark"
+      if command -v setsid >/dev/null; then setsid -f takumi weather --refresh </dev/null >/dev/null 2>&1 || true
+      else (takumi weather --refresh </dev/null >/dev/null 2>&1 &); fi
+    fi
+  fi
+fi
+coming=$(remind_json | jq -sc '.')
+F=$(clock_format) Z=$zone C=$(clock_city "$zone") W=$weather jq -cn --argjson offset "$here" --argjson clocks "${clocks:-[]}" --argjson coming "${coming:-[]}" \
+  '{format: env.F, zone: env.Z, city: env.C, offset: $offset, clocks: $clocks, weather: env.W, coming: $coming}'

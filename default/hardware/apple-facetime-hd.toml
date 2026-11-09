@@ -1,0 +1,14 @@
+# The FaceTime HD camera in 2013 to 2017 Macs (14e4:1570): no driver in the kernel. A driver written by
+# volunteers is in the AUR, with the firmware it extracts from Apple's.
+# facetimehd: https://github.com/patjak/facetimehd
+title = "FaceTime HD camera"
+part = "camera"
+works = "no"
+says = "not supported yet"
+
+[match]
+pci = ["14e4:1570"]
+
+[apply]
+aur = ["facetimehd-dkms", "facetimehd-firmware"]
+note = "The FaceTime HD camera in this Mac has no driver in Linux itself. A driver written by volunteers is in the AUR (facetimehd-dkms); Takumi never installs it by itself. A USB camera works."

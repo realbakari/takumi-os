@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+# Contract checks for USB drives and memory cards (lib/drive.sh, commands/drive/*, the Palette's drive rows)
+# against a fake udisks that keeps its disks in files and answers udisksctl dump in udisks' own layout: the
+# names people read, opening (and unlocking, with the password only on a pipe), ejecting, erasing after
+# two yeses, and the watch that opens a drive as it is plugged in.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; drive checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-drives.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run TAKUMI_DRIVE_SETTLE=0
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice"   # fake takumi commands go in front of the real ones
+
+# udisks, kept in two files. drives: "object|vendor|model|media|bus|can power off|size". blocks:
+# "name|device|drive|usage|type|label|hint auto|hint system|size|table|number|mount|backing|cleartext".
+cat > "$t/bin/fake-udisks.sh" <<'FAKE'
+render() {
+  awk -F'|' -v q="'" '
+    function path(kind, n) { return n == "" ? "/" : "/org/freedesktop/UDisks2/" kind "/" n }
+    FILENAME ~ /drives$/ {
+      print "/org/freedesktop/UDisks2/drives/" $1 ":"; print "  org.freedesktop.UDisks2.Drive:"
+      print "    CanPowerOff:                " $6; print "    ConnectionBus:              " $5; print "    Media:                      " $4
+      print "    Model:                      " $3; print "    Removable:                  true"; print "    Size:                       " $7
+      print "    Vendor:                     " $2; print ""; next }
+    {
+      print "/org/freedesktop/UDisks2/block_devices/" $1 ":"; print "  org.freedesktop.UDisks2.Block:"
+      print "    CryptoBackingDevice:        " q path("block_devices", $13) q; print "    Device:                     " $2
+      print "    Drive:                      " q path("drives", $3) q; print "    HintAuto:                   " $7
+      print "    HintIgnore:                 false"; print "    HintSystem:                 " $8
+      print "    IdLabel:                    " $6; print "    IdType:                     " $5; print "    IdUsage:                    " $4
+      print "    Size:                       " $9
+      print "    Symlinks:                   /dev/disk/by-id/fake-" $1; print "                                /dev/disk/by-path/fake-" $1
+      if ($4 == "filesystem") { print "  org.freedesktop.UDisks2.Filesystem:"; print "    MountPoints:                " $12; print "    Size:                       " $9 }
+      if ($4 == "crypto") { print "  org.freedesktop.UDisks2.Encrypted:"; print "    CleartextDevice:            " q path("block_devices", $14) q }
+      if ($10 != "") { print "  org.freedesktop.UDisks2.Partition:"; print "    Number:                     " $11; print "    Table:                      " q path("block_devices", $10) q }
+      print "" }' "$FAKE/drives" "$FAKE/blocks"
+}
+setb() {  # <device> <field> <value>
+  awk -F'|' -v OFS='|' -v d="$1" -v n="$2" -v v="$3" '$2 == d { $n = v } { print }' "$FAKE/blocks" > "$FAKE/b" && mv "$FAKE/b" "$FAKE/blocks"
+}
+FAKE
+cat > "$t/bin/udisksctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'udisksctl %s\n' "$*" >> "$FAKE/calls"
+. "$(dirname "$0")/fake-udisks.sh"
+case "$1" in
+  dump) render ;;
+  monitor)   # $FAKE/monitor: "add|<block line>" changes the disks, "say|<line>" is what udisks prints
+    while IFS= read -r m; do
+      case "$m" in add\|*) printf '%s\n' "${m#add|}" >> "$FAKE/blocks" ;; say\|*) printf '%s\n' "${m#say|}" ;; esac
+    done < "$FAKE/monitor" ;;
+  mount)
+    dev=$3
+    case "$(cat "$FAKE/mount-mode" 2>/dev/null || true)" in
+      notauth) echo "Error mounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.NotAuthorizedCanObtain: Not authorized to perform operation" >&2; exit 1 ;;
+      wrongfs) echo "Error mounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.Failed: Error mounting $dev at /run/media/x: wrong fs type, bad option, bad superblock" >&2; exit 1 ;;
+    esac
+    label=$(awk -F'|' -v d="$dev" '$2 == d { print $6 }' "$FAKE/blocks")
+    mp="$FAKE/media/${label:-disk}"; mkdir -p "$mp"
+    setb "$dev" 12 "$mp"; echo "Mounted $dev at $mp" ;;
+  unmount)
+    dev=$3
+    [[ -e "$FAKE/busy" ]] && { echo "Error unmounting $dev: GDBus.Error:org.freedesktop.UDisks2.Error.DeviceBusy: Error unmounting $dev: target is busy" >&2; exit 1; }
+    setb "$dev" 12 ""; echo "Unmounted $dev." ;;
+  unlock)   # unlock -b <device> --key-file <file>
+    dev=$3; key=$(cat "$5"); printf '%s\n' "$key" >> "$FAKE/keys"
+    [[ "$key" == "$(cat "$FAKE/password")" ]] || { echo "Error unlocking $dev: GDBus.Error:org.freedesktop.UDisks2.Error.Failed: Error unlocking $dev: Failed to activate device: Incorrect passphrase" >&2; exit 1; }
+    name=$(awk -F'|' -v d="$dev" '$2 == d { print $1 }' "$FAKE/blocks")
+    setb "$dev" 14 dm_2d1
+    printf 'dm_2d1|/dev/dm-1||filesystem|exfat|CARD|false|false|31000000000||||%s|\n' "$name" >> "$FAKE/blocks"
+    echo "Unlocked $dev as /dev/dm-1." ;;
+  lock) setb "$3" 14 ""; awk -F'|' '$1 != "dm_2d1"' "$FAKE/blocks" > "$FAKE/b" && mv "$FAKE/b" "$FAKE/blocks" ;;
+  power-off) : ;;
+  *) echo "fake udisksctl: unexpected: $*" >&2; exit 99 ;;
+esac
+FAKE
+cat > "$t/bin/busctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'busctl %s\n' "$*" >> "$FAKE/calls"
+[[ -e "$FAKE/busctl-fail" ]] && { echo "Call failed: Error formatting: the drive went away" >&2; exit 1; }
+case " $* " in *" CreatePartitionAndFormat "*) obj=${6##*/}; echo "o \"/org/freedesktop/UDisks2/block_devices/${obj}1\"" ;; esac
+exit 0
+FAKE
+printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/x 60000000 20000000 40000000 34%% $2"\n' > "$t/bin/df"
+printf '#!/bin/sh\nprintf "gio %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/bin/gio"
+printf '#!/bin/sh\nexit 0\n' > "$t/bin/baobab"
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+chmod +x "$t/bin/"* "$t/commands/notice/main"
+
+reset() {
+  rm -rf "${FAKE:?}"/* "${XDG_RUNTIME_DIR:?}"/*
+  # An internal disk with an encrypted system on it, a SanDisk stick that is open, a locked card in a reader, a
+  # WD drive with two parts, a blank Kingston stick, and a card reader with no card.
+  cat > "$FAKE/drives" <<'D'
+Samsung_SSD|||||false|1000204886016
+SanDisk_Cruzer|SanDisk|Cruzer Blade|thumb|usb|true|61530439680
+Reader_SD|Generic|STORAGE DEVICE|flash_sdhc|usb|true|31914983424
+WD_Elements|WD|Elements 25A2||usb|true|2000398934016
+Kingston_DT|Kingston|DataTraveler 3.0|thumb|usb|true|15997075456
+Reader_Empty|Generic|Card Reader|flash_sd|usb|true|0
+D
+  cat > "$FAKE/blocks" <<B
+nvme0n1|/dev/nvme0n1|Samsung_SSD||||false|true|1000204886016||||||
+nvme0n1p2|/dev/nvme0n1p2|Samsung_SSD|crypto|crypto_LUKS||false|true|998000000000|nvme0n1|2|||dm_2d0
+dm_2d0|/dev/dm-0||filesystem|btrfs|takumi|false|true|997980000000|||/|nvme0n1p2|
+sdb|/dev/sdb|SanDisk_Cruzer||||true|false|61530439680||||||
+sdb1|/dev/sdb1|SanDisk_Cruzer|filesystem|vfat|SANDISK|true|false|61529391104|sdb|1|$FAKE/media/SANDISK||
+sdc|/dev/sdc|Reader_SD||||true|false|31914983424||||||
+sdc1|/dev/sdc1|Reader_SD|crypto|crypto_LUKS||true|false|31913934848|sdc|1|||
+sdd|/dev/sdd|WD_Elements||||true|false|2000398934016||||||
+sdd1|/dev/sdd1|WD_Elements|filesystem|exfat|Photos|true|false|1000000000000|sdd|1|||
+sdd2|/dev/sdd2|WD_Elements|filesystem|ext4|Backup|true|false|1000397885440|sdd|2|||
+sde|/dev/sde|Kingston_DT||||true|false|15997075456||||||
+sdf|/dev/sdf|Reader_Empty||||true|false|0||||||
+B
+  mkdir -p "$FAKE/media/SANDISK/DCIM"; : > "$FAKE/media/SANDISK/Notes.txt"; : > "$FAKE/media/SANDISK/Taxes 2025.pdf"; : > "$FAKE/media/SANDISK/.hidden"
+  echo "open sesame" > "$FAKE/password"
+  : > "$FAKE/calls"; : > "$FAKE/notices"
+}
+check() { if eval "$2"; then :; else echo "drives: $1"; status=1; fi; }
+lib() { bash -c '. lib/drive.sh; "$@"' _ "$@"; }
+rows() { commands/palette/drives "$1"; }
+talk() { local answers=$1; shift; printf '%b' "$answers" | TAKUMI_CORE=1 "$@" 2>&1; echo "rc=$?"; }
+sep=$(printf '\037')
+field() { cut -d "$sep" -f "$1"; }
+
+reset
+v=$(lib drive_volumes)
+check "every volume, the internal disk's marked not removable" '[[ "$(field 1,6,12 <<< "$v" | tr "$sep\n" ",|")" == "/dev/dm-0,open,no|/dev/nvme0n1p2,unlocked,no|/dev/sdb1,open,yes|/dev/sdc1,locked,yes|/dev/sdd1,closed,yes|/dev/sdd2,closed,yes|/dev/sde,blank,yes|" ]]'
+check "names: the brand and the size on the box; a card by its kind; parts by their label" '[[ "$(grep -v nvme <<< "$v" | grep -v dm-0 | field 7 | tr "\n" "|")" == "SanDisk 64 GB|SD card 32 GB|Photos on WD 2 TB|Backup on WD 2 TB|Kingston 16 GB|" ]]'
+check "short names for sentences" '[[ "$(grep -v nvme <<< "$v" | grep -v dm-0 | field 8 | sort -u | tr "\n" "|")" == "Kingston|SanDisk|WD|the SD card|" ]]'
+check "a card reader with no card shows nothing" '! grep -q "/dev/sdf" <<< "$v"'
+check "the whole drive and whether it powers off" '[[ "$(grep "^/dev/sdb1" <<< "$v" | field 10,13)" == "/dev/sdb${sep}yes" ]]'
+check "found by device, brand, label or name, any case" '[[ "$(lib drive_find sandisk | field 1) $(lib drive_find SDB1 | field 1) $(lib drive_find photos | field 1) $(lib drive_find "kingston 16 gb" | field 1)" == "/dev/sdb1 /dev/sdb1 /dev/sdd1 /dev/sde" ]]'
+check "never the internal disk" '[[ -z "$(lib drive_find nvme0n1p2)" && -z "$(lib drive_find takumi)" ]]'
+check "sizes as a Mac says them" '[[ "$(lib drive_human 40960000000) $(lib drive_human 7340000000) $(lib drive_human 800000000)" == "41 GB 7.3 GB 800 MB" ]]'
+check "the device for a udisks object" '[[ "$(lib drive_devname dm_2d0) $(lib drive_devname sdb1)" == "/dev/dm-0 /dev/sdb1" ]]'
+
+out=$(commands/drive/main)
+check "the list: free space and where it is open" '[[ "$(head -n 1 <<< "$out")" == "SanDisk 64 GB"*"41 GB free"*"$FAKE/media/SANDISK" ]] && [[ "$out" == *"SD card 32 GB"*"locked"* && "$out" != *Samsung* ]]'
+check "the list as JSON" '[[ "$(commands/drive/main --json | jq -r "[.name, .state, (.free // \"-\" | tostring)] | join(\"/\")" | tr "\n" "|")" == "SanDisk 64 GB/open/40960000000|SD card 32 GB/locked/-|Photos on WD 2 TB/closed/-|Backup on WD 2 TB/closed/-|Kingston 16 GB/blank/-|" ]]'
+
+r=$(rows drive)
+check "rows are JSON with an id, a title and a kind" '[[ -n "$r" ]] && jq -e "select(.id and .title and .kind) | true" <<< "$r" >/dev/null'
+check "each drive, saying how it is; Enter opens it in the Core" '[[ "$(jq -r "select(.id | startswith(\"drive:/\")) | .title + \" · \" + .subtitle" <<< "$r" | tr "\n" "|")" == "SanDisk 64 GB · 41 GB free · Enter opens it|SD card 32 GB · Locked · Enter asks for its password|Photos on WD 2 TB · Not open · Enter opens it|Backup on WD 2 TB · Not open · Enter opens it|Kingston 16 GB · Nothing Takumi can read · Enter shows how to erase it for use|" ]]'
+check "a blank drive: Enter asks the Core for the ways to erase it" '[[ "$(jq -c "select(.id == \"drive:/dev/sde\") | .run[-1]" <<< "$r")" == "\"format Kingston 16 GB\"" ]]'
+check "opening is a conversation with the open command" '[[ "$(jq -c "select(.id == \"drive:/dev/sdc1\") | [.converse, .run]" <<< "$r")" == "[true,[\"takumi\",\"drive\",\"open\",\"/dev/sdc1\"]]" ]]'
+check "one eject row per drive" '[[ "$(jq -r "select(.id | startswith(\"drive-eject:\")) | .title" <<< "$r" | tr "\n" "|")" == "Eject SanDisk 64 GB|Eject SD card 32 GB|Eject WD 2 TB|Eject Kingston 16 GB|" ]]'
+check "no erase rows unless asked" '[[ "$r" != *drive-format* ]]'
+f=$(rows "format kingston")
+check "erase rows: three ways, each asking twice in the Core" '[[ "$(jq -r "select(.id | startswith(\"drive-format:\")) | [.title, .risk, .converse] | map(tostring) | join(\"/\")" <<< "$f" | tr "\n" "|")" == "Format Kingston 16 GB for Mac, Windows and Linux/2/true|Format Kingston 16 GB for cameras and TVs/2/true|Format Kingston 16 GB for Linux only/2/true|" ]] && [[ "$(jq -c "select(.title | endswith(\"TVs\")) | .run" <<< "$f")" == "[\"takumi\",\"drive\",\"format\",\"/dev/sde\",\"fat32\"]" ]]'
+check "a drive's name finds it" '[[ "$(rows photos | jq -r .title)" == "Photos on WD 2 TB" ]]'
+check "eject finds the eject rows" '[[ "$(rows eject | jq -r .title | head -n 1)" == "Eject SanDisk 64 GB" ]]'
+check "what fills the disk, when Disk Usage is there" '[[ "$(rows "disk space" | jq -r .title)" == "What fills my disk" && "$(rows "what fills my disk" | jq -r .subtitle)" == "41 GB free on this computer · Disk Usage shows what takes the space" ]]'
+check "unrelated words and short ones: nothing" '[[ -z "$(rows firefox)" && -z "$(rows us)" ]]'
+printf '%s\n' "Samsung_SSD|||||false|1000204886016" > "$FAKE/drives"; printf '%s\n' "nvme0n1|/dev/nvme0n1|Samsung_SSD||||false|true|1000204886016||||||" > "$FAKE/blocks"
+check "nothing plugged in: says so" '[[ "$(rows usb | jq -r "select(.id | startswith(\"drive:\")) | .title" | head -n 1)" == "No drive plugged in" ]]'
+
+# Open, unlock, eject.
+reset
+said=$(talk '' commands/drive/open photos)
+check "open: mounted as you, shown in Files ($said)" '[[ "$said" == "$(printf "%s\n" "note Opening Photos on WD 2 TB…" "done Opened Photos on WD 2 TB" "rc=0")" ]] && grep -qx "udisksctl mount -b /dev/sdd1" "$FAKE/calls" && grep -qx "gio open $FAKE/media/Photos" "$FAKE/calls"'
+said=$(talk '' commands/drive/open wd)
+check "two parts: say which ($said)" '[[ "$said" == *"wd has 2 parts; say which: Photos (sdd1) or Backup (sdd2)"*"rc=1" ]]'
+said=$(talk 'wrong one\nopen sesame\n' commands/drive/open "sd card 32 gb")
+want=$(printf '%s\n' "secret Password for SD card 32 GB" "note Unlocking SD card 32 GB…" "wrong That password did not work" "secret Password for SD card 32 GB" "note Unlocking SD card 32 GB…" "note Opening SD card 32 GB…" "done Opened SD card 32 GB" "rc=0")
+check "a locked card: its password, asked again after a wrong one, then opened" '[[ "$said" == "$want" ]] && grep -qx "udisksctl mount -b /dev/dm-1" "$FAKE/calls"'
+check "the password reaches udisks through a pipe, never an argument" '[[ "$(tr "\n" "|" < "$FAKE/keys")" == "wrong one|open sesame|" ]] && ! grep -q "sesame" "$FAKE/calls"'
+res=$(commands/drive/open "SD card 32 GB" </dev/null 2>&1 | tail -n 1) || true
+check "opened already: just shown ($res)" '[[ "$res" == "Opened SD card 32 GB" ]]'
+reset
+rc=0; out=$(commands/drive/open "SD card 32 GB" </dev/null) || rc=$?
+check "no password given: 3 ($out)" '[[ $rc -eq 3 && "$out" == *"SD card 32 GB needs its password" ]]'
+rc=0; out=$(commands/drive/open nothing-here </dev/null) || rc=$?
+check "no such drive: 5" '[[ $rc -eq 5 ]]'
+said=$(talk '' commands/drive/eject sandisk)
+check "eject: closed, powered off, then it says so ($said)" '[[ "$said" == "$(printf "%s\n" "note Ejecting SanDisk 64 GB…" "done You can take out SanDisk" "rc=0")" ]] && grep -qx "udisksctl unmount -b /dev/sdb1" "$FAKE/calls" && grep -qx "udisksctl power-off -b /dev/sdb" "$FAKE/calls"'
+reset; touch "$FAKE/busy"
+said=$(talk '' commands/drive/eject sandisk)
+check "something still uses it: 4, and it stays on ($said)" '[[ "$said" == *"Something is still using SanDisk 64 GB. Close what is open from it, then eject again"*"rc=4" ]] && ! grep -q "power-off" "$FAKE/calls"'
+reset; printf 'open sesame\n' | commands/drive/open "sd card" >/dev/null 2>&1 || true; : > "$FAKE/calls"
+res=$(commands/drive/eject "the sd card" </dev/null | tail -n 1) || true
+check "an unlocked card: closed, locked again, powered off ($res)" '[[ "$res" == "You can take out the SD card" ]] && [[ "$(grep -E "unmount|lock|power-off" "$FAKE/calls" | tr "\n" "|")" == "udisksctl unmount -b /dev/dm-1|udisksctl lock -b /dev/sdc1|udisksctl power-off -b /dev/sdc|" ]]'
+
+# Erase.
+reset
+said=$(talk 'yes\nno\n' commands/drive/format sandisk exfat)
+want=$(printf '%s\n' "confirm Erase SanDisk 64 GB? Everything on it goes: DCIM, Notes.txt and Taxes 2025.pdf. It becomes exFAT, for Mac, Windows and Linux." "confirm 5 Press Enter again to erase SanDisk 64 GB" "Nothing was erased" "rc=3")
+check "erase names the drive, its size and what is on it, then asks again; no is no" '[[ "$said" == "$want" ]] && ! grep -q "^busctl" "$FAKE/calls"'
+said=$(talk 'yes\nyes\n' commands/drive/format sandisk exfat)
+check "erase as exFAT ($said)" '[[ "$said" == *"note Erasing SanDisk 64 GB…"*"done SanDisk 64 GB is erased and ready, for Mac, Windows and Linux"*"rc=0" ]]'
+check "closed first, then a new MBR table and one exFAT part named as before" 'grep -qx "udisksctl unmount -b /dev/sdb1" "$FAKE/calls" && grep -qx "busctl --system --allow-interactive-authorization=yes --timeout=600 call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/block_devices/sdb org.freedesktop.UDisks2.Block Format sa{sv} dos 0" "$FAKE/calls" && grep -qx "busctl --system --allow-interactive-authorization=yes --timeout=600 call org.freedesktop.UDisks2 /org/freedesktop/UDisks2/block_devices/sdb org.freedesktop.UDisks2.PartitionTable CreatePartitionAndFormat ttssa{sv}sa{sv} 1048576 61528342528 0x07  0 exfat 1 label s SANDISK" "$FAKE/calls"'
+reset
+printf 'yes\nyes\n' | commands/drive/format "kingston 16 gb" fat32 >/dev/null || true
+check "FAT32: the brand as its name, in capitals" 'grep -q "CreatePartitionAndFormat ttssa{sv}sa{sv} 1048576 $(( (15997075456 / 1048576 - 2) * 1048576 )) 0x0c  0 vfat 1 label s KINGSTON$" "$FAKE/calls"'
+reset
+printf 'yes\nyes\n' | commands/drive/format photos ext4 >/dev/null || true
+check "ext4: GPT, and the new drive belongs to you" 'grep -q "Block Format sa{sv} gpt 0$" "$FAKE/calls" && grep -q "0fc63daf-8483-4772-8e79-3d69d8477de4  0 ext4 2 label s Photos take-ownership b true$" "$FAKE/calls"'
+reset; touch "$FAKE/busctl-fail"
+res=$(printf 'yes\nyes\n' | commands/drive/format kingston exfat 2>&1 | tail -n 1) || true
+check "udisks refused: said in words ($res)" '[[ "$res" == "Kingston 16 GB could not be erased: Error formatting: the drive went away" ]]'
+reset; awk -F'|' -v OFS='|' '$1 == "sdb1" { $12 = "/" } { print }' "$FAKE/blocks" > "$FAKE/b" && mv "$FAKE/b" "$FAKE/blocks"
+rc=0; printf 'yes\nyes\n' | commands/drive/format sandisk exfat >/dev/null 2>&1 || rc=$?
+check "never a drive the computer runs from: 6" '[[ $rc -eq 6 ]] && ! grep -q "^busctl" "$FAKE/calls"'
+rc=0; commands/drive/format sandisk ntfs </dev/null >/dev/null 2>&1 || rc=$?
+check "only exfat, fat32 or ext4" '[[ $rc -eq 2 ]]'
+
+# The watch.
+reset; echo "Lexar_JumpDrive|Lexar|JumpDrive|thumb|usb|true|128043712512" >> "$FAKE/drives"
+cat > "$FAKE/monitor" <<M
+say|Monitoring the udisks daemon. Press Ctrl+C to exit.
+add|sdg|/dev/sdg|Lexar_JumpDrive||||true|false|128043712512||||||
+say|10:00:01.000: Added /org/freedesktop/UDisks2/block_devices/sdg
+add|sdg1|/dev/sdg1|Lexar_JumpDrive|filesystem|exfat|STICK|true|false|128042663936|sdg|1|||
+say|10:00:01.100: Added /org/freedesktop/UDisks2/block_devices/sdg1
+say|  org.freedesktop.UDisks2.Filesystem:
+say|    MountPoints:
+say|10:00:02.000: /org/freedesktop/UDisks2/block_devices/sdb1: org.freedesktop.UDisks2.Filesystem: Properties Changed
+say|  MountPoints:
+say|10:00:03.000: Removed /org/freedesktop/UDisks2/block_devices/sdb1
+say|10:00:04.000: Removed /org/freedesktop/UDisks2/block_devices/sdg1
+M
+rc=0; commands/drive/watch >/dev/null 2>&1 || rc=$?
+check "the watch ends with udisks' monitor, for systemd to start it again" '[[ $rc -eq 1 ]]'
+check "at login, what is plugged in opens quietly, never asking" 'grep -qx "udisksctl mount -b /dev/sdd1 --no-user-interaction" "$FAKE/calls" && grep -qx "udisksctl mount -b /dev/sdd2 --no-user-interaction" "$FAKE/calls" && ! grep -q "Photos" "$FAKE/notices"'
+check "plugged in: opened, and the Core offers it" 'grep -qx "udisksctl mount -b /dev/sdg1 --no-user-interaction" "$FAKE/calls" && grep -qx -- "--open|$FAKE/media/STICK|usb|Lexar 128 GB|41 GB free · press to open|-1|8|" "$FAKE/notices"'
+check "closed in Files, then taken out: nothing to say" '! grep -q "SanDisk 64 GB was taken out" "$FAKE/notices"'
+check "taken out while still open: a word about ejecting first" 'grep -qx "warn|Lexar 128 GB was taken out while open|eject it first next time, so nothing is lost|-1|10|" "$FAKE/notices"'
+reset; echo wrongfs > "$FAKE/mount-mode"
+printf '%s\n' "add|sdh1|/dev/sdh1|Kingston_DT|filesystem|apfs|Mac Disk|true|false|15000000000|sde|1|||" "say|10:00:01.000: Added /org/freedesktop/UDisks2/block_devices/sdh1" \
+  "add|sdi1|/dev/sdi1|Reader_SD|crypto|crypto_LUKS||true|false|31913934848|sdc|2|||" "say|10:00:02.000: Added /org/freedesktop/UDisks2/block_devices/sdi1" > "$FAKE/monitor"
+commands/drive/watch >/dev/null 2>&1 || true
+check "a Mac disk Takumi cannot read: said in words" 'grep -q "^warn|Kingston 16 GB did not open|it is formatted for a Mac (APFS), which Takumi cannot read|" "$FAKE/notices"'
+check "a locked one: how to unlock it" 'grep -q "^lock|.* is locked|type its name in the Core to unlock it|" "$FAKE/notices"'
+reset; printf '%s\n' "say|10:00:01.000: Added /org/freedesktop/UDisks2/block_devices/sde" > "$FAKE/monitor"
+commands/drive/watch >/dev/null 2>&1 || true
+check "a blank one: it can be erased for use" '[[ "$(cat "$FAKE/notices")" == "usb|Kingston 16 GB has nothing Takumi can read|type format in the Core to erase it for use|-1|10|" ]]'
+
+# --- Writing a disk image, against fake sudo, dd, xz, lsblk and findmnt ---
+mkdir -p "$t/img" "$t/stubs"
+cat > "$t/bin/sudo" <<'FAKE'
+#!/usr/bin/env bash
+printf 'sudo %s\n' "$*" >> "$FAKE/calls"
+[[ "$1" == -A ]] && shift
+exec "$@"
+FAKE
+cat > "$t/bin/dd" <<'FAKE'
+#!/usr/bin/env bash
+printf 'dd %s\n' "$*" >> "$FAKE/calls"
+of=""; for a; do case "$a" in of=*) of=${a#of=} ;; esac; done
+cat > "$FAKE/written-${of##*/}"
+printf '4194304 bytes (4.2 MB, 4.0 MiB) copied, 1 s, 4.2 MB/s\r8388608 bytes (8.4 MB, 8.0 MiB) copied, 2 s, 4.2 MB/s\n' >&2
+FAKE
+cat > "$t/bin/xz" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  --robot) printf 'totals\t1\t1\t100\t%s\t0.5\tCRC64\t0\n' "$(cat "$FAKE/xz-size" 2>/dev/null || echo 8388608)" ;;
+  -dc) cat "$3" ;;
+esac
+FAKE
+printf '#!/bin/sh\n[ -f "$FAKE/system" ] && [ "$1" = -nvo ] && [ "$3" = / ] && echo /dev/sysdisk1\nexit 0\n' > "$t/bin/findmnt"
+printf '#!/bin/sh\n[ -f "$FAKE/system" ] && printf "sysdisk1 part\\n%%s disk\\n" "$(cat "$FAKE/system")"\nexit 0\n' > "$t/bin/lsblk"
+printf '#!/bin/sh\nprintf "qs %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/bin/qs"
+printf '#!/bin/sh\nexit 0\n' > "$t/bin/sync"
+cat > "$t/bin/wl-paste" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in --list-types) [[ -f "$FAKE/clip" ]] && echo text/uri-list ;; *text/uri-list*) cat "$FAKE/clip" 2>/dev/null ;; esac
+exit 0
+FAKE
+chmod +x "$t/bin/"*
+printf 'IMAGE' > "$t/img/raspios.img.xz"; printf 'ISO' > "$t/img/arch.iso"
+export TAKUMI_WRITE_POLL=0.1
+
+reset
+check "removable drives only, each whole, the open stick too" '[[ "$(lib drive_removables | cut -f1,2 | tr "\t\n" ",|")" == "/dev/sdb,SanDisk 64 GB|/dev/sdc,SD card 32 GB|/dev/sdd,WD 2 TB|/dev/sde,Kingston 16 GB|" ]]'
+check "images by their ending, compressed too" 'lib drive_is_image a.IMG.XZ && lib drive_is_image b.iso && lib drive_is_image c.img.zst && ! lib drive_is_image d.zip && ! lib drive_is_image e.img.bz2'
+said=$(talk 'kingston\nKingston\n' commands/drive/write "$t/img/raspios.img.xz")
+check "write: asks which, wants the name typed, writes it whole ($(tail -n 1 <<< "$said"))" '[[ "$said" == *"ask Write raspios.img.xz to which: SanDisk 64 GB, SD card 32 GB, WD 2 TB or Kingston 16 GB?"* && "$said" == *"ask Everything on Kingston 16 GB is erased and raspios.img.xz is written there. Type Kingston to go on"* && "$said" == *"done raspios.img.xz is on Kingston 16 GB. You can take it out"*"rc=0" && "$(cat "$FAKE/written-sde")" == IMAGE ]]'
+check "write: dd as root, to the whole drive, flushed" 'grep -q "^sudo -A dd of=/dev/sde bs=4M iflag=fullblock oflag=direct conv=fsync status=progress$" "$FAKE/calls" && grep -qx "udisksctl power-off -b /dev/sde" "$FAKE/calls"'
+check "write: how far it got, in notes" 'grep -q "^note Writing raspios.img.xz · 8.4 MB of 8.4 MB (100%)$" <<< "$said"'
+reset
+said=$(talk 'nope\n' commands/drive/write "$t/img/arch.iso" SanDisk)
+check "a wrong name is asked again; no answer, nothing written ($(tail -n 1 <<< "$said"))" '[[ "$said" == *"wrong Type SanDisk, or Esc to stop"*"rc=3" ]] && ! grep -q "^dd " "$FAKE/calls" && ! grep -q "udisksctl unmount" "$FAKE/calls"'
+said=$(talk 'SanDisk 64 GB\n' commands/drive/write "$t/img/arch.iso" sdb)
+check "the open stick is closed first, then written" '[[ "$said" == *"rc=0" ]] && grep -qx "udisksctl unmount -b /dev/sdb1" "$FAKE/calls" && [[ "$(cat "$FAKE/written-sdb")" == ISO ]]'
+reset; echo 99999999999 > "$FAKE/xz-size"
+said=$(talk '' commands/drive/write "$t/img/raspios.img.xz" kingston)
+check "an image bigger than the drive: said, nothing written" '[[ "$said" == *"raspios.img.xz needs 100 GB, and Kingston 16 GB holds 16 GB"*"rc=6" ]] && ! grep -q "^dd " "$FAKE/calls"'
+reset; echo sde > "$FAKE/system"
+said=$(talk '' commands/drive/write "$t/img/arch.iso" kingston)
+check "a disk the computer runs from is never offered" '[[ "$said" == *"No USB drive or memory card called kingston"*"rc=5" ]]'
+reset
+printf '%s\n' "Samsung_SSD|||||false|1000204886016" > "$FAKE/drives"; printf '%s\n' "nvme0n1|/dev/nvme0n1|Samsung_SSD||||false|true|1000204886016||||||" > "$FAKE/blocks"
+said=$(talk '' commands/drive/write "$t/img/arch.iso")
+check "no stick plugged in: says what to do" '[[ "$said" == *"Plug in the USB stick or memory card to write arch.iso to"*"rc=5" ]]'
+reset
+out=$(commands/drive/write "$t/img/arch.iso" </dev/null)
+check "from Files: the image is remembered and the Core opens on the row" '[[ "$(cat "$XDG_RUNTIME_DIR/takumi/write-image")" == "$t/img/arch.iso" ]] && grep -qx "qs -c takumi ipc --any-display call core search write to usb" "$FAKE/calls"'
+check "the row names the picked image" '[[ "$(rows "write usb" | jq -c "select(.id == \"drive:write\") | [.title, .run[3], .risk]")" == "[\"Write arch.iso to a USB stick\",\"$t/img/arch.iso\",2]" ]]'
+rm -f "$XDG_RUNTIME_DIR/takumi/write-image"; printf 'file://%s\n' "$t/img/raspios.img.xz" > "$FAKE/clip"
+check "or the image copied in Files" '[[ "$(rows "flash image" | jq -r "select(.id == \"drive:write\") | .title")" == "Write raspios.img.xz to a USB stick" ]]'
+rm -f "$FAKE/clip"
+check "without one, the row asks in the conversation" '[[ "$(rows "usb stick" | jq -c "select(.id == \"drive:write\") | [.title, (.run | length)]")" == "[\"Write a disk image to a USB stick\",3]" ]]'
+
+# --- Health, against a fake smartctl ---
+cat > "$t/stubs/smartctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'smartctl %s\n' "$*" >> "$FAKE/calls"
+case "$*" in
+  "--scan -j") cat "$FAKE/scan" ;;
+  *"/dev/nvme0") echo '{"device":{"name":"/dev/nvme0"},"model_name":"Samsung SSD 980 1TB","smart_status":{"passed":true},"nvme_smart_health_information_log":{"percentage_used":2,"critical_warning":0,"available_spare":100,"available_spare_threshold":10,"media_errors":0},"power_on_time":{"hours":1200}}'; exit 0 ;;
+  *"/dev/sda") echo '{"device":{"name":"/dev/sda"},"model_name":"WDC WD10EZEX","rotation_rate":7200,"smart_status":{"passed":true},"ata_smart_attributes":{"table":[{"id":5,"value":100,"raw":{"value":8}}]},"power_on_time":{"hours":31000}}'; exit 4 ;;
+esac
+FAKE
+printf '#!/bin/sh\nprintf "pacman %%s\\n" "$*" >> "$FAKE/calls"\ncp "%s/stubs/smartctl" "%s/bin/smartctl"\n' "$t" "$t" > "$t/bin/pacman"
+chmod +x "$t/stubs/smartctl" "$t/bin/pacman"
+reset; echo '{"devices":[{"name":"/dev/nvme0","type":"nvme"}]}' > "$FAKE/scan"
+said=$(talk 'no\n' commands/drive/health)
+check "health: smartmontools asked for first; no, nothing checked" '[[ "$said" == *"confirm Checking disks needs smartmontools from Arch"*"rc=3" ]] && ! grep -q "^pacman" "$FAKE/calls"'
+said=$(talk 'yes\n' commands/drive/health)
+check "health: installed, then one disk in words ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$said" == *"done Samsung SSD 980 1TB · Healthy · 2% worn · 1,200 hours"*"rc=0" ]] && grep -q "^sudo -A pacman -S --needed --noconfirm smartmontools$" "$FAKE/calls"'
+check "health: the disks are read as root, each with its own way in" 'grep -q "^sudo -A sh -c .* sh /dev/nvme0 nvme$" "$FAKE/calls" && grep -qx "smartctl -j -a -d nvme /dev/nvme0" "$FAKE/calls"'
+echo '{"devices":[{"name":"/dev/nvme0","type":"nvme"},{"name":"/dev/sda","type":"sat"}]}' > "$FAKE/scan"
+said=$(talk '' commands/drive/health)
+check "health: each disk a note, a failing one is the last word, exit 4" '[[ "$said" == *"note Samsung SSD 980 1TB · Healthy"* && "$said" == *"done WDC WD10EZEX · Failing: copy what matters off it now · 31,000 hours"*"rc=4" ]]'
+check "health: --json, one object per disk" '[[ "$(commands/drive/health --json 2>/dev/null | jq -r .verdict | tr "\n" " ")" == "healthy failing " ]]'
+check "health: one disk by name" '[[ "$(commands/drive/health nvme0n1 2>/dev/null | tail -n 1)" == "Samsung SSD 980 1TB · Healthy · 2% worn · 1,200 hours" ]]'
+rc=0; commands/drive/health sdz >/dev/null 2>&1 || rc=$?
+check "health: no such disk" '[[ $rc -eq 5 ]]'
+echo '{"devices":[]}' > "$FAKE/scan"
+check "health: a virtual machine says nothing" '[[ "$(commands/drive/health 2>/dev/null)" == "No disk here reports its health (the disks of a virtual machine do not)" ]]'
+check "health: the row is a conversation" '[[ "$(rows "drive health" | jq -c "select(.id == \"drive:health\") | [.title, .converse, .glyph]")" == "[\"Check drive health\",true,\"pulse\"]" ]]'
+
+# --- Clouds as folders, against fake rclone, systemd and fuse ---
+cat > "$t/bin/rclone" <<'FAKE'
+#!/usr/bin/env bash
+printf 'rclone %s\n' "$*" >> "$FAKE/calls"
+touch "$FAKE/remotes"
+case "$1 $2" in
+  "listremotes --long") awk '{ print $1 ": " $2 }' "$FAKE/remotes" ;;
+  "config create")
+    [[ -f "$FAKE/signin-fails" ]] && { echo "Failed to configure token: canceled" >&2; exit 1; }
+    echo "Please go to the following link: http://127.0.0.1:53682/auth?state=Q9x"; xdg-open "http://127.0.0.1:53682/auth?state=Q9x"; sleep 1.5
+    echo "$3 $4 $5" >> "$FAKE/remotes" ;;
+  "config delete") awk -v r="$3" '$1 != r' "$FAKE/remotes" > "$FAKE/r" && mv "$FAKE/r" "$FAKE/remotes" ;;
+  lsd*) grep -q "^${2%:} " "$FAKE/remotes" ;;
+esac
+FAKE
+cat > "$t/bin/systemctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "$FAKE/calls"
+u=${*: -1}; id=${u#takumi-cloud@}; id=${id%.service}
+case "$*" in
+  *"enable --now"*) touch "$FAKE/on-$id"; case "$id" in onedrive) n=OneDrive ;; google) n="Google Drive" ;; *) n=Dropbox ;; esac; echo "$HOME/$n" >> "$FAKE/mounts" ;;
+  *"disable --now"*) rm -f "$FAKE/on-$id" ;;
+  *is-active*|*is-enabled*) [[ -f "$FAKE/on-$id" ]] ;;
+esac
+FAKE
+printf '#!/bin/sh\n[ "$1" = -q ] && grep -qxF "$2" "$FAKE/mounts" 2>/dev/null\n' > "$t/bin/mountpoint"
+printf '#!/bin/sh\nprintf "fusermount3 %%s\\n" "$*" >> "$FAKE/calls"\nfor a; do p=$a; done\ngrep -vxF "$p" "$FAKE/mounts" > "$FAKE/m"; mv "$FAKE/m" "$FAKE/mounts"\n' > "$t/bin/fusermount3"
+chmod +x "$t/bin/"*
+export TAKUMI_CLOUD_WAIT=2
+reset
+check "cloud: the words people use" '[[ "$(lib drive_cloud "Google Drive" | cut -d"|" -f1) $(lib drive_cloud gdrive | cut -d"|" -f1) $(lib drive_cloud "One Drive" | cut -d"|" -f1)" == "google google onedrive" ]] && ! lib drive_cloud icloud >/dev/null'
+check "cloud: a folder address as Files writes it" '[[ "$(lib drive_url "/home/mira/Google Drive")" == "file:///home/mira/Google%20Drive" ]]'
+check "cloud: rows to add each" '[[ "$(rows cloud | jq -r "select(.kind == \"Cloud\") | .title" | tr "\n" "|")" == "Add OneDrive|Add Google Drive|Add Dropbox|" ]]'
+said=$(talk '' commands/drive/cloud add "google drive")
+check "cloud add: signs in through rclone in the browser, the whole drive ($(tail -n 2 <<< "$said" | head -n 1))" 'grep -qx "rclone config create takumi-google drive scope=drive" "$FAKE/calls" && grep -qx "gio open http://127.0.0.1:53682/auth?state=Q9x" "$FAKE/calls" && [[ "$said" == *"note Sign in to Google Drive in your browser, then allow rclone"* ]]'
+check "cloud add: mounted by its service, a folder in the home and in Files" '[[ "$said" == *"done Google Drive is a folder in your home and in Files'"'"' sidebar. Files come down as you open them"*"rc=0" ]] && grep -qx "systemctl --user enable --now takumi-cloud@google.service" "$FAKE/calls" && grep -qx "file://$HOME/Google%20Drive Google Drive" "$HOME/.config/gtk-3.0/bookmarks"'
+check "cloud list: connected" '[[ "$(commands/drive/cloud list --json | jq -r "select(.id == \"google\") | .state")" == connected ]]'
+check "cloud rows: open it, and disconnect when asked" '[[ "$(rows "google drive" | jq -r "select(.kind == \"Cloud\") | .title" | tr "\n" "|")" == "Google Drive|Disconnect Google Drive|" ]]'
+said=$(talk 'yes\n' commands/drive/cloud add google)
+check "cloud add again: already there" '[[ "$said" == *"done Google Drive is already a folder in your home"* ]] && [[ $(grep -c "Google%20Drive" "$HOME/.config/gtk-3.0/bookmarks") -eq 1 ]]'
+mkdir -p "$HOME/.cache/takumi/cloud/google"; head -c 2000000 /dev/zero > "$HOME/.cache/takumi/cloud/google/kept"
+said=$(talk 'no\n' commands/drive/cloud remove google)
+check "cloud remove: unmounted, off, out of the sidebar; keeps the sign-in when told ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$said" == *"confirm Google Drive is disconnected. Also sign out and free the 2.0 MB kept on this computer? Changes not sent to Google Drive yet are lost"* && "$said" == *"rc=0" ]] && grep -qx "systemctl --user disable --now takumi-cloud@google.service" "$FAKE/calls" && ! grep -q Google "$HOME/.config/gtk-3.0/bookmarks" && [[ ! -d "$HOME/Google Drive" && -f "$HOME/.cache/takumi/cloud/google/kept" ]] && grep -q "^takumi-google " "$FAKE/remotes"'
+check "cloud list: signed in, not connected" '[[ "$(commands/drive/cloud list --json | jq -r "select(.id == \"google\") | .state")" == "signed in" ]]'
+said=$(talk 'yes\n' commands/drive/cloud remove google)
+check "cloud remove, yes: signed out and the copies freed" '[[ "$said" == *"done Google Drive is disconnected and signed out"* && ! -d "$HOME/.cache/takumi/cloud/google" ]] && ! grep -q "^takumi-google " "$FAKE/remotes"'
+mkdir -p "$HOME/Dropbox"; : > "$HOME/Dropbox/mine.txt"
+said=$(talk '' commands/drive/cloud add dropbox)
+check "cloud add: a folder of your own is never covered" '[[ "$said" == *"~/Dropbox already holds files"*"rc=4" ]] && ! grep -q "config create takumi-dropbox" "$FAKE/calls"'
+rm -rf "$HOME/Dropbox"; touch "$FAKE/signin-fails"
+: > "$FAKE/calls"
+said=$(talk '' commands/drive/cloud add onedrive)
+check "cloud add: signing in that does not finish says so, nothing mounted" '[[ "$said" == *"Signing in to OneDrive did not finish"*"rc=6" ]] && ! grep -q "enable --now" "$FAKE/calls"'
+rm -f "$FAKE/signin-fails"
+rc=0; commands/drive/cloud add icloud >/dev/null 2>&1 || rc=$?
+check "cloud: a cloud Takumi does not know" '[[ $rc -eq 2 ]]'
+check "writing, health and clouds: nothing written outside the home and the runtime folder" '[[ -z "$(find "$t" -type f -newer "$t/img/arch.iso" ! -path "$t/home/*" ! -path "$t/state/*" ! -path "$t/run/*" ! -path "$t/bin/*" ! -path "$t/stubs/*")" ]]'
+
+echo "   $(grep -c '^check ' "$0") drive checks against a fake udisks"
+exit $status

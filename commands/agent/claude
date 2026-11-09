@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Open Claude Code, Anthropic's coding agent, in a terminal in ~/Work
+risk: 1
+converse: yes
+title: Open Claude Code
+words: claude code anthropic coding agent ai assistant terminal programming
+glyph: term
+ABOUT
+set -euo pipefail
+exec takumi agent open claude "$@"

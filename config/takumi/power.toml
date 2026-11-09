@@ -1,0 +1,13 @@
+# Power, as set from the Core. See docs/power.md. Minutes; 0 means never.
+
+[profile]
+battery = "power-saver"   # power-saver | balanced | performance
+power = "balanced"
+
+[battery]
+lock = 10
+sleep = 30
+
+[power]
+lock = 20
+sleep = 0

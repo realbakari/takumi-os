@@ -1,0 +1,15 @@
+# Surface Pro 7 to 10, Surface Laptop 3 to 7 (Intel), Laptop Studio and Book 3: the keyboard talks through the
+# Surface Aggregator Module, whose drivers must be in the initramfs to type the disk's password. Modules that
+# a model does not have are skipped ("?" in the initramfs).
+# Kernel: https://docs.kernel.org/driver-api/surface_aggregator/index.html
+title = "Surface keyboard at the disk password"
+part = "computer"
+
+[match]
+dmi_vendor = "^Microsoft"
+dmi_product = '^Surface (Pro (7\+?|8|9|10)|Laptop( [3-7]| Studio( 2)?)|Book 3)( |$)'
+arch = ["x86_64"]
+
+[apply]
+initramfs_modules = ["surface_aggregator", "surface_aggregator_registry", "surface_aggregator_hub", "surface_hid_core", "surface_hid", "surface_kbd", "intel_lpss", "intel_lpss_pci", "8250_dw", "pinctrl_icelake", "pinctrl_tigerlake", "pinctrl_alderlake"]
+note = "This Surface's keyboard talks to the computer through Microsoft's embedded controller. Its drivers now load in time for the disk's password, so it can be typed on the Type Cover or the built-in keyboard."

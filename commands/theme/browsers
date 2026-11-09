@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Firefox, Chromium, Chrome and Brave in the theme's colours, or their own again
+usage: [on|off]
+example: takumi theme browsers
+example: takumi theme browsers off
+risk: 1
+sudo: yes
+title: Colour the browsers with the theme
+words: browser browsers firefox chromium chrome brave web theme colours colors toolbar tabs look
+glyph: globe
+converse: yes
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/theme.sh" ]] && { . "$l/theme.sh"; . "$l/core.sh"; break; }; done
+declare -F theme_firefox_wire >/dev/null && declare -F core_sudo >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh). Firefox: each profile's user.js lets it read a stylesheet, and its
+# chrome/userChrome.css imports the theme's (look/firefox-userChrome.css), from Firefox's next start; new
+# profiles are picked up at every theme change while this is on. Chromium, Chrome and Brave: a policy file,
+# {"BrowserThemeColor": <the theme's accent>}, from which they build their own colours, which only root may
+# write, so it asks for your password; their dark mode follows the theme through ~/.config/chromium-flags.conf.
+# Choosing this again after a new theme brings Chromium the new colour.
+# Exit status: 0 done · 1 no browser to colour · 2 usage · 3 no password, so Chromium kept its colours.
+what=${1:-on}
+case "$what" in on|off) ;; *) echo "usage: takumi theme browsers [on|off]" >&2; exit 2 ;; esac
+files=()
+while IFS= read -r f; do [[ -n "$f" ]] && files+=("$f"); done < <(theme_chromium_policies)
+profiles=$(theme_firefox_profiles)
+
+if [[ $what == off ]]; then
+  rm -f "$theme_browsers_flag"
+  while IFS= read -r p; do [[ -n "$p" ]] && theme_firefox_unwire "$p"; done <<< "$profiles"
+  theme_chromium_flags light
+  have=()
+  for f in ${files[@]+"${files[@]}"}; do [[ -f "$f" ]] && have+=("$f"); done
+  if (( ${#have[@]} )); then
+    # sudo removes takumi-theme.json from each browser's managed policies (/etc/chromium/policies/managed/,
+    # /etc/opt/chrome/policies/managed/, /etc/brave/policies/managed/).
+    core_sudo "Giving Chromium its own colours back needs your password" rm -f "${have[@]}" || core_fail 3 "Chromium keeps the theme's colours: no password"
+  fi
+  core_done "The browsers have their own colours again, Firefox from its next start"
+  exit 0
+fi
+
+command -v firefox >/dev/null || [[ -n "$profiles" ]] || (( ${#files[@]} )) || core_fail 1 "No browser to colour: Firefox, Chromium, Chrome or Brave"
+name=$(theme_current); dir=$(theme_find "$name") || core_fail 1 "No theme called $name"
+accent=$(theme_merged "$dir/theme.toml" day | sed -n 's/^accent=//p')
+mode=$(theme_meta "$dir/theme.toml" mode)
+mkdir -p "${theme_browsers_flag%/*}"; echo on > "$theme_browsers_flag"
+[[ -f "$theme_look/firefox-userChrome.css" ]] || takumi theme render "$name" "$(takumi phase current)" >/dev/null
+
+n=0
+while IFS= read -r p; do [[ -n "$p" ]] && { theme_firefox_wire "$p"; n=$((n + 1)); }; done <<< "$profiles"
+firefox=""; later=""
+if (( n > 0 )); then firefox="Firefox from its next start"
+elif command -v firefox >/dev/null; then later="Firefox has not been opened yet: open it once, then choose this again"; fi
+
+if (( ${#files[@]} )); then
+  core_note "Colouring Chromium…"
+  json="{\"BrowserThemeColor\": \"$accent\"}"
+  # sudo writes takumi-theme.json, the one line above, into each installed browser's managed policies:
+  # /etc/chromium/policies/managed/, /etc/opt/chrome/policies/managed/, /etc/brave/policies/managed/.
+  core_sudo "Colouring Chromium needs your password" sh -c 'umask 022; for f; do mkdir -p "${f%/*}" && printf "%s\n" "$0" > "$f" || exit 1; done' "$json" "${files[@]}" \
+    || core_fail 3 "Chromium keeps its own colours: no password${firefox:+. Firefox wears the theme from its next start}"
+  theme_chromium_flags "${mode:-dark}"
+  core_done "The browsers wear the theme: Chromium now${firefox:+, $firefox}${later:+. $later}"
+  exit 0
+fi
+(( n > 0 )) || core_fail 1 "${later:-No browser to colour: Firefox, Chromium, Chrome or Brave}"
+core_done "The browsers wear the theme: $firefox"

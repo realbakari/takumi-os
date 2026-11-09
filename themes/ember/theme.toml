@@ -1,0 +1,30 @@
+[meta]
+name = "ember"
+title = "Ember"
+about = "warm amber and rust"
+mode = "dark"
+
+[palette]
+accent     = "#ff9a3c"
+background = "#15100c"
+surface    = "#1f1813"
+foreground = "#f1e3d3"
+muted      = "#7a6655"
+red        = "#ff5d5d"
+yellow     = "#ffc857"
+green      = "#9bd77a"
+cyan       = "#5fd3c8"
+blue       = "#7fb2ff"
+magenta    = "#d99bff"
+
+[phase.day]
+accent     = "#ffad5c"
+background = "#1a140f"
+
+[phase.dusk]
+accent     = "#ff7a2f"
+
+[phase.night]
+accent     = "#e07a2a"
+background = "#0f0b08"
+foreground = "#d8ccbe"

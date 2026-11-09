@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Show a Wi-Fi network's password and a code a phone camera can scan to join
+usage: [name] [--card]
+example: takumi wifi share
+risk: 0
+words: share wifi wi-fi password qr code guest phone
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/wifi.sh "$(dirname "$(readlink -f "$0")")/../../lib/wifi.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F wifi_scan >/dev/null || { echo "takumi: the Wi-Fi library is missing" >&2; exit 1; }
+
+# --card prints one JSON object for the Core's card: kicker, title, detail, secretLabel, secret, and
+# qr, the code as rows of 0 and 1. The password reaches jq through its environment, which only this
+# user can read, never through its arguments.
+card=no; name=""
+for a in "$@"; do
+  case "$a" in --card) card=yes ;; -*) echo "usage: takumi wifi share [name] [--card]" >&2; exit 2 ;; *) name=$a ;; esac
+done
+say() {  # title detail
+  if [[ $card == yes ]]; then T=$1 D=$2 jq -cn '{kicker: "Share Wi-Fi", title: env.T, detail: env.D, secretLabel: "", secret: "", qr: []}'
+  else printf '%s\n%s\n' "$1" "$2"; fi
+  exit 0
+}
+[[ -n "$name" ]] || name=$(wifi_current)
+[[ -n "$name" ]] || say "Not connected" "Join a network first, then share it from here"
+uuid=$(wifi_saved_uuids "$name" | head -n 1)
+[[ -n "$uuid" ]] || say "$name" "This network is not saved on this computer"
+
+get() { LC_ALL=C nmcli -s -e no -g "$1" connection show uuid "$uuid" 2>/dev/null || true; }
+case "$(get 802-11-wireless-security.key-mgmt)" in
+  wpa-psk|sae) type=WPA; secret=$(get 802-11-wireless-security.psk) ;;
+  none)        type=WEP; secret=$(get 802-11-wireless-security.wep-key0) ;;
+  ""|owe)      type=nopass; secret="" ;;
+  *)           say "$name" "A work or school network has no password to share" ;;
+esac
+[[ $type == nopass || -n "$secret" ]] || say "$name" "This computer cannot show the password for $name"
+
+text="WIFI:T:$type;S:$(wifi_qr_escape "$name");"
+[[ -n "$secret" ]] && text+="P:$(wifi_qr_escape "$secret");"
+[[ "$(get 802-11-wireless.hidden)" == yes ]] && text+="H:true;"
+text+=";"
+detail="Point a phone's camera at the code to join"
+[[ $type == nopass ]] && detail="An open network, no password. $detail"
+
+if [[ $card == yes ]]; then
+  qr=""
+  command -v qrencode >/dev/null && qr=$(printf '%s' "$text" | qrencode -t ASCII -m 0 -o - 2>/dev/null | sed 's/##/1/g; s/  /0/g')
+  [[ -n "$qr" ]] || detail="Password only: qrencode is not installed"
+  T=$name D=$detail S=$secret Q=$qr jq -cn '{kicker: "Share Wi-Fi", title: env.T, detail: env.D,
+    secretLabel: (if env.S == "" then "" else "Password" end), secret: env.S, qr: (env.Q | split("\n") | map(select(length > 0)))}'
+  exit 0
+fi
+printf '%s\n' "$name"
+[[ -n "$secret" ]] && printf 'Password: %s\n' "$secret"
+if command -v qrencode >/dev/null; then printf '%s' "$text" | qrencode -t ANSIUTF8 -m 2; echo "$detail"; fi

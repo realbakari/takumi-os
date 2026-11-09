@@ -1,0 +1,12 @@
+# Realtek RTL8821CE, RTL8822CE, RTL8822BE and RTL8723DE Wi-Fi (the kernel's rtw88): their deepest power
+# saving makes them drop the connection on many laptops; both options are the driver's own.
+# Kernel: https://github.com/torvalds/linux/tree/master/drivers/net/wireless/realtek/rtw88 (main.c, pci.c)
+title = "Realtek Wi-Fi"
+part = "wifi"
+
+[match]
+pci = ["10ec:c821", "10ec:c822", "10ec:b822", "10ec:d723"]
+
+[apply]
+modprobe = ["options rtw88_core disable_lps_deep=y", "options rtw88_pci disable_aspm=y"]
+note = "These Realtek chips drop the connection when their deepest power saving is on. With it off they stay connected, for a little more power."

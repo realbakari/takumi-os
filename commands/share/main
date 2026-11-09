@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Send files to a phone or computer nearby through LocalSend; without files, the files you copied
+usage: [--receive] [file...]
+example: takumi share ~/Pictures/beach.jpg
+example: takumi share --receive
+risk: 0
+converse: yes
+title: Send to…
+words: share send airdrop nearby localsend phone computer files transfer
+glyph: send
+ABOUT
+set -euo pipefail
+# A conversation in the Core when it must ask: the first time, whether to get LocalSend from Flathub (no password; it
+# goes in your home folder). Then LocalSend opens on its Send page with the files, and you pick who gets them;
+# phones and computers with LocalSend on the same network show there. --receive keeps LocalSend ready in the
+# background instead, so others can send to this computer; what arrives is said in the Core with Open. Files gives
+# the same through right-click › Scripts › Send to… Exit status: 0 LocalSend is open · 1 it could not open · 2 a file
+# is not there · 3 LocalSend is needed and was not got. See docs/sharing.md.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/share.sh" ]] && { . "$l/core.sh"; . "$l/share.sh"; break; }; done
+declare -F share_launch >/dev/null && declare -F core_note >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+receive=no
+if [[ "${1:-}" == --receive ]]; then receive=yes; shift; fi
+files=()
+for f in "$@"; do
+  case "$f" in /*) ;; *) f="$PWD/$f" ;; esac
+  [[ -e "$f" ]] || core_fail 2 "$(basename "$f") is not there."
+  files+=("$f")
+done
+if (( ! $# )) && [[ $receive == no ]]; then
+  while IFS= read -r f; do if [[ -n "$f" && -e "$f" ]]; then files+=("$f"); fi; done <<< "$(share_copied)"
+fi
+
+if ! share_localsend >/dev/null; then
+  # From Files, nobody can answer here: the Core asks instead, on the row that sends.
+  if ! core_in_core && ! core_at_tty; then
+    qs -c takumi ipc --any-display call core search "send" >/dev/null 2>&1 || true
+    takumi notice down "Sending needs LocalSend" "choose Send to… to get it" -1 8 >/dev/null 2>&1 || true
+    echo "Sending needs LocalSend: choose Send to… in the Core to get it"
+    exit 3
+  fi
+  core_confirm "Sending to phones and computers nearby uses LocalSend, a free app from Flathub (org.localsend.localsend_app). Get it? No password needed." ||
+    core_fail 3 "Nothing changed. Sending needs LocalSend."
+  core_note "Getting LocalSend from Flathub…"
+  takumi app get "$share_app" LocalSend >/dev/null 2>&1 || core_fail 1 "LocalSend did not install. The details are in ~/.local/state/takumi/app-get.log"
+  share_localsend >/dev/null || core_fail 1 "LocalSend did not install."
+fi
+share_script "Send to…" takumi share
+# Others reach LocalSend on port 53317: with the firewall on, takumi firewall allow asks to let it in (its own question,
+# then the password, here in the Core). Receiving cannot work without it; sending still can.
+if core_in_core || core_at_tty; then
+  fw=$(takumi firewall --json 2>/dev/null || true)
+  if jq -e '(.state == "on" or .state == "restart") and ((.apps // []) | index("LocalSend") | not)' >/dev/null 2>&1 <<< "$fw"; then
+    takumi firewall allow LocalSend || [[ $receive == no ]] || core_fail 1 "Nothing can arrive while the firewall blocks LocalSend."
+  fi
+fi
+
+# LocalSend runs on with Takumi watching what arrives (takumi share receive), outliving this conversation; only to
+# receive, it waits in the background without a window.
+args=()
+if [[ $receive == yes ]]; then args=(--hidden); elif (( ${#files[@]} )); then args=("${files[@]}"); fi
+if command -v setsid >/dev/null; then setsid takumi share receive ${args[@]+"${args[@]}"} </dev/null >/dev/null 2>&1 &
+else nohup takumi share receive ${args[@]+"${args[@]}"} </dev/null >/dev/null 2>&1 & fi
+if [[ $receive == yes ]]; then
+  name=$(share_alias)
+  core_done "Ready to receive${name:+: this computer shows as $name in LocalSend nearby}."
+elif (( ${#files[@]} == 1 )); then core_done "LocalSend is open with $(basename "${files[0]}"): choose who gets it."
+elif (( ${#files[@]} > 1 )); then core_done "LocalSend is open with ${#files[@]} files: choose who gets them."
+else core_done "LocalSend is open: choose what to send, then who gets it."; fi

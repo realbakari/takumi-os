@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Erase a USB drive or memory card as exFAT (Mac, Windows, Linux), FAT32 (cameras, TVs) or ext4 (Linux)
+usage: <name> <exfat|fat32|ext4>
+example: takumi drive format SanDisk exfat
+risk: 2
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/drive.sh" ]] && { . "$l/drive.sh"; . "$l/core.sh"; break; }; done
+declare -F drive_volumes >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh). It names the drive, its size and what is on it, then asks twice, the way the
+# setup disc erases a disk: Enter, then Enter again within five seconds. At a terminal it wants "erase"
+# typed. Only a USB drive or a memory card, never a disk this computer runs from. Through udisks: a new
+# partition table (MBR for exFAT and FAT32, which every camera and television reads; GPT for ext4), one part
+# filling the drive, the new filesystem on it, named as before; an ext4 drive belongs to you. udisks asks
+# polkit, which may ask for your password in the Core. Exit status: 0 erased and ready · 3 not confirmed,
+# nothing erased · 5 no such drive · 6 not a drive this erases · 1 anything else.
+name=${1:-}; fs=${2:-}
+case "$fs" in exfat|fat32|ext4) ;; *) echo "usage: takumi drive format <name> <exfat|fat32|ext4>" >&2; exit 2 ;; esac
+[[ -n "$name" ]] || { echo "usage: takumi drive format <name> <exfat|fat32|ext4>" >&2; exit 2; }
+command -v udisksctl >/dev/null && command -v busctl >/dev/null || core_fail 1 "Erasing a drive needs udisks (the udisks2 package)"
+found=$(drive_find "$name")
+[[ -n "$found" ]] || core_fail 5 "No drive called $name is plugged in"
+drive_read "$(head -n 1 <<< "$found")"
+whole=$d_whole dname=$d_dname short=$d_short wsize=$d_wsize oldlabel=$d_label
+all=$(drive_volumes | awk -F "$drive_sep" -v w="$whole" '$10 == w')
+# Never a disk the computer runs from: every part must be removable, and none open where the system lives.
+awk -F "$drive_sep" '$12 != "yes" { bad = 1 } $5 ~ /^\/(boot|boot\/efi|efi|home|usr|var|srv|opt)?$/ { bad = 1 } END { exit !bad }' <<< "$all" &&
+  core_fail 6 "takumi drive format erases USB drives and memory cards, not a disk this computer runs from"
+
+# What is on it, in words: the first names in each open part, else its label.
+contents() {
+  local v
+  while IFS= read -r v; do
+    [[ -n "$v" ]] || continue
+    drive_read "$v"
+    case "$d_state" in
+      open) find "$d_mount" -mindepth 1 -maxdepth 1 ! -name '.*' ! -name 'System Volume Information' ! -name '$RECYCLE.BIN' ! -name 'lost+found' 2>/dev/null | sed 's|.*/||' | LC_ALL=C sort ;;
+      closed) echo "${d_label:-a part Takumi has not opened}" ;;
+      locked) echo "a locked part" ;;
+    esac
+  done <<< "$all"
+}
+what=$(contents | awk '{ n++; if (n <= 3) w[n] = $0 }
+  END { if (!n) exit; for (i = 1; i <= n && i <= 3; i++) printf "%s%s", (i == 1 ? "" : (i == n || i == 3 && n == 3 ? " and " : ", ")), w[i]
+        if (n > 3) printf " and %d more", n - 3 }')
+case "$fs" in
+  exfat) becomes="It becomes exFAT, for Mac, Windows and Linux" ;;
+  fat32) becomes="It becomes FAT32, for cameras, TVs and older devices; no file can be over 4 GB" ;;
+  ext4) becomes="It becomes ext4, for Linux only" ;;
+esac
+if [[ -n "$what" ]]; then lost="Everything on it goes: $what."; else lost="Nothing on it can be read now."; fi
+
+# ask_twice <question> <second question>: yes twice, the second within five seconds; "erase" at a terminal.
+ask_twice() {
+  if core_at_tty && ! core_in_core; then
+    local a; printf '%s\n' "$1" >&2
+    IFS= read -r -p "Type erase to erase it: " a || return 1
+    [[ "$a" == erase ]]; return
+  fi
+  core_confirm "$1" || return 1
+  local rc=0; core_confirm_within 5 "$2" || rc=$?
+  return $rc
+}
+ask_twice "Erase $dname? $lost $becomes." "Press Enter again to erase $dname" || core_fail 3 "Nothing was erased"
+
+core_note "Erasing $dname…"
+while IFS= read -r -u 3 v; do
+  [[ -n "$v" ]] || continue
+  drive_read "$v"
+  if [[ $d_state == open ]]; then
+    out=$(LC_ALL=C udisksctl unmount -b "$d_dev" 2>&1) || case "$out" in
+      *[Bb]usy*) core_fail 1 "Something is still using $dname. Close what is open from it, then try again; nothing was erased" ;;
+      *NotMounted*|*"not mounted"*) ;;
+      *) core_fail 1 "$dname could not be closed: $(drive_why "$out" "$d_type"). Nothing was erased" ;;
+    esac
+    drive_forget "$d_dev"
+  fi
+done 3<<< "$all"
+while IFS= read -r -u 3 v; do
+  [[ -n "$v" ]] || continue
+  drive_read "$v"
+  [[ $d_state == unlocked ]] || continue
+  LC_ALL=C udisksctl lock -b "$d_dev" >/dev/null 2>&1 || core_fail 1 "$dname could not be locked; nothing was erased"
+done 3<<< "$all"
+
+# The new name: the old one when it suits the filesystem, else the brand, in its letters.
+label=$oldlabel; label_re='^[A-Za-z0-9 _-]+$'
+[[ "$label" =~ $label_re ]] || label=$short
+[[ "$label" =~ $label_re ]] || label=Drive
+case "$fs" in
+  fat32) label=$(printf '%s' "$label" | tr '[:lower:]' '[:upper:]' | cut -c1-11); table=dos; ptype=0x0c; fstype=vfat; fopts=(1 label s "$label") ;;
+  exfat) label=$(printf '%s' "$label" | cut -c1-15); table=dos; ptype=0x07; fstype=exfat; fopts=(1 label s "$label") ;;
+  ext4) label=$(printf '%s' "$label" | cut -c1-16); table=gpt; ptype=0fc63daf-8483-4772-8e79-3d69d8477de4; fstype=ext4; fopts=(2 label s "$label" take-ownership b true) ;;
+esac
+obj=/org/freedesktop/UDisks2/block_devices/${whole#/dev/}
+# One part from 1 MiB to 1 MiB before the end, whole MiB; udisks aligns it.
+mib=1048576
+size=$(( (wsize / mib - 2) * mib ))
+(( size > 0 )) || core_fail 1 "$dname is too small to erase"
+udisks() { LC_ALL=C busctl --system --allow-interactive-authorization=yes --timeout=600 call org.freedesktop.UDisks2 "$obj" "$@" 2>&1; }
+words() { printf '%s\n' "$1" | sed '/^[[:space:]]*$/d' | tail -n 1 | sed 's/^Call failed: //'; }
+out=$(udisks org.freedesktop.UDisks2.Block Format 'sa{sv}' "$table" 0) || {
+  case "$out" in *otAuthorized*|*"ot authorized"*|*"ccess denied"*) core_fail 1 "Erasing $dname was not allowed; nothing was erased" ;; esac
+  core_fail 1 "$dname could not be erased: $(words "$out")"
+}
+part=""
+for _ in 1 2 3 4 5; do
+  if out=$(udisks org.freedesktop.UDisks2.PartitionTable CreatePartitionAndFormat 'ttssa{sv}sa{sv}' "$mib" "$size" "$ptype" "" 0 "$fstype" "${fopts[@]}"); then
+    part=$(sed -n 's/^o "\(.*\)"$/\1/p' <<< "$out" | head -n 1); break
+  fi
+  sleep 1   # the new partition table takes a moment to show
+done
+[[ -n "$part" ]] || core_fail 1 "$dname is erased, but the new $fs could not be made: $(words "$out")"
+mp=$(drive_mount "$(drive_devname "${part##*/}")" 2>/dev/null) || mp=""
+case "$fs" in exfat) for_what="for Mac, Windows and Linux" ;; fat32) for_what="for cameras, TVs and older devices" ;; ext4) for_what="for Linux" ;; esac
+core_done "$dname is erased and ready, $for_what"

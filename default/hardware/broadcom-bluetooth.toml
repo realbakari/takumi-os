@@ -1,0 +1,14 @@
+# Broadcom Bluetooth (BCM2045 to BCM20702, as in ThinkPads, Dell Wireless 380 and many USB adapters): the
+# kernel asks for a patch file (brcm/BCM*.hcd) that no Arch package carries; the chip works on the firmware
+# built into it. The patch files are in the AUR.
+title = "Broadcom Bluetooth"
+part = "bluetooth"
+works = "partly"
+says = "works on the chip's built-in firmware"
+
+[match]
+usb = ["0a5c:2???", "0a5c:64??", "413c:8197"]
+
+[apply]
+aur = ["broadcom-bt-firmware"]
+note = "This Broadcom Bluetooth chip runs on the firmware built into it, which works for most things. Broadcom's newer firmware for it, which some headsets need, is only in the AUR (broadcom-bt-firmware)."

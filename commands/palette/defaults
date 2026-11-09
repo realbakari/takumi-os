@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for the default apps as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "default" lists each kind of app and the one that opens it: "Browser: Firefox · Enter to choose". A
+# kind's own word ("browser", "pdf", "terminal", "default editor") lists the apps installed that can be it,
+# the one in use first; Enter on another makes it the default (takumi app default). docs/apps.md.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; . "$l/palette.sh"; break; }; done
+declare -F apps_defaults_all >/dev/null && declare -F palette_filter >/dev/null || exit 0
+command -v jq >/dev/null || exit 0
+q=${1:-}
+
+# kind:word. A word of the query (three letters at least) that starts one of these is about that kind; the
+# broad words count only beside "default".
+own="browser:browser browser:browsers mail:mail mail:email terminal:terminal editor:editor pdf:pdf pdf:pdfs images:images images:photos images:pictures video:video video:videos video:movies music:music music:songs files:files files:folders files:finder files:explorer"
+broad="browser:web browser:internet editor:text editor:code images:image images:photo images:picture images:viewer video:films video:film music:audio terminal:console terminal:shell"
+filler=" default defaults app apps the my set change choose make use as to for open with a an of in "
+read -r -a words <<< "$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')"
+general=no; kinds=" "; extra=no
+about() {  # <word> <pairs>: the kinds the word is about
+  local p
+  for p in $2; do [[ "${p#*:}" != "$1"* ]] || printf '%s ' "${p%%:*}"; done
+}
+for w in ${words[@]+"${words[@]}"}; do
+  if (( ${#w} >= 3 )) && [[ "defaults" == "$w"* || "$w" == default* ]]; then general=yes; fi
+done
+[[ " ${words[*]-} " != *" open with "* ]] || general=yes
+for w in ${words[@]+"${words[@]}"}; do
+  k=""
+  if (( ${#w} >= 3 )); then
+    k=$(about "$w" "$own")
+    if [[ $general == yes ]]; then k+=$(about "$w" "$broad"); fi
+  fi
+  for x in $k; do [[ "$kinds" == *" $x "* ]] || kinds+="$x "; done
+  if [[ -z "$k" && "$filler" != *" $w "* && ! ( ${#w} -ge 3 && ( "defaults" == "$w"* || "$w" == default* ) ) ]]; then extra=yes; fi
+done
+[[ $general == yes || "$kinds" != " " ]] || exit 0
+
+table=$(apps_table)
+defaults=$(apps_defaults_all)
+# One line a row for jq: what <tab> kind <tab> app id <tab> app name.
+lines=$(
+  for k in $apps_kinds; do
+    cur=$(awk -F '\t' -v k="$k" '$1 == k { print $2 }' <<< "$defaults")
+    curname=""; [[ -z "$cur" ]] || curname=$(apps_name "$cur")
+    if [[ "$kinds" == *" $k "* || ( $general == yes && $extra == yes && "$kinds" == " " ) ]]; then
+      printf 'current\t%s\t%s\t%s\n' "$k" "$cur" "$curname"
+      apps_candidates "$k" "$table" | awk -F '\t' -v k="$k" -v c="$cur" '$1 != c { print "choice\t" k "\t" $1 "\t" $2 }'
+      if [[ " browser mail editor video " == *" $k "* ]]; then printf 'more\t%s\t\t\n' "$k"; fi
+    elif [[ $general == yes && "$kinds" == " " ]]; then
+      printf 'summary\t%s\t%s\t%s\n' "$k" "$cur" "$curname"
+    fi
+  done
+)
+[[ -n "$lines" ]] || exit 0
+# Each kind's label, words, icon and what it opens, for jq.
+kinfo=$(for k in $apps_kinds; do
+  printf '%s\t%s\t%s\t%s\t%s\n' "$k" "$(apps_kind_label "$k")" "$(apps_kind_what "$k")" "$(apps_kind_glyph "$k")" \
+    "$(for p in $own $broad; do [[ "${p%%:*}" != "$k" ]] || printf '%s ' "${p#*:}"; done)"
+done)
+printf '%s\n' "$lines" | jq -Rc --arg kinfo "$kinfo" --arg shell takumi '
+  ($kinfo | split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: {label: .[1], what: .[2], glyph: .[3], words: .[4]}}) | from_entries) as $k
+  | split("\t") | .[0] as $row | .[1] as $kind | .[2] as $id | .[3] as $name | $k[$kind] as $i
+  | ($i.words | split(" ") | map(select(length > 0)) | .[0]) as $word
+  | {glyph: $i.glyph, kind: "Defaults", steady: true,
+     keywords: ("default defaults app apps open with choose change set use make " + $i.words)}
+  + if $row == "summary" then
+      {id: ("default:" + $kind), title: ($i.label + ": " + (if $name == "" then "none chosen" else $name end)),
+       subtitle: (($i.what | .[0:1] | ascii_upcase) + ($i.what | .[1:]) + " · Enter to choose"),
+       run: ["qs", "-c", $shell, "ipc", "--any-display", "call", "core", "search", ("default " + $word)], score: 0.9}
+    elif $row == "current" then
+      {id: ("default:" + $kind + ":" + $id), title: ($i.label + ": " + (if $name == "" then "none chosen" else $name end)),
+       subtitle: (if $id == "" then "Nothing opens " + $i.what + " yet" else "In use for " + $i.what end), run: ["true"], score: 0.9}
+    elif $row == "choice" then
+      {id: ("default:" + $kind + ":" + $id), title: ($i.label + ": " + $name), subtitle: ("Enter to use it for " + $i.what),
+       run: ["takumi", "app", "default", $kind, $id], score: 0.85}
+    else
+      {id: ("default:" + $kind + ":more"),
+       title: ({"browser": "Get another browser", "mail": "Get a mail app", "editor": "Get another editor", "video": "Get another video player"}[$kind]),
+       subtitle: "Apps you can get by name", glyph: "down",
+       run: ["qs", "-c", $shell, "ipc", "--any-display", "call", "core", "search",
+             ("get " + {"browser": "browser", "mail": "email", "editor": "editor", "video": "video"}[$kind])], score: 0.8}
+    end' | palette_filter "$q"

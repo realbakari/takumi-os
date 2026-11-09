@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Choose power saver, balanced or performance; remembered for battery and for power
+usage: <power-saver|balanced|performance>
+example: takumi power profile power-saver
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; break; }; done
+declare -F power_profiles >/dev/null || { echo "takumi: the power library is missing" >&2; exit 1; }
+want=${1:-}
+case "$want" in power-saver|balanced|performance) ;; *) echo "usage: takumi power profile <power-saver|balanced|performance>" >&2; exit 2 ;; esac
+[[ "$(power_profiles | tr -d '*')" == *"$want"* ]] || { echo "This computer has no $(power_profile_name "$want" | tr '[:upper:]' '[:lower:]') mode"; exit 3; }
+powerprofilesctl set "$want" || { echo "The power mode did not change"; exit 1; }
+src=$(power_source); power_save "profile.$src" "$want"
+when=$([[ $src == battery ]] && echo "on battery" || echo "when plugged in")
+takumi notice "$([[ $want == power-saver ]] && echo leaf || echo bolt)" "$(power_profile_name "$want")" "used $when from now on" >/dev/null 2>&1 || true
+echo "$(power_profile_name "$want"), used $when"

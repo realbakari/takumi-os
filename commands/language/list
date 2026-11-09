@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Every language this computer can speak, by name in English and in its own words
+usage: [--json] [<words>]
+example: takumi language list portuguese
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/language.sh" ]] && { . "$l/language.sh"; break; }; done
+declare -F language_table >/dev/null || { echo "takumi: the language library is missing" >&2; exit 1; }
+# From glibc's own list (/usr/share/i18n/SUPPORTED) and its sources' names (docs/languages.md). Words narrow it.
+json=no; words=""
+for a in "$@"; do
+  case "$a" in --json) json=yes ;; -*) echo "usage: takumi language list [--json] [<words>]" >&2; exit 2 ;; *) words="$words $a" ;; esac
+done
+if [[ -n "${words// /}" ]]; then rows=$(language_find "$words"); else rows=$(language_table | sort -t "$(printf '\t')" -k2,2); fi
+[[ -n "$rows" ]] || { [[ $json == yes ]] || echo "No language here is called${words}"; exit 0; }
+if [[ $json == yes ]]; then
+  jq -Rc 'split("\t") | {code: .[0], name: .[1], own: .[2], language: .[3], territory: .[4]}' <<< "$rows"
+else
+  # awk, not read: a tab is blank space to read, so an empty field would let the next one slide in.
+  awk -F '\t' '{ printf "%-18s %s%s\n", $1, $2, ($3 != "" ? " · " $3 : "") }' <<< "$rows"
+fi

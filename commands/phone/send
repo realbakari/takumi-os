@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Send files to your phone; without files, the files you copied in Files
+usage: [--to phone] [file...]
+example: takumi phone send ~/Documents/ticket.pdf
+risk: 0
+title: Send to phone
+words: phone send share files transfer iphone android mobile
+glyph: folder
+ABOUT
+set -euo pipefail
+# Through KDE Connect's sharing; the phone saves them and says so (docs/sharing.md). Files gives the same through
+# right-click › Scripts › Send to phone. Exit status: 0 sent · 1 not possible · 2 nothing to send or no phone paired.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/share.sh" ]] && { . "$l/share.sh"; break; }; done
+declare -F phone_pick >/dev/null || { echo "takumi: the sharing library is missing" >&2; exit 1; }
+to=""; if [[ "${1:-}" == --to ]]; then to=${2:-}; shift 2 || shift $#; fi
+say() { takumi notice "$1" "$2" "$3" -1 6 >/dev/null 2>&1 || true; echo "$2${3:+: $3}"; }
+files=()
+for f in "$@"; do
+  case "$f" in /*) ;; *) f="$PWD/$f" ;; esac
+  [[ -f "$f" ]] || { say folder "$(basename "$f") is not there" ""; exit 2; }
+  files+=("$f")
+done
+if (( ! $# )); then while IFS= read -r f; do if [[ -n "$f" && -f "$f" ]]; then files+=("$f"); fi; done <<< "$(share_copied)"; fi
+(( ${#files[@]} )) || { say folder "Nothing to send" "copy files in Files first, or right-click them: Scripts, Send to phone"; exit 2; }
+phone_have && phone_start || { say bell "No phone is paired" "type phone in the Core to connect one"; exit 2; }
+phone_pick "$to" || { say bell "No phone is paired" "type phone in the Core to connect one"; exit 2; }
+[[ $phone_near == yes ]] || { say bell "$phone_name is not connected" "open KDE Connect on it, on the same Wi-Fi"; exit 1; }
+for f in "${files[@]}"; do
+  kdeconnect-cli -d "$phone_id" --share "$f" >/dev/null 2>&1 || { say folder "$(basename "$f") did not reach $phone_name" "try once more"; exit 1; }
+done
+if (( ${#files[@]} == 1 )); then say folder "Sent $(basename "${files[0]}") to $phone_name" ""
+else say folder "Sent ${#files[@]} files to $phone_name" ""; fi

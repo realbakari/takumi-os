@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Pin a phase, or auto to follow the clock
+usage: <dawn|day|dusk|night|auto>
+example: takumi phase set night
+risk: 0
+ABOUT
+set -euo pipefail
+p=${1:?phase}
+case "$p" in dawn|day|dusk|night|auto) ;; *) echo "phase must be dawn, day, dusk, night or auto" >&2; exit 2 ;; esac
+cfg="$HOME/.config/takumi/phase.toml"; mkdir -p "$(dirname "$cfg")"; touch "$cfg"
+grep -q '^\[override\]' "$cfg" || printf '\n[override]\n' >> "$cfg"
+if grep -q '^phase *=' "$cfg"; then sed -i "s/^phase *=.*/phase = \"$p\"/" "$cfg"; else sed -i "/^\[override\]/a phase = \"$p\"" "$cfg"; fi
+takumi phase tick --force
+takumi notice sun "${p^}" "the sky follows $( [[ $p == auto ]] && echo "the clock" || echo "your choice")"

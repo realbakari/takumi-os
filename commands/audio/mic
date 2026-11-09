@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Mute or unmute the microphone in use; with no word, the other of the two
+usage: <mute|unmute|toggle>
+example: takumi audio mic mute
+risk: 0
+ABOUT
+set -euo pipefail
+# The microphone key runs this. The Core says which it is now. Where a laptop links the key's light to the
+# sound chip's capture switch, the light follows. Exit 1 when sound is not running, 3 with no microphone.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/audio.sh" ]] && { . "$l/audio.sh"; break; }; done
+declare -F audio_level >/dev/null || { echo "takumi: the sound library is missing" >&2; exit 1; }
+case "${1:-toggle}" in
+  mute) v=1 ;; unmute) v=0 ;; toggle) v=toggle ;;
+  *) echo "usage: takumi audio mic <mute|unmute|toggle>" >&2; exit 2 ;;
+esac
+if ! audio_level source >/dev/null; then
+  wpctl status >/dev/null 2>&1 || audio_fail 1 "Sound is not running"
+  audio_fail 3 "There is no microphone"
+fi
+wpctl set-mute @DEFAULT_AUDIO_SOURCE@ "$v" >/dev/null 2>&1 || audio_fail 1 "Could not change the microphone"
+read -r _ muted <<< "$(audio_level source || echo "0 no")"
+if [[ $muted == yes ]]; then
+  takumi notice micOff "Microphone off" "apps hear nothing" >/dev/null 2>&1 || true; echo "Microphone off"
+else
+  takumi notice mic "Microphone on" >/dev/null 2>&1 || true; echo "Microphone on"
+fi

@@ -1,0 +1,17 @@
+# Dell XPS laptops play through small speaker amplifiers (Cirrus Logic CS35L41 on the XPS 15 and 17, others on
+# newer models) that run their own firmware; without it the speakers stay quiet or play thinly. Arch splits that
+# firmware into linux-firmware-cirrus and linux-firmware-ti, which this keeps installed. A model whose ACPI
+# tables Linux does not know yet plays through headphones only until a newer kernel adds it.
+# Kernel: https://docs.kernel.org/sound/hd-audio/index.html (sound/hda/codecs/side-codecs, cs35l41 and tas2781)
+title = "Dell XPS speakers"
+part = "sound"
+
+[match]
+dmi_vendor = "^Dell"
+dmi_product = "^XPS"
+laptop = true
+arch = ["x86_64"]
+
+[apply]
+packages = ["linux-firmware-cirrus", "linux-firmware-ti"]
+note = "The XPS's speakers are driven by small amplifiers that run their own firmware, which this keeps on the computer. If the speakers stay silent while headphones work, this model's amplifiers are newer than this kernel; a later update usually brings them."

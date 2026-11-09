@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Run pending per-user migrations
+usage: [--pending|--stage]
+risk: 0
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+src=""; for d in /usr/share/takumi/migrations "$here/../../migrations"; do [[ -d "$d" ]] && { src=$d; break; }; done
+[[ -n "$src" ]] || exit 0
+state="$HOME/.local/state/takumi/migrations"; mkdir -p "$state"
+pending=(); for m in "$src"/*.sh; do [[ -f "$m" && ! -f "$state/$(basename "$m")" ]] && pending+=("$m"); done
+case "${1:-}" in
+  --pending) printf '%s\n' "${pending[@]##*/}"; (( ${#pending[@]} )) ;;
+  --stage) printf '%s\n' "${pending[@]##*/}" > "$state/pending"; exit 0 ;;
+  *) for m in "${pending[@]}"; do echo ":: migration $(basename "$m")"; bash "$m" && touch "$state/$(basename "$m")"; done; rm -f "$state/pending" ;;
+esac

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Zoom: a magnified strip along the top of the screen showing the window you are in, larger
+usage: [on|off|closer|farther]
+example: takumi switch zoom
+example: takumi switch zoom closer
+risk: 0
+title: Zoom
+words: accessibility a11y zoom magnifier magnify enlarge bigger larger screen see vision loupe
+glyph: search
+ABOUT
+set -euo pipefail
+# The shell draws it (shell/Core/Zoom.qml): this command asks it over IPC, which answers "on <level>" or "off".
+# Super+Alt+= is closer, Super+Alt+- farther, Super+Alt+0 off, Super+Alt+arrows move it (docs/accessibility.md).
+# Without a word it switches over. Exit status: 0 done · 2 usage · 3 the shell is not running.
+case "${1:-}" in
+  "") call=toggle ;;
+  on) call=start ;;
+  off) call=hide ;;
+  closer | farther) call=$1 ;;
+  *) echo "usage: takumi switch zoom [on|off|closer|farther]" >&2; exit 2 ;;
+esac
+out=$(qs -c takumi ipc call zoom "$call" 2>/dev/null | tail -n 1) || out=""
+case "$out" in
+  on\ *) level=${out#on }; echo "Zoom on, ${level} times"
+         takumi notice search "Zoom ${level}×" "Super+Alt+= and - change it, Super+Alt+0 turns it off" >/dev/null 2>&1 || true ;;
+  off) echo "Zoom off" ;;
+  *) echo "Zoom needs the desktop's shell, which is not running" >&2; exit 3 ;;
+esac

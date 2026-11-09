@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# Boot the real Takumi desktop in a QEMU virtual machine on a Mac (Apple Silicon) or Linux host.
+#
+#   test/vm install          unattended: boot the installer headless, provision the disk, power off
+#   test/vm iso              boot the archboot aarch64 installer with a fresh disk, in a window
+#   test/vm run [--headless] boot the installed disk, full screen (TAKUMI_VM_WINDOW=1: in a window;
+#                            headless: no window, serial log in the VM dir)
+#   test/vm serial           boot the installed disk on this terminal's serial console
+#   test/vm ssh [command]    a shell or a command in the running VM, as the takumi user
+#   test/vm shot <file.png>  save what the VM's screen shows
+#   test/vm key <keys>       press keys, QEMU names: meta_l-spc, ret, esc, ctrl-alt-f2
+#   test/vm type <text>      type text
+#   test/vm rescue <cmd>...  boot the live installer with the disk attached, run commands, power off
+#   test/vm sync             push this working tree into the running VM and reinstall shell, commands, config
+#   test/vm restart          end the VM's desktop session; the login screen comes back
+#   test/vm wifi [portal|no-portal]  four simulated Wi-Fi networks to join; portal: a sign-in page
+#   test/vm stop             power the VM off
+#   test/vm reset            delete the disk and firmware vars
+#
+# The repo is also shared into the guest as a 9p mount (tag "takumi"):
+#   sudo mount -t 9p -o trans=virtio,version=9p2000.L takumi /mnt
+# See docs/vm.md.
+set -euo pipefail
+
+cmd=${1:-run}; shift || true
+headless=0; for a in "$@"; do [[ "$a" == --headless ]] && headless=1; done
+serial_dev=${TAKUMI_VM_SERIAL:-}
+[[ "$cmd" == serial ]] && { cmd=run; headless=1; serial_dev=${serial_dev:-mon:stdio}; }
+
+repo=$(cd -- "$(dirname -- "$(readlink -f "$0")")/.." && pwd)
+dir=${TAKUMI_VM_DIR:-$HOME/.local/share/takumi-vm}
+iso=${TAKUMI_VM_ISO:-$dir/archboot-aarch64.iso}
+iso_url=${TAKUMI_VM_ISO_URL:-https://release.archboot.com/aarch64/latest/iso/}
+disk=$dir/takumi.qcow2
+vars=$dir/efi-vars.fd
+# Software drawing runs on the CPUs: all but two of the host's, four at least, eight at most; a quarter of
+# its memory, 3 to 6 GiB.
+host_cpus=$( (sysctl -n hw.ncpu 2>/dev/null || nproc) | head -n 1)
+host_mib=$(( $( (sysctl -n hw.memsize 2>/dev/null || awk '/MemTotal/ { print $2 * 1024 }' /proc/meminfo) | head -n 1) / 1048576 ))
+cpus=${TAKUMI_VM_CPUS:-$(( host_cpus - 2 < 4 ? 4 : (host_cpus - 2 > 8 ? 8 : host_cpus - 2) ))}
+mem=${TAKUMI_VM_MEM:-$(( host_mib / 4 < 3072 ? 3072 : (host_mib / 4 > 6144 ? 6144 : host_mib / 4) ))}
+size=${TAKUMI_VM_DISK:-24G}
+mport=${TAKUMI_VM_MONITOR_PORT:-4557}    # QEMU's monitor, for screenshots and keys
+sport=${TAKUMI_VM_SSH_PORT:-2222}
+mkdir -p "$dir"
+
+# True when a Takumi VM answers on the monitor port: one is running, or still shutting down after test/vm stop.
+vm_running() {
+  python3 -I -c 'import socket, sys
+try: socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=1).close()
+except OSError: sys.exit(1)' "$mport"
+}
+no_other_vm() {
+  vm_running || return 0
+  echo "a Takumi VM is already running (its monitor answers on port $mport), or is still shutting down after test/vm stop: wait a few seconds and try again" >&2
+  exit 1
+}
+
+# One command to QEMU's human monitor; prints the reply.
+mon() {
+  python3 -I - "$mport" "$*" <<'PY'
+import socket, sys, time
+try:
+    s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
+except OSError:
+    sys.exit("the VM is not running (no monitor on port %s)" % sys.argv[1])
+time.sleep(0.2); s.recv(65536)
+s.sendall((sys.argv[2] + "\n").encode()); time.sleep(0.8)
+try: sys.stdout.write(s.recv(65536).decode(errors="replace").split("\n", 1)[-1].replace("(qemu) ", ""))
+except OSError: pass
+PY
+}
+
+case "$cmd" in
+  ssh)
+    # VM only: the takumi user's password is set by install/vm/provision.sh.
+    ask="$dir/askpass"; printf '#!/bin/sh\necho takumi\n' > "$ask"; chmod 700 "$ask"
+    exec env SSH_ASKPASS="$ask" SSH_ASKPASS_REQUIRE=force DISPLAY=:0 ssh -p "$sport" \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+      -o ConnectTimeout=20 -o PubkeyAuthentication=no -o PreferredAuthentications=password \
+      takumi@127.0.0.1 "$@" ;;
+  shot)
+    out=${1:?usage: test/vm shot <file.png>}; [[ "$out" == /* ]] || out="$PWD/$out"
+    rm -f "$out"; mon "screendump $out -f png" >/dev/null
+    for _ in $(seq 1 50); do [[ -s "$out" ]] && break; sleep 0.1; done
+    [[ -s "$out" ]] || { echo "no screenshot written" >&2; exit 1; }
+    echo "$out"; exit 0 ;;
+  key)
+    for k in "$@"; do mon "sendkey $k" >/dev/null; sleep 0.15; done; exit 0 ;;
+  type)
+    python3 -I - "$mport" "$*" <<'PY'
+import socket, sys, time
+names = {" ": "spc", "-": "minus", "=": "equal", ",": "comma", ".": "dot", "/": "slash", ";": "semicolon",
+         "'": "apostrophe", "\n": "ret", "\t": "tab", "[": "bracket_left", "]": "bracket_right", "\\": "backslash", "`": "grave_accent"}
+shifted = {"!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0",
+           "_": "minus", "+": "equal", "<": "comma", ">": "dot", "?": "slash", ":": "semicolon", '"': "apostrophe",
+           "{": "bracket_left", "}": "bracket_right", "|": "backslash", "~": "grave_accent"}
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5); time.sleep(0.2); s.recv(65536)
+for ch in sys.argv[2]:
+    if ch.isalpha() and ch.isupper(): k = "shift-" + ch.lower()
+    elif ch.isalnum(): k = ch
+    elif ch in names: k = names[ch]
+    elif ch in shifted: k = "shift-" + shifted[ch]
+    else: continue
+    s.sendall(("sendkey %s\n" % k).encode()); time.sleep(0.06)
+time.sleep(0.3)
+PY
+    exit 0 ;;
+  stop) mon "system_powerdown" >/dev/null || true; exit 0 ;;
+  sync)
+    COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$repo" --exclude .git --exclude preview -czf - . | "$0" ssh 'set -e
+      d=~/.local/share/takumi; rm -rf "$d"; mkdir -p "$d"; tar xzf - -C "$d" 2>/dev/null
+      for s in 20-system 40-session; do TAKUMI_ONLY=$s bash "$d/install/run.sh" >/dev/null; done
+      mkdir -p ~/.config/niri/takumi; cp "$d"/config/niri/config.kdl ~/.config/niri/; cp "$d"/config/niri/takumi/defaults.kdl ~/.config/niri/takumi/
+      for f in overrides.kdl outputs.kdl; do [ -e ~/.config/niri/takumi/$f ] || cp "$d"/config/niri/takumi/$f ~/.config/niri/takumi/; done
+      takumi phase tick --force >/dev/null
+      # Quickshell reloads changed QML in place, which strands a login screen in the middle of a login.
+      [ -n "$(loginctl list-sessions --no-legend | awk "\$4 == \"seat0\" && \$3 != \"greeter\"")" ] || sudo systemctl restart greetd
+      echo synced'
+    exit $? ;;
+  wifi)
+    "$0" ssh "bash -s -- ${1:-}" < "$repo/install/vm/wifi-rig.sh"; exit $? ;;
+  restart)
+    # Ends the desktop session; greetd shows the login screen again, with any new greeter files. (A
+    # getty on tty1 would push greetd off and leave a text login.)
+    "$0" ssh 'for s in $(loginctl list-sessions --no-legend | awk "\$4 == \"seat0\" && \$3 != \"greeter\" {print \$1}"); do sudo loginctl terminate-session "$s"; done
+      echo restarted'
+    exit $? ;;
+esac
+
+case "$(uname -s)" in
+  Darwin) accel=hvf; fw_dir=/opt/homebrew/share/qemu; [[ -d $fw_dir ]] || fw_dir=/usr/local/share/qemu
+          # Full screen, the picture scaled to it (docs/vm.md); TAKUMI_VM_WINDOW=1 keeps a window.
+          display=cocoa,zoom-to-fit=on,zoom-interpolation=off ;;
+  *)      accel=kvm; fw_dir=/usr/share/edk2/aarch64; display=gtk,zoom-to-fit=on ;;
+esac
+# The VM's first screen size: half the screen's pixels on a Retina Mac, at most 1920 wide, a size the
+# firmware's screen holds (a bigger one starts it 640 pixels wide, and QEMU fits its window to that).
+# QEMU then gives the VM its window's real size, which takumi vm display draws at twice the scale on a
+# Retina screen (docs/vm.md). TAKUMI_VM_RES=WxH sets it.
+res=${TAKUMI_VM_RES:-}
+if [[ -z "$res" && "$(uname -s)" == Darwin ]]; then
+  res=$(system_profiler SPDisplaysDataType 2>/dev/null | awk '/Resolution:/ {
+    w = $2; h = $4; if ($5 == "Retina") { w = int(w / 2); h = int(h / 2) }
+    if (w > 1920) { h = int(h * 1920 / w); w = 1920 }
+    printf "%dx%d", w - w % 8, h - h % 8; exit }')
+fi
+res=${res:-1440x900}
+xres=${res%x*}; yres=${res#*x}
+command -v qemu-system-aarch64 >/dev/null || { echo "qemu-system-aarch64 missing. macOS: brew install qemu. Arch: pacman -S qemu-full edk2-aarch64" >&2; exit 1; }
+code=""
+for f in "$fw_dir"/edk2-aarch64-code.fd "$fw_dir"/QEMU_EFI.fd; do [[ -f "$f" ]] && { code=$f; break; }; done
+[[ -n "$code" ]] || { echo "no aarch64 UEFI firmware under $fw_dir" >&2; exit 1; }
+[[ -f "$vars" ]] || { if [[ -f "$fw_dir/edk2-arm-vars.fd" ]]; then cp "$fw_dir/edk2-arm-vars.fd" "$vars"; else truncate -s 64M "$vars"; fi; }
+
+fetch_iso() {
+  [[ -f "$iso" ]] && return
+  echo ":: fetching the latest archboot aarch64 ISO"
+  local name
+  name=$(curl -fsSL "$iso_url" | grep -o 'archboot-[^"]*-aarch64-ARCH-aarch64\.iso' | head -1)
+  [[ -n "$name" ]] || { echo "could not find an ISO at $iso_url" >&2; exit 1; }
+  curl -fL --retry 3 -o "$iso" "$iso_url$name"
+}
+
+case "$cmd" in
+  reset) rm -f "$disk" "$vars"; echo "removed $disk and $vars"; exit 0 ;;
+  iso)   fetch_iso; [[ -f "$disk" ]] || qemu-img create -f qcow2 "$disk" "$size" >/dev/null ;;
+  install)
+    no_other_vm
+    fetch_iso; rm -f "$disk" "$vars"; qemu-img create -f qcow2 "$disk" "$size" >/dev/null
+    # TCP, not a unix socket: macOS caps socket paths at 104 bytes.
+    port=${TAKUMI_VM_SERIAL_PORT:-4555}
+    # The live installer kernel has no 9p, so the repo also goes over HTTP: the guest reaches the
+    # host's loopback at 10.0.2.2 through QEMU's user network.
+    hport=${TAKUMI_VM_HTTP_PORT:-4556}
+    mkdir -p "$dir/share"
+    COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$repo" --exclude .git --exclude preview -czf "$dir/share/takumi.tgz" .
+    python3 -m http.server "$hport" --bind 127.0.0.1 --directory "$dir/share" >/dev/null 2>&1 &
+    hpid=$!
+    TAKUMI_VM_SERIAL="tcp:127.0.0.1:$port,server,nowait" "$0" iso --headless > "$dir/qemu.log" 2>&1 &
+    qpid=$!
+    trap 'kill $qpid $hpid 2>/dev/null || true' EXIT
+    sleep 3; kill -0 "$qpid" 2>/dev/null || { cat "$dir/qemu.log" >&2; exit 1; }   # QEMU did not start: say why
+    python3 -I "$repo/install/vm/drive.py" "127.0.0.1:$port" "$dir/install-serial.log" "$hport" && rc=0 || rc=$?
+    wait $qpid 2>/dev/null || true
+    (( rc == 0 )) && echo ":: installed. Boot it with: test/vm run"
+    exit $rc ;;
+  rescue)
+    # Boot the live installer with the disk attached, run each argument as a shell command on its
+    # serial console, print the output, power off. For looking inside a VM that does not boot.
+    no_other_vm; fetch_iso
+    port=${TAKUMI_VM_SERIAL_PORT:-4555}
+    TAKUMI_VM_SERIAL="tcp:127.0.0.1:$port,server,nowait" "$0" iso --headless > "$dir/qemu.log" 2>&1 &
+    qpid=$!
+    trap 'kill $qpid 2>/dev/null || true' EXIT
+    sleep 3; kill -0 "$qpid" 2>/dev/null || { cat "$dir/qemu.log" >&2; exit 1; }
+    python3 -I "$repo/install/vm/console.py" "127.0.0.1:$port" "$dir/rescue-serial.log" "$@" && rc=0 || rc=$?
+    mon "quit" >/dev/null 2>&1 || true
+    wait $qpid 2>/dev/null || true
+    exit $rc ;;
+  run)
+    [[ -f "$disk" ]] || { echo "no disk yet: run test/vm install first" >&2; exit 1; }
+    # A fresh qcow2 is a few hundred KB: an install that did not finish leaves one behind.
+    (( $(wc -c < "$disk") > 10 * 1024 * 1024 )) || { echo "the disk is empty, an install did not finish: run test/vm install" >&2; exit 1; } ;;
+  *)     sed -n '2,21p' "$0"; exit 2 ;;
+esac
+
+args=(
+  -M virt,highmem=on -accel "$accel" -cpu host -smp "$cpus" -m "$mem"
+  -drive if=pflash,format=raw,readonly=on,file="$code"
+  -drive if=pflash,format=raw,file="$vars"
+  -drive file="$disk",if=none,id=hd0,format=qcow2,discard=unmap
+  -device virtio-blk-pci,drive=hd0,bootindex=1
+  -device virtio-gpu-pci,xres="$xres",yres="$yres" -device virtio-keyboard-pci -device virtio-tablet-pci
+  -device virtio-rng-pci
+  -netdev user,id=n0,hostfwd=tcp:127.0.0.1:$sport-:22 -device virtio-net-pci,netdev=n0
+  -virtfs local,path="$repo",mount_tag=takumi,security_model=mapped-xattr,id=takumi
+  -device qemu-xhci -device usb-kbd
+  -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0
+  -monitor "tcp:127.0.0.1:$mport,server,nowait"
+)
+# Explicit boot indexes: the firmware otherwise tries network boot first and can forget the CD.
+[[ "$cmd" == iso ]] && args+=(-device virtio-scsi-pci -device scsi-cd,drive=cd0,bootindex=0 -drive if=none,id=cd0,file="$iso",format=raw,readonly=on)
+if (( headless )); then
+  args+=(-display none -serial "${serial_dev:-file:$dir/serial.log}")
+else
+  # Full screen unless a window is asked for; a window is marked in the VM's DMI version, which
+  # takumi vm display reads.
+  args+=(-display "$display" -serial "file:$dir/serial.log")
+  [[ "${TAKUMI_VM_WINDOW:-}" == 1 ]] || args+=(-full-screen)
+fi
+no_other_vm
+echo ":: qemu-system-aarch64 ($accel, ${cpus} cpus, ${mem} MiB, screen ${xres}x${yres}) disk=$disk"
+if [[ "$(uname -s)" == Darwin ]] && (( ! headless )) && [[ "${TAKUMI_VM_WINDOW:-}" != 1 ]]; then
+  echo ":: The VM fills the screen, on a desktop of its own: swipe sideways with three fingers (or press"
+  echo "   Control and an arrow key) to go between it and this one. TAKUMI_VM_WINDOW=1 opens a window instead."
+fi
+exec qemu-system-aarch64 "${args[@]}"

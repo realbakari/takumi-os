@@ -1,0 +1,15 @@
+# Holds the battery at the limit chosen with takumi power charge-limit, kept in /var/lib/takumi/charge-limit: at each
+# start, and again after waking, because some laptops forget it while asleep (docs/power.md). That command turns it
+# on; without the file it does nothing.
+[Unit]
+Description=Takumi: hold the battery at the charge limit you chose
+RequiresMountsFor=/var/lib/takumi
+ConditionPathExists=/var/lib/takumi/charge-limit
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/takumi power charge-limit --apply
+
+[Install]
+WantedBy=multi-user.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

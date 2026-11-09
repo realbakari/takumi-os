@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: One line for the resting Core: the VPN carrying this computer's traffic, if any
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "up <name>" while a VPN carries this computer's traffic (Tailscale while one of its exit nodes does), "connecting
+# <name>" while one starts, and nothing otherwise: the resting Core shows its mark from this (docs/vpn.md).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/vpn.sh" ]] && { . "$l/vpn.sh"; break; }; done
+declare -F vpn_in_use >/dev/null || exit 0
+command -v nmcli >/dev/null || command -v tailscale >/dev/null || exit 0
+vpn_in_use

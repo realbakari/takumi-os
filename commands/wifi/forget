@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Forget a saved Wi-Fi network and its password
+usage: <name>
+example: takumi wifi forget "Old Office"
+risk: 1
+words: wifi wi-fi forget remove saved network
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib/wifi.sh "$(dirname "$(readlink -f "$0")")/../../lib/wifi.sh"; do [[ -f "$l" ]] && { . "$l"; break; }; done
+declare -F wifi_scan >/dev/null || { echo "takumi: the Wi-Fi library is missing" >&2; exit 1; }
+
+name=${1:-}
+[[ -n "$name" ]] || { echo "usage: takumi wifi forget <name>" >&2; exit 2; }
+uuids=$(wifi_saved_uuids "$name")
+[[ -n "$uuids" ]] || { echo "No saved network called $name"; exit 1; }
+while IFS= read -r u; do nmcli connection delete uuid "$u" >/dev/null; done <<< "$uuids"
+takumi notice wifiOff "Forgot $name" "it asks for the password next time" >/dev/null 2>&1 || true
+echo "Forgot $name"

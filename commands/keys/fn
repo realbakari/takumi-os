@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Choose what the keyboard's top row does first: F1 to F12, or brightness, sound and media
+usage: [fkeys|media|show]
+example: takumi keys fn fkeys
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+# Two kinds of keyboard say which way round the top row goes (docs/laptop-keys.md):
+#   Apple's, and keyboards that copy them, through the hid_apple driver: its fnmode, 1 media keys first, 2 F1-F12
+#   first. Set now in /sys/module/hid_apple/parameters/fnmode, and at every start in
+#   /etc/modprobe.d/takumi-fn.conf.
+#   Laptops whose driver shows the Fn lock: Lenovo's (ideapad_laptop, fn_lock) and Huawei's (huawei-wmi,
+#   fn_lock_state), 1 F1-F12 first. The laptop's firmware keeps it.
+# Any other keyboard decides in its firmware: most have an Fn lock key (Fn+Esc on many), or a setting before
+# the computer starts. Without a word it switches over. Exit status: 0 done · 2 usage · 3 no password ·
+# 4 this keyboard has no switch Takumi can reach.
+self=$(readlink -f "$0")
+for l in /usr/share/takumi/lib "$(dirname "$self")/../../lib"; do [[ -f "$l/keys.sh" ]] && { . "$l/core.sh"; . "$l/keys.sh"; break; }; done
+declare -F keys_fn_now >/dev/null && declare -F core_sudo >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+modprobe_conf=${TAKUMI_MODPROBE_D:-/etc/modprobe.d}/takumi-fn.conf
+
+now=$(keys_fn_now)
+want=${1:-}
+case "$want" in
+  show)
+    case "$now" in
+      fkeys) echo "The top row types F1 to F12 first; with Fn, brightness, sound and media" ;;
+      media) echo "The top row changes brightness, sound and media first; with Fn, F1 to F12" ;;
+      *) echo "This keyboard decides in its firmware: an Fn lock key (Fn+Esc on many) switches it" ;;
+    esac
+    exit 0 ;;
+  fkeys | media) ;;
+  "") [[ -n "$now" ]] || core_fail 4 "This keyboard decides in its firmware: an Fn lock key (Fn+Esc on many) switches it"
+      if [[ $now == fkeys ]]; then want=media; else want=fkeys; fi ;;
+  *) echo "usage: takumi keys fn [fkeys|media|show]" >&2; exit 2 ;;
+esac
+[[ -n "$now" ]] || core_fail 4 "This keyboard decides in its firmware: an Fn lock key (Fn+Esc on many) switches it"
+
+why="Changing the top row needs your password"
+if [[ $want == fkeys ]]; then mode=2 lock=1; else mode=1 lock=0; fi
+core_note "Changing the top row…"
+if apple=$(keys_fn_apple); then
+  # Now, and from the next start on.
+  printf '%s\n' "# The top row (takumi keys fn, docs/laptop-keys.md): 1 media keys first, 2 F1-F12 first." "options hid_apple fnmode=$mode" |
+    core_sudo "$why" sh -c 'mkdir -p "${1%/*}" && cat > "$1" && printf "%s\n" "$2" > "$3"' _ "$modprobe_conf" "$mode" "$apple" >/dev/null ||   # /etc/modprobe.d/takumi-fn.conf, /sys/module/hid_apple/parameters/fnmode
+    core_fail 3 "Nothing changed: the top row needs your password"
+fi
+locks=$(keys_fn_locks)
+if [[ -n "$locks" ]]; then
+  # shellcheck disable=SC2086 # one path per word: sysfs paths hold no spaces
+  core_sudo "$why" sh -c 'v=$1; shift; for f in "$@"; do printf "%s\n" "$v" > "$f"; done' _ "$lock" $locks >/dev/null ||   # /sys/bus/platform/devices/*/fn_lock, /sys/devices/platform/huawei-wmi/fn_lock_state
+    core_fail 3 "Nothing changed: the top row needs your password"
+fi
+if [[ $want == fkeys ]]; then
+  core_in_core || takumi notice keyboard "Top row: F1 to F12 first" "hold Fn for brightness, sound and media" >/dev/null 2>&1 || true
+  core_done "The top row types F1 to F12 first; hold Fn for brightness, sound and media"
+else
+  core_in_core || takumi notice keyboard "Top row: media keys first" "hold Fn for F1 to F12" >/dev/null 2>&1 || true
+  core_done "The top row changes brightness, sound and media first; hold Fn for F1 to F12"
+fi

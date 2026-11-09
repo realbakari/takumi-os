@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for the time zone, the clock, reminders, timers, the weather and updates as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# The time zone, the clock's format and clocks for other cities ("time", "clock", "zone", or a city's name:
+# "tokyo" shows Tokyo's time), reminders and timers ("remind", "timer"; "remind me at 3 to call Ana" and
+# "timer 10 tea" become rows that set them), the weather in Today ("weather") and updates ("update"). See
+# docs/time.md and docs/updates.md. Nothing here waits on the network: the weather is the kept one, asked again
+# in the background when it is old.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do
+  [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/weather.sh"; . "$l/rooms.sh"; . "$l/palette.sh"; break; }
+done
+declare -F clock_zone >/dev/null && declare -F weather_cached >/dev/null && declare -F palette_filter >/dev/null || exit 0
+q=${1:-}
+palette_short "$q" && exit 0
+command -v jq >/dev/null || exit 0
+ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
+qw=(); read -r -a qw <<< "$ql"
+(( ${#qw[@]} )) || exit 0
+# has <words...>: a word of the query, three letters or more, starts one of these.
+has() { local w t; for w in "${qw[@]}"; do (( ${#w} >= 3 )) || continue; for t in "$@"; do [[ "$t" == "$w"* ]] && return 0; done; done; return 1; }
+now=$(clock_now)
+# Read only when a topic or a city needs them: most queries are about something else.
+here="" zone="" city=""
+facts() { if [[ -z "$zone" ]]; then here=$(clock_offset); zone=$(clock_zone); city=$(clock_city "$zone"); fi; }
+row() { jq -cn "$@"; }   # row <jq arguments> <filter>: one row
+
+{
+# ---- The time zone, the clock's format, clocks for other places
+if has time timezone zone clock clocks travel; then
+  facts
+  Z=$zone C=$city T=$(clock_hm "$now") K=$(clock_country "$zone") row '{id: "time:zone", title: ("Time zone: " + env.C),
+    subtitle: ([env.T, env.K, "Enter to change"] | map(select(. != "")) | join(" · ")), glyph: "clock", kind: "Time",
+    keywords: "time zone timezone clock city travel location", converse: true, run: ["takumi", "clock", "zone"], score: 0.9}'
+  if clock_auto_on; then
+    row '{id: "time:auto", title: "Time zone by location: on", subtitle: "Asks ipinfo.io on each new network · Enter to turn off", glyph: "globe",
+      kind: "Time", keywords: "time zone timezone automatic location travel auto network", converse: true, run: ["takumi", "clock", "auto", "off"], score: 0.8}'
+  else
+    row '{id: "time:auto", title: "Set the time zone by location", subtitle: "Off · on each new network, asks ipinfo.io which time zone your internet address is in",
+      glyph: "globe", kind: "Time", keywords: "time zone timezone automatic location travel auto network", risk: 1, converse: true,
+      run: ["takumi", "clock", "auto", "on"], score: 0.8}'
+  fi
+  if [[ "$(clock_format)" == 12h ]]; then other=24h; else other=12h; fi
+  O=$other T=$(clock_fmt=$other; clock_hm "$now") row '{id: "time:format", title: ("Use the " + (env.O | rtrimstr("h")) + "-hour clock"),
+    subtitle: (env.T + " in the Core, the lock and Today"), glyph: "clock", kind: "Time", keywords: "time clock format 12 24 hour am pm",
+    run: ["takumi", "clock", "format", env.O], score: 0.75}'
+fi
+mine=""
+if has time clock clocks world city cities; then
+  facts; mine=$(clock_cities)
+  while IFS='|' read -r c z; do
+    [[ -n "$c" && -n "$z" ]] || continue
+    off=$(clock_offset "$z")
+    C=$c Z=$z T=$(clock_hm "$now" "$z") D=$(clock_diff $(( off - here ))) row '{id: ("time:city:" + env.Z), title: (env.C + " " + env.T),
+      subtitle: (env.D + " · in Today · Enter to take it out"), glyph: "clock", kind: "Time", steady: true,
+      keywords: "world clock clocks time city remove", run: ["takumi", "clock", "remove", env.C], score: 0.85}'
+  done <<< "$mine"
+  row '{id: "time:add", title: "Add a clock to Today", subtitle: "Another city'"'"'s time beside the month", glyph: "clock", kind: "Time",
+    keywords: "world clock clocks time city add another", converse: true, run: ["takumi", "clock", "add"], score: 0.7}'
+fi
+# A city or a country by name: its time, a press away from Today; with "zone" or "travel", a row that moves
+# the clock there.
+place=""
+for w in "${qw[@]}"; do
+  case "$w" in time|timezone|zone|clock|clocks|world|city|cities|set|to|in|the|change|travel|move|add|what|is|it|now|weather|remind|me|timer|update|updates) ;;
+    *) place="${place:+$place }$w" ;;
+  esac
+done
+if (( ${#place} >= 3 )); then
+  if has time clock zone timezone world travel; then most=3; else most=2; fi
+  found=$(clock_find "$place" | awk -F '\t' '!seen[$1]++')
+  if [[ -n "$found" ]]; then facts; [[ -n "$mine" ]] || mine=$(clock_cities); fi
+  # A country with several time zones ("united", "brazil") is not a city: no rows for its first few.
+  first=$(printf '%s\n' "$found" | sed -n 1p | cut -f3)
+  if (( $(grep -c . <<< "$found" || true) > 1 )) && [[ "$(clock_fold "$first")" == "$(clock_fold "$place")"* ]]; then found=""; fi
+  n=0
+  while IFS=$'\t' read -r z c k; do
+    [[ -n "$z" ]] || continue
+    (( n < most )) || break
+    n=$((n + 1))
+    off=$(clock_offset "$z")
+    if [[ "$z" != "$zone" && $'\n'"$mine"$'\n' != *"|$z"$'\n'* ]]; then
+      Z=$z C=$c K=$k T=$(clock_hm "$now" "$z") D=$(clock_diff $(( off - here ))) row '{id: ("time:city:" + env.Z), title: (env.C + " " + env.T),
+        subtitle: ([env.K, env.D, "Enter to add to Today"] | map(select(. != "")) | join(" · ")), glyph: "clock", kind: "Time",
+        keywords: ("time clock world city add " + (env.K | ascii_downcase)), run: ["takumi", "clock", "add", env.Z], score: 0.6}'
+    fi
+    if [[ "$z" != "$zone" ]] && has zone timezone travel move; then
+      Z=$z C=$c K=$k T=$(clock_hm "$now" "$z") row '{id: ("time:set:" + env.Z), title: ("Set the time zone to " + env.C),
+        subtitle: ([env.K, "the clock would say " + env.T] | map(select(. != "")) | join(" · ")), glyph: "clock", kind: "Time",
+        keywords: "time zone timezone set change travel move", risk: 1, converse: true, run: ["takumi", "clock", "zone", env.Z], score: 0.7}'
+    fi
+  done <<< "$found"
+fi
+
+# ---- Reminders and timers
+coming=""
+if has remind reminder reminders remember timer timers countdown; then coming=$(remind_lines); fi
+if [[ "${qw[0]}" == remind* ]]; then
+  words=(); read -r -a words <<< "$q"; words=("${words[@]:1}")
+  if (( ${#words[@]} )) && r=$(clock_when "${words[@]}"); then
+    at=${r%%$'\t'*}; what=${r#*$'\t'}
+    if (( at - now <= 3600 )); then when="in $(clock_length $(( at - now )))"; else when=$(clock_say_when "$at"); fi
+    J=$(printf '%s\n' "${words[@]}" | jq -R . | jq -cs .)
+    W=$when T=$what Q=$q row --argjson run "$J" '{id: "remind:new", title: ("Remind me " + env.W + (if env.T == "" then "" else ": " + env.T end)),
+      subtitle: (if env.T == "" then "Enter, then say what" else "Enter to set it · it rings in the Core" end), glyph: "bell", kind: "Reminder",
+      keywords: env.Q, converse: true, run: (["takumi", "remind"] + $run), score: 1.0}'
+  elif (( ${#words[@]} )); then
+    J=$(printf '%s\n' "${words[@]}" | jq -R . | jq -cs .)
+    T=$(printf '%s ' "${words[@]}" | sed 's/ $//; s/^me //; s/^to //') Q=$q row --argjson run "$J" '{id: "remind:new", title: ("Remind me to " + env.T),
+      subtitle: "Enter, then say when: in 10 min, at 15:00, tomorrow 9:00", glyph: "bell", kind: "Reminder", keywords: env.Q,
+      converse: true, run: (["takumi", "remind"] + $run), score: 0.95}'
+  fi
+fi
+if has remind reminder reminders remember; then
+  row '{id: "remind:ask", title: "Set a reminder", subtitle: "What and when: in 10 min, at 15:00, tomorrow 9:00", glyph: "bell", kind: "Reminder",
+    keywords: "remind reminder reminders remember alarm", converse: true, run: ["takumi", "remind"], score: 0.8}'
+  while IFS=$'\t' read -r id kind at _ text; do
+    [[ "$kind" == remind ]] || continue
+    I=$id T=$text W=$(clock_say_when "$at") row '{id: ("remind:" + env.I), title: env.T, subtitle: ("Reminder " + env.W + " · Enter to cancel"),
+      glyph: "bell", kind: "Reminder", steady: true, keywords: "remind reminder reminders remember cancel", risk: 1,
+      run: ["takumi", "remind", "cancel", env.I], score: 0.85}'
+  done <<< "$coming"
+fi
+if [[ "${qw[0]}" == timer || "${qw[${#qw[@]}-1]}" == timer ]] && (( ${#qw[@]} > 1 )); then
+  words=(); read -r -a words <<< "$q"
+  if [[ "${qw[0]}" == timer ]]; then words=("${words[@]:1}"); else words=("${words[@]:0:${#words[@]}-1}"); fi
+  if r=$(clock_duration "${words[@]}"); then
+    secs=${r%%$'\t'*}; name=${r#*$'\t'}
+    J=$(printf '%s\n' "${words[@]}" | jq -R . | jq -cs .)
+    L=$(clock_length "$secs") N=$name T=$(clock_hm $(( now + secs ))) Q=$q row --argjson run "$J" '{id: "timer:new",
+      title: ("Start a " + env.L + " timer" + (if env.N == "" then "" else ": " + env.N end)), subtitle: ("Counts down in Today · rings at " + env.T),
+      glyph: "clock", kind: "Timer", keywords: env.Q, converse: true, run: (["takumi", "timer"] + $run), score: 1.0}'
+  fi
+fi
+if has timer timers countdown; then
+  row '{id: "timer:ask", title: "Start a timer", subtitle: "How long; it counts down in Today and rings", glyph: "clock", kind: "Timer",
+    keywords: "timer timers countdown alarm minutes", converse: true, run: ["takumi", "timer"], score: 0.8}'
+  while IFS=$'\t' read -r id kind at made text; do
+    [[ "$kind" == timer ]] || continue
+    left=$(( at - now )); (( left > 0 )) || left=0
+    I=$id N=${text:-Timer} L=$(clock_length "$left") T=$(clock_hm "$at") row '{id: ("timer:" + env.I), title: (env.N + ": " + env.L + " left"),
+      subtitle: ("Rings at " + env.T + " · Enter to stop"), glyph: "clock", kind: "Timer", steady: true, refresh: 15,
+      keywords: "timer timers countdown stop", run: ["takumi", "timer", "stop", env.I], score: 0.9}'
+  done <<< "$coming"
+fi
+
+# ---- The weather
+if has weather temperature forecast; then
+  facts
+  there=$(weather_setting place); [[ -n "$there" ]] || there=$city; there=${there%%,*}
+  if weather_shown; then
+    if kept=$(weather_cached "" "$weather_stale"); then
+      age=$(( now - $(jq -r '.fetched' <<< "$kept") ))
+      G=$(weather_glyph "$kept") A=$(clock_length "$age") R=$([[ $age -ge $weather_fresh ]] && echo 20 || echo 0) row --argjson k "$kept" '
+        {id: "weather:now", title: ([$k.place + " " + ($k.temp | tostring) + "°", $k.words] | map(select(. != "")) | join(" · ")),
+         subtitle: ([$k.later, "Open-Meteo, " + env.A + " ago", "Enter for another place"] | map(select(. != "")) | join(" · ")),
+         glyph: env.G, kind: "Weather", keywords: "weather temperature forecast rain place", converse: true, run: ["takumi", "weather", "place"], score: 0.9}
+        + (if env.R != "0" then {refresh: (env.R | tonumber)} else {} end)'
+    else
+      P=$there row '{id: "weather:now", title: "Weather in Today: on", subtitle: ("Asking Open-Meteo about " + env.P + "… · Enter for another place"),
+        glyph: "sun", kind: "Weather", keywords: "weather temperature forecast rain place", converse: true, run: ["takumi", "weather", "place"], refresh: 5, score: 0.9}'
+    fi
+    if ! weather_cached >/dev/null; then
+      mark="$clock_cache/takumi-weather-asked"; last=$(cat "$mark" 2>/dev/null || echo 0); [[ "$last" =~ ^[0-9]+$ ]] || last=0
+      if (( now - last >= 60 )) && command -v setsid >/dev/null; then
+        mkdir -p "$clock_cache"; echo "$now" > "$mark"
+        setsid -f takumi weather --refresh </dev/null >/dev/null 2>&1 || true
+      fi
+    fi
+    row '{id: "weather:off", title: "Hide the weather in Today", subtitle: "Open-Meteo is not asked again", glyph: "sun", kind: "Weather",
+      keywords: "weather temperature forecast hide off stop", run: ["takumi", "weather", "off"], score: 0.5}'
+  else
+    P=$there row '{id: "weather:on", title: "Show the weather in Today", subtitle: ("Asks Open-Meteo for " + env.P + "'"'"'s weather, at most every 30 minutes"),
+      glyph: "sun", kind: "Weather", keywords: "weather temperature forecast today show on", risk: 1, converse: true, run: ["takumi", "weather", "on"], score: 0.85}'
+    P=$there row '{id: "weather:once", title: ("Weather in " + env.P + " now"), subtitle: "Asks Open-Meteo once", glyph: "sun", kind: "Weather",
+      keywords: "weather temperature forecast now", converse: true, run: ["takumi", "weather"], score: 0.8}'
+  fi
+  # "weather tokyo": that place, once.
+  other=""
+  for w in "${qw[@]}"; do case "$w" in weather|temperature|forecast|in|the|for|at|now|today|show|hide|on|off) ;; *) other="${other:+$other }$w" ;; esac; done
+  if (( ${#other} >= 3 )); then
+    words=(); read -r -a words <<< "$other"
+    J=$(printf '%s\n' "${words[@]}" | jq -R . | jq -cs .)
+    P=$(printf '%s' "$other" | awk '{ for (i = 1; i <= NF; i++) $i = toupper(substr($i, 1, 1)) substr($i, 2); print }') Q=$q row --argjson run "$J" '
+      {id: "weather:place", title: ("Weather in " + env.P), subtitle: "Asks Open-Meteo once", glyph: "sun", kind: "Weather", keywords: env.Q,
+       converse: true, run: (["takumi", "weather"] + $run), score: 0.95}'
+  fi
+fi
+
+# ---- Updates
+if has update updates upgrade software; then
+  count=$(updates_get count); checked=$(updates_get checked)
+  if [[ -n "$(updates_get room)" && "$(updates_get room)" != "$(rooms_current 2>/dev/null || true)" ]]; then count=""; checked=""; fi
+  if updates_ready >/dev/null; then
+    row '{id: "update:ready", title: "Restart to use the update", subtitle: "A new system is ready; the one you use now stays one restart away",
+      glyph: "restart", kind: "Update", keywords: "update updates upgrade restart ready new version", risk: 1, run: ["takumi", "power", "restart"], score: 0.95}'
+  elif (( ${count:-0} > 0 )); then
+    M=$(jq -r '.important // [] | if length == 0 then "" elif length == 1 then .[0] + " among them" else (.[0:-1] | join(", ")) + " and " + .[-1] + " among them" end' "$updates_file" 2>/dev/null || true)
+    N=$count M=$M row '{id: "update:main", title: "Update Takumi", subtitle: ([env.N + " waiting", env.M, "yours is not touched until you restart"] | map(select(. != "")) | join(" · ")),
+      glyph: "restart", kind: "Update", keywords: "update updates upgrade software new version", risk: 2, converse: true, run: ["takumi", "update"], score: 0.9}'
+  elif [[ -n "$checked" && "$checked" != 0 ]]; then
+    W=$(clock_say_when "$checked") row '{id: "update:main", title: "Takumi is up to date", subtitle: ("Looked " + env.W + " · Enter to look again"),
+      glyph: "restart", kind: "Update", keywords: "update updates upgrade software new version check", converse: true, run: ["takumi", "update", "check"], score: 0.85}'
+  else
+    row '{id: "update:main", title: "Update Takumi", subtitle: "A new system with the latest software; yours is not touched until you restart",
+      glyph: "restart", kind: "Update", keywords: "update updates upgrade software new version", risk: 2, converse: true, run: ["takumi", "update"], score: 0.85}'
+    row '{id: "update:check", title: "Look for updates", subtitle: "Asks the package mirrors what is new; nothing changes", glyph: "restart", kind: "Update",
+      keywords: "update updates upgrade software new version check", converse: true, run: ["takumi", "update", "check"], score: 0.8}'
+  fi
+  if systemctl cat takumi-update-build.service >/dev/null 2>&1 && takumi room enabled >/dev/null 2>&1; then
+    if [[ -e "$HOME/.config/systemd/user/timers.target.wants/takumi-update-prepare.timer" ]]; then
+      S=$(updates_ready >/dev/null && echo "Ready · restart to use it" || echo "Builds the next system while plugged in · Enter to turn off") row '
+        {id: "update:prepare", title: "Prepare updates on the charger: on", subtitle: env.S, glyph: "bolt", kind: "Update",
+         keywords: "update updates prepare charger background automatic", converse: true, run: ["takumi", "update", "prepare", "off"], score: 0.7}'
+    else
+      row '{id: "update:prepare", title: "Prepare updates on the charger", subtitle: "Off · builds the next system while plugged in; yours is not touched",
+        glyph: "bolt", kind: "Update", keywords: "update updates prepare charger background automatic", risk: 1, converse: true,
+        run: ["takumi", "update", "prepare", "on"], score: 0.7}'
+    fi
+  fi
+fi
+} | palette_filter "$q"

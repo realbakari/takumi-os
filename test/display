@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# Contract checks for screens, text size and the night light (lib/display.sh, commands/display/*, the
+# Palette's display rows) against a fake niri that keeps the screens' state: the keep-or-go-back
+# conversation (yes, no, silence), what is written for next time, text size, the night light.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; display checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-display.XXXXXX"); trap 'pkill -f "$t/bin/wlsunset" 2>/dev/null || true; rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run TAKUMI_BACKLIGHT=$t/backlight TAKUMI_DISPLAY_KEEP=1
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR" "$TAKUMI_BACKLIGHT"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice"   # fake takumi commands go in front of the real ones
+
+cat > "$t/bin/niri" <<'FAKE'
+#!/usr/bin/env bash
+# Answers `msg --json outputs` from $FAKE/outputs.json and applies `msg output ...` to it.
+printf 'niri %s\n' "$*" >> "$FAKE/calls"
+case "$*" in
+  "msg --json outputs") cat "$FAKE/outputs.json" ;;
+  "msg output "*" scale "*) jq --arg n "$3" --argjson v "$5" 'map(if .name == $n then .logical.scale = $v else . end)' "$FAKE/outputs.json" > "$FAKE/o" && mv "$FAKE/o" "$FAKE/outputs.json" ;;
+  "msg output "*" transform "*) jq --arg n "$3" --arg v "$5" 'map(if .name == $n then .logical.transform = ({"normal":"Normal","90":"90","180":"180","270":"270"}[$v] // $v) else . end)' "$FAKE/outputs.json" > "$FAKE/o" && mv "$FAKE/o" "$FAKE/outputs.json" ;;
+  "msg output "*" position set "*) jq --arg n "$3" --argjson x "$6" --argjson y "$7" 'map(if .name == $n then .logical.x = $x | .logical.y = $y else . end)' "$FAKE/outputs.json" > "$FAKE/o" && mv "$FAKE/o" "$FAKE/outputs.json" ;;
+  "msg output "*" mode "*) jq --arg n "$3" --arg m "$5" '($m | split("@")) as $p | map(if .name == $n then .current_mode = ([.modes | to_entries[] | select("\(.value.width)x\(.value.height)" == $p[0] and (((.value.refresh_rate / 1000) - ($p[1] | tonumber)) | if . < 0 then -. else . end) < 0.01) | .key][0] // .current_mode) else . end)' "$FAKE/outputs.json" > "$FAKE/o" && mv "$FAKE/o" "$FAKE/outputs.json" ;;
+  "msg output "*" off") jq --arg n "$3" 'map(if .name == $n and .logical != null then .saved = .logical | .logical = null else . end)' "$FAKE/outputs.json" > "$FAKE/o" && mv "$FAKE/o" "$FAKE/outputs.json" ;;
+  "msg output "*" on") jq --arg n "$3" 'map(if .name == $n and .logical == null then .logical = (.saved // {"x":0,"y":0,"width":1536,"height":960,"scale":1.25,"transform":"Normal"}) | del(.saved) else . end)' "$FAKE/outputs.json" > "$FAKE/o" && mv "$FAKE/o" "$FAKE/outputs.json" ;;
+  "msg action load-config-file") : ;;
+  *) echo "fake niri: unexpected: $*" >&2; exit 99 ;;
+esac
+FAKE
+printf '#!/bin/sh\nprintf "gsettings %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/bin/gsettings"
+cat > "$t/bin/ddcutil" <<'FAKE'
+#!/usr/bin/env bash
+# External monitors over DDC/CI: $FAKE/ddc-monitors lists them as ddcutil detect --brief would.
+printf 'ddcutil %s\n' "$*" >> "$FAKE/calls"
+v=$(cat "$FAKE/ddc-value" 2>/dev/null || echo 50)
+case "$*" in
+  "detect --brief") cat "$FAKE/ddc-monitors" 2>/dev/null || true ;;
+  *"getvcp 10 --brief") echo "VCP 10 C $v 100" ;;
+  *"setvcp 10 + "*) a="$*"; echo $(( v + ${a##* } )) > "$FAKE/ddc-value" ;;
+  *"setvcp 10 - "*) a="$*"; echo $(( v - ${a##* } )) > "$FAKE/ddc-value" ;;
+  *"setvcp 10 "*) a="$*"; echo "${a##* }" > "$FAKE/ddc-value" ;;
+esac
+FAKE
+printf '#!/bin/sh\nprintf "wlsunset %%s\\n" "$*" >> "$FAKE/calls"; exec sleep 300\n' > "$t/bin/wlsunset"
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+chmod +x "$t/bin/"* "$t/commands/notice/main"
+
+two='[{"name":"DP-1","make":"Dell Inc.","model":"DELL U2720Q","logical":{"x":1536,"y":0,"width":2560,"height":1440,"scale":1.0,"transform":"Normal"}},
+      {"name":"eDP-1","make":"BOE","model":"0x0BCA","logical":{"x":0,"y":0,"width":1536,"height":960,"scale":1.25,"transform":"Normal"}},
+      {"name":"HDMI-A-1","make":"LG","model":"27UL850","logical":null}]'
+reset() {  # <outputs json>
+  rm -rf "${FAKE:?}"/* "${HOME:?}"/.config "${TAKUMI_BACKLIGHT:?}"/*
+  printf '%s\n' "$1" > "$FAKE/outputs.json"; : > "$FAKE/calls"; : > "$FAKE/notices"
+}
+check() { if eval "$2"; then :; else echo "display: $1"; status=1; fi; }
+lib() { bash -c '. lib/display.sh; "$@"' _ "$@"; }
+talk() { local answers=$1; shift; { printf '%b' "$answers"; sleep 3; } | TAKUMI_CORE=1 "$@" 2>&1; echo "rc=$?"; }
+tab=$(printf '\t')
+
+reset "$two"
+check "screens: the built-in first, plain labels, off ones left out" '[[ "$(lib display_screens | cut -f1-3 | tr "\t\n" ",|")" == "eDP-1,the built-in screen,125|DP-1,DELL U2720Q,100|" ]]'
+r=$(commands/palette/display display)
+check "rows are JSON with an id, a title and a kind" '[[ -n "$r" ]] && jq -e "select(.id and .title and .kind) | true" <<< "$r" >/dev/null'
+check "bigger and smaller per screen, named when there are two" '[[ "$(jq -r "select(.id | startswith(\"display:bigger:\")) | .title" <<< "$r" | tr "\n" "|")" == "Make everything bigger (150%) on the built-in screen|Make everything bigger (125%) on DELL U2720Q|" ]]'
+check "a screen change is a conversation" '[[ "$(jq -c "select(.id == \"display:smaller:eDP-1\") | [.converse, .run]" <<< "$r")" == "[true,[\"takumi\",\"display\",\"scale\",\"smaller\",\"eDP-1\"]]" ]]'
+check "the second screen's place" '[[ "$(jq -r "select(.id | startswith(\"display:arrange:\")) | .title" <<< "$r" | tr "\n" "|")" == "DELL U2720Q on the right|DELL U2720Q on the left|DELL U2720Q above|DELL U2720Q below|" ]]'
+check "no brightness rows without a backlight" '[[ "$r" != *display:bright* ]]'
+check "night light rows offer what it is not" '[[ "$(commands/palette/display night | jq -r .title | tr "\n" "|")" == "Night light on|Night light from 17:30 to 05:30|" ]]'
+check "text rows from the default size" '[[ "$(commands/palette/display text | jq -r .title | tr "\n" "|")" == "Text bigger (15)|Text smaller (11)|" ]]'
+: > "$TAKUMI_BACKLIGHT/intel_backlight"
+check "brightness rows with a backlight" '[[ "$(commands/palette/display bright | jq -r .title | tr "\n" "|")" == "Brightness 25%|Brightness 50%|Brightness 75%|Brightness 100%|A little brighter|A little dimmer|" ]]'
+check "the fine rows step one point" '[[ "$(commands/palette/display dimmer | jq -c .run)" == "[\"takumi\",\"display\",\"brightness\",\"down\",\"--fine\"]" ]]'
+check "under three letters, nothing" '[[ -z "$(commands/palette/display sc)" ]]'
+
+reset "$two"
+said=$(talk 'yes\n' commands/display/scale bigger eDP-1)
+check "bigger: asks to keep, keeps on yes ($said)" '[[ "$said" == "$(printf "%s\n" "confirm 1 Keep this?" "done Everything on the built-in screen at 150%" "rc=0")" ]]'
+check "bigger: niri was told 1.5, and nothing put it back" 'grep -qx "niri msg output eDP-1 scale 1.5" "$FAKE/calls" && ! grep -qx "niri msg output eDP-1 scale 1.25" "$FAKE/calls"'
+check "kept: every screen written for next time, and niri reloads" 'grep -q "scale 1.5" "$HOME/.config/niri/takumi/outputs.kdl" && grep -q "output \"Dell Inc. DELL U2720Q Unknown\"" "$HOME/.config/niri/takumi/outputs.kdl" && grep -qx "niri msg action load-config-file" "$FAKE/calls"'
+check "the built-in screen is kept under its port" 'grep -q "output \"eDP-1\"" "$HOME/.config/niri/takumi/outputs.kdl"'
+
+# A monitor is kept under what it is; one that is not plugged in keeps what was kept for it.
+reset '[{"name":"eDP-1","make":"BOE","model":"0x0BCA","logical":{"x":0,"y":0,"width":1536,"height":960,"scale":1.25,"transform":"Normal"}},
+        {"name":"DP-3","make":"Dell Inc.","model":"DELL U2720Q","serial":"7XK2P93","logical":{"x":1536,"y":0,"width":2560,"height":1440,"scale":1.0,"transform":"Normal"}}]'
+mkdir -p "$HOME/.config/niri/takumi"
+printf '%s\n' '// old' 'output "DP-3" {' '    scale 2' '}' 'output "LG Electronics LG HDR 4K 104NTJJ1X" {' '    scale 1.5' '    position x=-3840 y=0' '}' > "$HOME/.config/niri/takumi/outputs.kdl"
+said=$(talk 'yes\n' commands/display/scale bigger DP-3)
+o=$(cat "$HOME/.config/niri/takumi/outputs.kdl")
+check "a monitor goes by make, model and serial" 'grep -q "^output \"Dell Inc. DELL U2720Q 7XK2P93\" {" <<< "$o"'
+check "its old block under the port is gone" '! grep -q "^output \"DP-3\"" <<< "$o"'
+check "an unplugged monitor keeps its block, word for word" '[[ "$(sed -n "/^output \"LG Electronics/,/^}/p" <<< "$o")" == "$(printf "%s\n" "output \"LG Electronics LG HDR 4K 104NTJJ1X\" {" "    scale 1.5" "    position x=-3840 y=0" "}")" ]]'
+reset '[{"name":"DP-1","make":"Dell Inc.","model":"P2419H","logical":{"x":0,"y":0,"width":1920,"height":1080,"scale":1.0,"transform":"Normal"}},
+        {"name":"DP-2","make":"Dell Inc.","model":"P2419H","logical":{"x":1920,"y":0,"width":1920,"height":1080,"scale":1.0,"transform":"Normal"}}]'
+check "two monitors that say the same go by their ports" '[[ "$(lib display_keys | cut -f1,2 | tr "\t\n" ",|")" == "DP-1,DP-1|DP-2,DP-2|" ]]'
+reset "$two"
+said=$(talk 'no\n' commands/display/scale bigger eDP-1)
+check "no: it goes back ($said)" '[[ "$said" == *"done Went back"*"rc=3" ]] && grep -qx "niri msg output eDP-1 scale 1.25" "$FAKE/calls" && [[ ! -f "$HOME/.config/niri/takumi/outputs.kdl" ]]'
+reset "$two"
+said=$(talk '' commands/display/scale bigger eDP-1)
+check "silence: it goes back by itself ($said)" '[[ "$said" == *"done Went back"*"rc=3" ]] && grep -qx "niri msg output eDP-1 scale 1.25" "$FAKE/calls"'
+reset "$two"
+said=$(talk '' commands/display/scale smaller DP-1)
+check "as small as it goes: says so, changes nothing ($said)" '[[ "$said" == *"done Everything on DELL U2720Q is as small as it goes"*"rc=0" ]] && ! grep -q "scale" "$FAKE/calls"'
+reset "$two"
+said=$(talk 'yes\n' commands/display/rotate eDP-1)
+check "turning a quarter" 'grep -qx "niri msg output eDP-1 transform 90" "$FAKE/calls" && grep -q "transform \"90\"" "$HOME/.config/niri/takumi/outputs.kdl"'
+reset "$two"
+said=$(talk 'yes\n' commands/display/arrange left)
+check "the second screen to the left" 'grep -qx "niri msg output DP-1 position set -2560 0" "$FAKE/calls"'
+reset "$two"
+said=$(talk 'yes\n' commands/display/arrange above)
+check "the second screen above, left edges lined up ($said)" '[[ "$said" == *"done DELL U2720Q is above"*"rc=0" ]] && grep -qx "niri msg output DP-1 position set 0 -1440" "$FAKE/calls" && grep -q "position x=0 y=-1440" "$HOME/.config/niri/takumi/outputs.kdl"'
+reset "$two"
+said=$(talk '' commands/display/arrange below)
+check "below, then back by itself" '[[ "$said" == *"done Went back"*"rc=3" ]] && grep -qx "niri msg output DP-1 position set 0 960" "$FAKE/calls" && grep -qx "niri msg output DP-1 position set 1536 0" "$FAKE/calls"'
+rc=0; commands/display/arrange sideways >/dev/null 2>&1 || rc=$?
+check "a side it does not know: usage" '[[ $rc -eq 2 ]]'
+
+# The laptop screen off by hand, with a guard that turns it back on when the other screen goes.
+reset "$two"
+r=$(commands/palette/display laptop)
+check "two screens: the row that turns the laptop screen off" '[[ "$(jq -c "select(.id | startswith(\"display:builtin\")) | [.title, .converse, .run]" <<< "$r")" == "[\"Use only the external screen\",true,[\"takumi\",\"display\",\"builtin\",\"off\"]]" ]]'
+said=$(talk '' commands/display/builtin off)
+check "off, then silence: back on ($said)" '[[ "$said" == *"done Went back"*"rc=3" && "$(commands/display/builtin status)" == on ]] && grep -qx "niri msg output eDP-1 off" "$FAKE/calls" && grep -qx "niri msg output eDP-1 on" "$FAKE/calls"'
+check "nothing left watching after going back" '[[ ! -f "$XDG_RUNTIME_DIR/builtin-off" ]]'
+export TAKUMI_BUILTIN_LOOK=0.2
+said=$(talk 'yes\n' commands/display/builtin off)
+check "off, kept: only the external screen, and a guard ($said)" '[[ "$said" == *"done Only the external screen is on"*"rc=0" && "$(commands/display/builtin status)" == off && -s "$XDG_RUNTIME_DIR/builtin-off" ]]'
+check "kept off is never written for next time" '! grep -q "off" "$HOME/.config/niri/takumi/outputs.kdl"'
+check "the row offers it back, with the lid open" '[[ "$(commands/palette/display laptop | jq -r "select(.id | startswith(\"display:builtin\")) | .title")" == "Use the laptop screen again" ]]'
+echo closed > "$FAKE/lid"
+check "with the lid shut, no row to turn it on" '[[ -z "$(TAKUMI_LID=$FAKE/lid commands/palette/display laptop | jq -r "select(.id | startswith(\"display:builtin\")) | .title")" ]]'
+jq 'map(if .name == "eDP-1" then .logical = {"x":0,"y":0,"width":1536,"height":960,"scale":1.25,"transform":"Normal"} else . end)' "$FAKE/outputs.json" > "$FAKE/o" && mv "$FAKE/o" "$FAKE/outputs.json"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ "$(commands/display/builtin status)" == off ]] && break; sleep 0.2; done
+check "a config reload turns it on: the guard turns it off again" '[[ "$(commands/display/builtin status)" == off ]]'
+jq 'map(if .name == "DP-1" then .logical = null else . end)' "$FAKE/outputs.json" > "$FAKE/o" && mv "$FAKE/o" "$FAKE/outputs.json"
+for _ in $(seq 1 40); do grep -q "The laptop screen is on again" "$FAKE/notices" && break; sleep 0.2; done   # the notice is the guard's last step
+check "the other screen unplugged: the laptop screen comes back, said in the Core" '[[ "$(commands/display/builtin status)" == on && ! -f "$XDG_RUNTIME_DIR/builtin-off" ]] && grep -q "^display|The laptop screen is on again|the other screen went away|" "$FAKE/notices"'
+reset "$two"
+talk 'yes\n' commands/display/builtin off >/dev/null
+said=$(talk 'yes\n' commands/display/builtin on)
+check "on again, kept: the guard stops ($said)" '[[ "$said" == *"done The laptop screen is on again"*"rc=0" && "$(commands/display/builtin status)" == on && ! -f "$XDG_RUNTIME_DIR/builtin-off" ]]'
+unset TAKUMI_BUILTIN_LOOK
+reset '[{"name":"eDP-1","make":"BOE","model":"x","logical":{"x":0,"y":0,"width":1536,"height":960,"scale":1.25,"transform":"Normal"}}]'
+said=$(talk '' commands/display/builtin off)
+check "the only screen is never turned off ($said)" '[[ "$said" == *"plug in another screen first"*"rc=4" ]] && ! grep -q " off$" "$FAKE/calls"'
+check "one screen: no row" '[[ -z "$(commands/palette/display laptop | jq -r "select(.id | startswith(\"display:builtin\")) | .title")" ]]'
+reset '[{"name":"DP-1","make":"Dell Inc.","model":"DELL U2720Q","logical":{"x":0,"y":0,"width":2560,"height":1440,"scale":1.0,"transform":"Normal"}}]'
+said=$(talk '' commands/display/builtin off)
+check "a desktop has no built-in screen ($said)" '[[ "$said" == *"no built-in screen"*"rc=5" && "$(commands/display/builtin status)" == none ]]'
+
+reset '[{"name":"eDP-1","make":"BOE","model":"x","logical":{"x":0,"y":0,"width":1536,"height":960,"scale":1.25,"transform":"Normal"}}]'
+said=$(talk '' commands/display/arrange right)
+check "one screen: no arranging ($said)" '[[ "$said" == *"There is only one screen"*"rc=1" ]]'
+
+reset "$two"
+out=$(commands/display/text bigger)
+check "text bigger: the Core's size and the apps' scale" '[[ "$out" == "Text size 15" ]] && grep -qx "font_size = 15" "$HOME/.config/takumi/shell.toml" && grep -qx "gsettings set org.gnome.desktop.interface text-scaling-factor 1.15" "$FAKE/calls"'
+check "text size kept in display.toml" 'grep -q "^size = 15" "$HOME/.config/takumi/display.toml"'
+printf 'font_size = 20\nreduce_motion = true\n' > "$HOME/.config/takumi/shell.toml"; sed -i.bak 's/^size = 15/size = 20/' "$HOME/.config/takumi/display.toml"
+out=$(commands/display/text bigger)
+check "text as big as it goes, other settings kept ($out)" '[[ "$out" == "Text is as big as it goes" ]] && grep -qx "reduce_motion = true" "$HOME/.config/takumi/shell.toml"'
+
+reset "$two"
+out=$(commands/display/nightlight schedule)
+for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q wlsunset "$FAKE/calls" && break; sleep 0.2; done   # it starts in the background
+check "night light on the clock ($out)" '[[ "$out" == "Night light from 17:30 to 05:30" ]] && grep -q "^mode = \"schedule\"" "$HOME/.config/takumi/display.toml" && grep -q "wlsunset -t 3800 -T 6500 -S 05:30 -s 17:30" "$FAKE/calls"'
+check "the night light runs, known by its pid" '[[ -s "$XDG_RUNTIME_DIR/nightlight.pid" ]] && kill -0 "$(cat "$XDG_RUNTIME_DIR/nightlight.pid")"'
+p=$(cat "$XDG_RUNTIME_DIR/nightlight.pid")
+commands/switch/nightlight >/dev/null
+check "the toggle turns a running night light off" '! kill -0 "$p" 2>/dev/null && grep -q "^mode = \"off\"" "$HOME/.config/takumi/display.toml"'
+commands/switch/nightlight >/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q "3801" "$FAKE/calls" && break; sleep 0.2; done
+check "and on again, warm all day" 'grep -q "wlsunset -t 3800 -T 3801" "$FAKE/calls"'
+commands/display/nightlight off >/dev/null
+
+# Resolution and refresh rate: the faster rate, the screen's own size, a size by name, kept or put back.
+laptop='[{"name":"eDP-1","make":"BOE","model":"0x0BCA","current_mode":1,"modes":[{"width":2560,"height":1600,"refresh_rate":165000,"is_preferred":true},{"width":2560,"height":1600,"refresh_rate":60000,"is_preferred":false},{"width":1920,"height":1200,"refresh_rate":59950,"is_preferred":false}],"logical":{"x":0,"y":0,"width":1707,"height":1067,"scale":1.5,"transform":"Normal"}}]'
+reset "$laptop"
+check "modes: the most pixels first, then the fastest" '[[ "$(lib display_modes eDP-1 | tr "\t\n" ",|")" == "2560x1600,165000,1,0|2560x1600,60000,0,1|1920x1200,59950,0,0|" ]]'
+r=$(commands/palette/display display)
+check "a faster rate is offered" '[[ "$(jq -r "select(.id == \"display:smoother:eDP-1\") | .title" <<< "$r")" == "Smoother motion: 165 Hz" ]]'
+said=$(talk 'yes\n' commands/display/mode smoother)
+check "smoother: kept on yes ($said)" '[[ "$said" == *"done The built-in screen at 2560 × 1600, 165 Hz"*"rc=0" ]] && grep -qx "niri msg output eDP-1 mode 2560x1600@165.000" "$FAKE/calls"'
+check "its own mode is not written down" '! grep -q "mode " "$HOME/.config/niri/takumi/outputs.kdl"'
+said=$(talk '' commands/display/mode smoother)
+check "as smooth as it goes ($said)" '[[ "$said" == *"done The built-in screen is as smooth as it goes"* ]]'
+said=$(talk 'yes\n' commands/display/mode 1920x1200)
+check "a size by name, at its rate ($said)" '[[ "$said" == *"1920 × 1200, 59.95 Hz"*"rc=0" ]] && grep -q "^    mode \"1920x1200@59.950\"" "$HOME/.config/niri/takumi/outputs.kdl"'
+r=$(commands/palette/display display)
+check "back to its own size is offered" '[[ "$(jq -r "select(.id == \"display:native:eDP-1\") | .title" <<< "$r")" == "Back to its full resolution (2560 × 1600)" ]]'
+said=$(talk '' commands/display/mode native)
+check "silence puts the size back ($said)" '[[ "$said" == *"done Went back"*"rc=3" ]] && grep -qx "niri msg output eDP-1 mode 1920x1200@59.950" "$FAKE/calls"'
+said=$(talk '' commands/display/mode 1024x768)
+check "a size it cannot show ($said)" '[[ "$said" == *"cannot show 1024x768"*"rc=1" ]]'
+r=$(commands/palette/display resolution)
+check "asking for a resolution lists the sizes" '[[ "$(jq -r "select(.id | startswith(\"display:resolution:\")) | .title" <<< "$r")" == "Resolution 2560 × 1600" ]]'
+
+# External monitors' brightness over DDC/CI, without a built-in screen.
+reset "$two"; rm -f "$XDG_RUNTIME_DIR/ddc"
+printf 'Display 1\n   I2C bus:  /dev/i2c-5\n   Monitor: DEL:DELL U2720Q:7XK2P93\n' > "$FAKE/ddc-monitors"
+check "no monitors known yet: the Palette does not wait for ddcutil" '[[ "$(commands/palette/display bright)" != *display:bright* ]]'
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s "$XDG_RUNTIME_DIR/ddc" ]] && break; sleep 0.2; done   # found in the background
+check "an external monitor gives brightness rows" '[[ "$(commands/palette/display bright | jq -r .title | head -n 1)" == "Brightness 25%" ]]'
+commands/display/brightness 30
+check "brightness 30 goes to the monitor, and the notice says so" 'grep -qx "ddcutil --display 1 --noverify setvcp 10 30" "$FAKE/calls" && grep -q "|30|" "$FAKE/notices"'
+commands/display/brightness up
+check "up is five more" '[[ "$(cat "$FAKE/ddc-value")" == 35 ]] && grep -q "|35|" "$FAKE/notices"'
+check "the next change is not held up by a lock left behind" '[[ ! -d "$XDG_RUNTIME_DIR/ddc.lock" ]]'
+commands/display/brightness up --fine
+check "up --fine is one more" '[[ "$(cat "$FAKE/ddc-value")" == 36 ]] && grep -qx "ddcutil --display 1 --noverify setvcp 10 + 1" "$FAKE/calls"'
+rc=0; commands/display/brightness 40 --fine 2>/dev/null || rc=$?
+check "--fine only steps: a level with it is usage" '[[ $rc -eq 2 ]]'
+
+# In a VM on a Mac: a screen denser than 192 dpi is drawn at half its size (commands/vm/display).
+screen() {  # <dir> <status> <mode> <width mm> <height mm>: a fake /sys/class/drm connector with an EDID
+  mkdir -p "$1"; echo "$2" > "$1/status"; echo "$3" > "$1/modes"
+  { head -c 66 /dev/zero; printf "\\$(printf %o $(( $4 & 255 )))\\$(printf %o $(( $5 & 255 )))\\$(printf %o $(( ($4 >> 8) * 16 + ($5 >> 8) )))"; head -c 59 /dev/zero; } > "$1/edid"
+}
+d=$t/drm; screen "$d/card0-Virtual-1" connected 2940x1848 301 189
+plan() { TAKUMI_DRM=$d commands/vm/display --plan; }
+check "a Retina-dense VM screen: every pixel at scale 2" '[[ "$(plan)" == "Virtual-1 2" ]]'
+screen "$d/card0-Virtual-1" connected 1280x832 325 211
+check "an ordinary screen at scale 1" '[[ "$(plan)" == "Virtual-1 1" ]]'
+: > "$d/card0-Virtual-1/edid"
+check "a screen that does not say its size at scale 1" '[[ "$(plan)" == "Virtual-1 1" ]]'
+screen "$d/card0-Virtual-2" disconnected 1920x1080 520 290
+check "a screen that is not connected is left alone" '[[ "$(plan | wc -l | tr -d " ")" == 1 ]]'
+
+
+# Mirroring: wl-mirror shows the built-in screen full screen on the other screen; the job ends it when a
+# screen is unplugged. The fake wl-mirror keeps its pid, so the checks can see it closed.
+printf '#!/bin/sh\nprintf "wl-mirror %%s\\n" "$*" >> "$FAKE/calls"; echo $$ >> "$FAKE/mirrors"; exec sleep 300\n' > "$t/bin/wl-mirror"; chmod +x "$t/bin/wl-mirror"
+mirrors_gone() { local p; for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  for p in $(cat "$FAKE/mirrors" 2>/dev/null); do kill -0 "$p" 2>/dev/null && { sleep 0.2; continue 2; }; done; return 0; done; return 1; }
+reset "$two"
+check "mirror: a row with two screens" '[[ "$(commands/palette/display projector | jq -c "[.title, .run]")" == "[\"Show this screen on the projector\",[\"takumi\",\"display\",\"mirror\",\"on\"]]" ]]'
+out=$(commands/display/mirror on)
+for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q "^wl-mirror" "$FAKE/calls" && break; sleep 0.2; done
+check "mirror on: the built-in screen, full screen on the other ($out)" '[[ "$out" == "Mirroring the built-in screen" ]] && grep -qx "wl-mirror --fullscreen-output DP-1 eDP-1" "$FAKE/calls" && grep -q "^display|Mirroring the built-in screen|it shows on DELL U2720Q too|" "$FAKE/notices"'
+check "mirror: status, and the row that stops it" '[[ "$(commands/display/mirror status)" == "on eDP-1 DP-1" && "$(commands/palette/display projector | jq -c "[.title, .run[3]]")" == "[\"Stop showing this screen on the projector\",\"off\"]" ]]'
+out=$(commands/display/mirror off)
+check "mirror off: the copy closes ($out)" '[[ "$out" == "Mirroring off" && "$(commands/display/mirror status)" == off ]] && mirrors_gone'
+reset "$two"; : > "$FAKE/mirrors"
+TAKUMI_MIRROR_LOOK=1 commands/display/mirror toggle >/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q "^wl-mirror" "$FAKE/calls" && break; sleep 0.2; done
+jq 'map(if .name == "DP-1" then .logical = null else . end)' "$FAKE/outputs.json" > "$FAKE/o" && mv "$FAKE/o" "$FAKE/outputs.json"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [[ "$(commands/display/mirror status)" == off ]] && break; sleep 0.2; done
+check "mirror: a screen unplugged ends it, so the copy never lands on the built-in screen" '[[ "$(commands/display/mirror status)" == off ]] && mirrors_gone && grep -q "^display|Mirroring stopped|a screen was unplugged|" "$FAKE/notices"'
+reset "$(jq '[.[] | select(.name == "eDP-1")]' <<< "$two")"
+rc=0; out=$(commands/display/mirror on 2>&1) || rc=$?
+check "mirror with one screen: 1, said in words, and no row" '[[ $rc -eq 1 && "$out" == "There is only one screen" && -z "$(commands/palette/display projector)" ]]'
+
+echo "   $(grep -c '^check ' "$0") display checks against a fake niri"
+exit $status

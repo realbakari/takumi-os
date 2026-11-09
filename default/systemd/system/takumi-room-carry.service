@@ -1,0 +1,18 @@
+[Unit]
+Description=Takumi: carry what changed since an update was prepared into the room that starts next
+Documentation=file:///usr/share/doc/takumi/atomic-rooms.md
+DefaultDependencies=no
+After=local-fs.target
+Before=shutdown.target
+
+# Runs as the computer stops, while the disks are still there: Wi-Fi joined, devices paired, a password
+# changed or a time zone moved after `takumi update` prepared a room reach that room at the restart.
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/true
+ExecStop=/usr/bin/takumi room carry
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

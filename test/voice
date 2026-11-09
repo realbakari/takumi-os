@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# Contract checks for dictation (lib/voice.sh, commands/voice/main and setup) against fake tools: the recorder
+# (pw-record), the speech model (whisper-cli), typing (wtype), the sound server, the shell, niri, curl, pacman
+# and sudo. The model chosen by memory and its download, asked for in the Core with its size and checked by its
+# sum; listening with a level; what was said typed where you were, through stdin; silence typed as nothing.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; dictation checks skipped)"; exit 0; }
+command -v perl >/dev/null || { echo "   (perl not installed; dictation checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-voice.XXXXXX")
+trap 'pkill -f "$t/bin/pw-record" 2>/dev/null || true; rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run T_BIN=$t/bin
+export TAKUMI_MEMINFO=$t/meminfo TAKUMI_VOICE_MODELS=$t/models.tsv TAKUMI_VOICE_URL=https://models.example/whisper
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice" "$t/commands/voice"   # fake takumi commands go in front of the real ones
+unset TAKUMI_CORE
+
+# The recorder: a WAV of one second (or a quarter) at 16 kHz, loud or quiet, then on until SIGINT. Perl, because a
+# background shell script cannot catch the SIGINT its shell ignored for it.
+cat > "$t/bin/pw-record" <<'FAKE'
+#!/usr/bin/env perl
+use strict; use warnings;
+my $fake = $ENV{FAKE};
+sub say_ { open(my $c, '>>', "$fake/calls") or die; print $c "@_\n"; close $c; }
+say_("pw-record @ARGV");
+exit 1 if -e "$fake/pw-fail";
+my $n = -e "$fake/short" ? 4000 : 16000;
+my $v = -e "$fake/quiet" ? 20 : 8000;
+open(my $o, '>', $ARGV[-1]) or die; binmode $o;
+print $o "RIFF" . pack('V', 36 + 2 * $n) . "WAVEfmt " . pack('VvvVVvv', 16, 1, 1, 16000, 32000, 2, 16) . "data" . pack('V', 2 * $n);
+print $o pack('s<*', map { $_ % 2 ? $v : -$v } 1 .. $n);
+close $o;
+$SIG{INT} = sub { say_("pw-record stopped"); exit 0 };
+sleep 1 while 1;
+FAKE
+cat > "$t/whisper-cli" <<'FAKE'
+#!/bin/sh
+printf 'whisper-cli %s\n' "$*" >> "$FAKE/calls"
+[ -e "$FAKE/whisper-fail" ] && exit 1
+cat "$FAKE/said"
+FAKE
+cat > "$t/bin/wtype" <<'FAKE'
+#!/bin/sh
+printf 'wtype %s LC_ALL=%s\n' "$*" "$LC_ALL" >> "$FAKE/calls"
+cat > "$FAKE/typed"
+[ ! -e "$FAKE/wtype-fail" ]
+FAKE
+cat > "$t/bin/niri" <<'FAKE'
+#!/bin/sh
+printf 'niri %s\n' "$*" >> "$FAKE/calls"
+if [ "$*" = "msg -j focused-window" ]; then
+  id=$(head -n 1 "$FAKE/windows" 2>/dev/null); tail -n +2 "$FAKE/windows" > "$FAKE/windows.next" 2>/dev/null; mv "$FAKE/windows.next" "$FAKE/windows"
+  echo "{\"id\": ${id:-7}}"
+fi
+exit 0
+FAKE
+cat > "$t/bin/curl" <<'FAKE'
+#!/bin/sh
+printf 'curl %s\n' "$*" >> "$FAKE/calls"
+out=""; prev=""; for a; do [ "$prev" = -o ] && out=$a; prev=$a; done
+[ -e "$FAKE/curl-content" ] && cp "$FAKE/curl-content" "$out"
+exit "$(cat "$FAKE/curl-rc" 2>/dev/null || echo 0)"
+FAKE
+cat > "$t/bin/sudo" <<'FAKE'
+#!/bin/sh
+printf 'sudo %s why=%s\n' "$*" "$TAKUMI_SUDO_WHY" >> "$FAKE/calls"
+[ -e "$FAKE/install-fails" ] && exit 1
+cp "$FAKE/../whisper-cli" "$T_BIN/whisper-cli"
+FAKE
+printf '#!/bin/sh\nprintf "pacman %%s\\n" "$*" >> "$FAKE/calls"; [ -e "$FAKE/repo-has-whisper" ]\n' > "$t/bin/pacman"
+printf '#!/bin/sh\nprintf "qs %%s\\n" "$*" >> "$FAKE/calls"\n' > "$t/bin/qs"
+printf '#!/bin/sh\ncase "$1" in get-default-source) cat "$FAKE/source" ;; esac\n' > "$t/bin/pactl"
+printf '#!/bin/sh\ncat > "$FAKE/copied"\n' > "$t/bin/wl-copy"
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+printf '#!/bin/sh\necho "voice stop" >> "$FAKE/calls"\n' > "$t/fake-stop"
+chmod +x "$t/bin/"* "$t/whisper-cli" "$t/fake-stop" "$t/commands/notice/main"
+
+printf 'a speech model' > "$t/model"
+sum=$(bash -c '. lib/voice.sh; voice_sha1 "$1"' _ "$t/model")
+printf 'base\t142\t%s\nsmall\t466\t%s\nlarge-v3-turbo-q5_0\t547\t%s\n' "$sum" "$sum" "$sum" > "$TAKUMI_VOICE_MODELS"
+models="$HOME/.local/share/takumi/voice"
+
+reset() {
+  pkill -f "$t/bin/pw-record" 2>/dev/null || true
+  rm -rf "${FAKE:?}"/* "${XDG_RUNTIME_DIR:?}"/* "$HOME/.config" "$HOME/.local" "$t/commands/voice/stop"
+  cp "$t/whisper-cli" "$t/bin/whisper-cli"
+  echo alsa_input.pci.analog-stereo > "$FAKE/source"
+  printf ' Hello there.\n [BLANK_AUDIO]\n How are you?\n' > "$FAKE/said"
+  printf 'MemTotal:       16000000 kB\n' > "$TAKUMI_MEMINFO"
+  : > "$FAKE/calls"; : > "$FAKE/notices"
+}
+ready() { mkdir -p "$models"; cp "$t/model" "$models/ggml-small.bin"; }
+check() { if eval "$2"; then :; else echo "voice: $1"; status=1; fi; }
+lib() { bash -c '. lib/voice.sh; "$@"' _ "$@"; }
+run() { local out rc=0; out=$(commands/voice/"$@" 2>&1) || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+talk() { local answers=$1; shift; printf '%b' "$answers" | TAKUMI_CORE=1 commands/voice/"$@" 2>&1; echo "rc=$?"; }
+listening() { [[ -s "$XDG_RUNTIME_DIR/takumi-voice" ]]; }
+waitfor() { local n=40; until eval "$1"; do n=$((n - 1)); (( n > 0 )) || return 1; sleep 0.1; done; }
+wav() {  # <samples> <value>: a 16 kHz WAV as pw-record writes it
+  perl -e 'my ($n, $v) = @ARGV; binmode STDOUT; print "RIFF" . pack("V", 36 + 2 * $n) . "WAVEfmt " . pack("VvvVVvv", 16, 1, 1, 16000, 32000, 2, 16) . "data" . pack("V", 2 * $n) . pack("s<*", map { $_ % 2 ? $v : -$v } 1 .. $n)' "$1" "$2"
+}
+
+reset
+check "16 GiB of memory: the turbo model" '[[ "$(lib voice_pick)" == large-v3-turbo-q5_0 ]]'
+printf 'MemTotal:        7900000 kB\n' > "$TAKUMI_MEMINFO"
+check "8 GiB: small" '[[ "$(lib voice_pick)" == small ]]'
+printf 'MemTotal:        3900000 kB\n' > "$TAKUMI_MEMINFO"
+check "4 GiB: base" '[[ "$(lib voice_pick)" == base ]]'
+check "sizes as a file manager shows them" '[[ "$(lib voice_mb base) $(lib voice_mb small) $(lib voice_mb large-v3-turbo-q5_0)" == "149 489 574" ]]'
+check "the speech model's marks for silence are left out" '[[ "$(printf " Hello there.\n [BLANK_AUDIO]\n How are you?\n" | lib voice_clean)" == "Hello there. How are you?" ]]'
+wav 16000 8000 > "$t/loud.wav"; wav 16000 20 > "$t/quiet.wav"
+check "the level of speech, of a quiet room, of nothing" '(( $(lib voice_level "$t/loud.wav") >= 90 )) && [[ "$(lib voice_level "$t/quiet.wav")" == 0 && "$(lib voice_level "$t/none.wav")" == 0 ]]'
+check "no model before setup" '[[ -z "$(lib voice_model)" ]]'
+ready; cp "$t/model" "$models/ggml-base.bin"
+check "the largest model here" '[[ "$(lib voice_model)" == "$models/ggml-small.bin" ]]'
+lib voice_save base
+check "the model voice.toml names, the language kept as auto" '[[ "$(lib voice_model)" == "$models/ggml-base.bin" ]] && grep -qx "model = \"base\"" "$HOME/.config/takumi/voice.toml" && [[ "$(lib voice_language)" == auto ]]'
+check "threads between 1 and 8" '(( $(lib voice_threads) >= 1 && $(lib voice_threads) <= 8 ))'
+
+# Setup: asked in the Core with the size, downloaded, checked by its sum.
+reset; cp "$t/model" "$FAKE/curl-content"
+said=$(talk 'yes\n' setup)
+check "setup asks with the size, then downloads and checks" '[[ "$(head -n 1 <<< "$said")" == "confirm Download the speech model, 574 MB? It stays on this computer, and so does your voice." && "$said" == *"note Downloading the speech model…"*"note Checking the download…"*"done Dictation is ready: press Super+H, speak, then press it again"*"rc=0" ]]'
+check "setup: the model for this memory, from its URL, carried on from any part" 'grep -qx "curl -q -fsSL --retry 3 -C - -o $models/ggml-large-v3-turbo-q5_0.bin.part https://models.example/whisper/ggml-large-v3-turbo-q5_0.bin" "$FAKE/calls"'
+check "setup: the model in place, the part gone, the choice kept" '[[ -s "$models/ggml-large-v3-turbo-q5_0.bin" && ! -e "$models/ggml-large-v3-turbo-q5_0.bin.part" ]] && grep -qx "model = \"large-v3-turbo-q5_0\"" "$HOME/.config/takumi/voice.toml"'
+: > "$FAKE/calls"
+said=$(talk '' setup)
+check "setup again: ready, nothing asked, nothing downloaded ($said)" '[[ "$said" == "$(printf "%s\n" "done Dictation is ready: press Super+H, speak, then press it again" "rc=0")" ]] && ! grep -q curl "$FAKE/calls"'
+reset
+said=$(talk 'no\n' setup small)
+check "setup declined: 3, nothing downloaded" '[[ "$said" == *"confirm Download the speech model, 489 MB?"*"Nothing was downloaded"*"rc=3" ]] && ! grep -q curl "$FAKE/calls"'
+reset; printf 'not the model' > "$FAKE/curl-content"
+res=$(printf 'yes\n' | run setup base)
+check "a damaged download: 1, and the part removed ($res)" '[[ "$res" == "1|The download was damaged. Try again" && ! -e "$models/ggml-base.bin.part" && ! -e "$models/ggml-base.bin" ]]'
+reset; printf 'a speech' > "$FAKE/curl-content"; echo 18 > "$FAKE/curl-rc"
+res=$(printf 'yes\n' | run setup base)
+check "a download cut short: 1, and the part kept for next time ($res)" '[[ "$res" == "1|The download stopped before the end. Try again and it carries on from there" && -s "$models/ggml-base.bin.part" ]]'
+cp "$t/model" "$models/ggml-base.bin.part"; rm -f "$FAKE/curl-content"; echo 22 > "$FAKE/curl-rc"
+res=$(printf 'yes\n' | run setup base)
+check "a part already whole, refused as a range: its sum decides ($res)" '[[ "$res" == "0|Dictation is ready: press Super+H, speak, then press it again" && -s "$models/ggml-base.bin" ]]'
+reset
+check "setup: not a model 2" '[[ "$(run setup huge)" == "2|usage: takumi voice setup [base|small|large-v3-turbo-q5_0]" ]]'
+printf 'base\t999999999\t%s\n' "$sum" > "$t/huge.tsv"
+res=$(printf 'yes\n' | TAKUMI_VOICE_MODELS=$t/huge.tsv run setup base)
+check "not enough free space: 1, said with the size ($res)" '[[ "$res" == "1|There is not enough free space: the model needs 1048575999 MB" ]] && ! grep -q curl "$FAKE/calls"'
+# whisper-cpp itself, when the computer lacks it. Only where no real whisper-cli stands behind the fake.
+if ! PATH=${PATH#"$t/bin:"} command -v whisper-cli >/dev/null; then
+  reset; rm -f "$t/bin/whisper-cli"; : > "$FAKE/repo-has-whisper"; cp "$t/model" "$FAKE/curl-content"
+  said=$(talk 'yes\nyes\n' setup)
+  check "no whisper-cpp: asked, installed with the password asked in the Core, then the model" '[[ "$(head -n 2 <<< "$said")" == "$(printf "%s\n" "confirm Dictation needs whisper-cpp, which turns speech into text on this computer. Install it?" "note Installing whisper-cpp…")" && "$said" == *"done Dictation is ready"*"rc=0" ]] && grep -qx "sudo -A pacman -S --needed --noconfirm whisper-cpp why=Installing whisper-cpp needs your password" "$FAKE/calls"'
+  reset; rm -f "$t/bin/whisper-cli"
+  said=$(talk 'yes\n' setup)
+  check "no whisper-cpp, and the software sources lack it: 1" '[[ "$said" == *"Dictation needs whisper-cpp, which this computer'"'"'s software sources do not carry"*"rc=1" ]] && ! grep -q "^sudo" "$FAKE/calls"'
+  reset; rm -f "$t/bin/whisper-cli"; : > "$FAKE/repo-has-whisper"
+  said=$(talk 'no\n' setup)
+  check "no whisper-cpp, install declined: 3" '[[ "$said" == *"Nothing changed"*"rc=3" ]] && ! grep -q "^sudo" "$FAKE/calls"'
+fi
+
+# Dictation: listen, then write down what was said and type it where you were.
+reset
+res=$(run main)
+check "not set up: 3, and the Core opens on the row that sets it up ($res)" '[[ "$res" == "3|Dictation is not set up yet: takumi voice setup" ]] && grep -qx "qs -c takumi ipc --any-display call core search set up dictation" "$FAKE/calls" && ! grep -q pw-record "$FAKE/calls"'
+ready; echo alsa_output.pci.analog-stereo.monitor > "$FAKE/source"
+res=$(run main)
+check "no microphone: 1, said ($res)" '[[ "$res" == "1|No microphone found" ]] && grep -q "^micOff|No microphone found|" "$FAKE/notices"'
+reset; ready
+res=$(run main)
+check "listening ($res)" '[[ "$res" == "0|Listening" ]] && listening && grep -q "^mic|Listening…|Super+H again to stop|0|" "$FAKE/notices"'
+check "the recorder: 16 kHz, one channel, named Dictation for the sound rows" 'grep -qx "pw-record --rate 16000 --channels 1 --format s16 -P {\"application.name\":\"Dictation\",\"media.name\":\"Dictation\"} $XDG_RUNTIME_DIR/takumi-voice.wav" "$FAKE/calls"'
+check "the level shows while it listens" 'waitfor "grep -q \"^mic|Listening…|Super+H again to stop|[1-9][0-9]*|\" \"\$FAKE/notices\""'
+check "started again: still the one" '[[ "$(run main start)" == "0|Already listening" && "$(grep -c "^pw-record --rate" "$FAKE/calls")" -eq 1 ]]'
+printf '8\n7\n' > "$FAKE/windows"; : > "$FAKE/notices"
+res=$(run main)
+check "stopped: written down by the model here, in the language spoken ($res)" '[[ "$res" == "0|Hello there. How are you?" ]] && grep -q "^whisper-cli -m $models/ggml-small.bin -f $XDG_RUNTIME_DIR/takumi-voice.wav -l auto -t [1-8] -nt -np -sns$" "$FAKE/calls"'
+check "typed through stdin, in a UTF-8 locale, never on a command line" '[[ "$(cat "$FAKE/typed")" == "Hello there. How are you?" ]] && grep -qx "wtype - LC_ALL=C.UTF-8" "$FAKE/calls" && ! grep -q "Hello" "$FAKE/calls"'
+check "typed where you were when you stopped" 'grep -qx "niri msg action focus-window --id 8" "$FAKE/calls"'
+check "the recording deleted, the recorder and the meter stopped" '[[ ! -e "$XDG_RUNTIME_DIR/takumi-voice.wav" && ! -e "$XDG_RUNTIME_DIR/takumi-voice" ]] && grep -qx "pw-record stopped" "$FAKE/calls" && grep -q "^mic|Typed what you said|Hello there. How are you?|" "$FAKE/notices"'
+check "said while it works" 'grep -q "^mic|Writing it down…||-1|60|" "$FAKE/notices"'
+check "nothing to stop" '[[ "$(run main stop)" == "0|Not listening" ]]'
+
+reset; ready; : > "$FAKE/quiet"
+run main >/dev/null; waitfor "[[ -s \"\$XDG_RUNTIME_DIR/takumi-voice.loudest\" ]]" || true
+res=$(run main)
+check "a quiet room: nothing heard, 4, and no model run ($res)" '[[ "$res" == "4|Nothing heard" ]] && ! grep -q whisper-cli "$FAKE/calls" && grep -q "^micOff|Nothing heard|" "$FAKE/notices" && [[ ! -e "$XDG_RUNTIME_DIR/takumi-voice.wav" ]]'
+reset; ready; : > "$FAKE/short"
+run main >/dev/null; res=$(run main)
+check "under half a second: nothing heard ($res)" '[[ "$res" == "4|Nothing heard" ]] && ! grep -q whisper-cli "$FAKE/calls"'
+reset; ready; printf ' [BLANK_AUDIO]\n' > "$FAKE/said"
+run main >/dev/null; res=$(run main)
+check "only the model's mark for silence: nothing heard ($res)" '[[ "$res" == "4|Nothing heard" ]] && [[ ! -e "$FAKE/typed" ]]'
+reset; ready; : > "$FAKE/whisper-fail"
+run main >/dev/null; res=$(run main)
+check "the model did not run: 1, said ($res)" '[[ "$res" == "1|That could not be written down" ]] && grep -q "^warn|That could not be written down|" "$FAKE/notices" && [[ ! -e "$XDG_RUNTIME_DIR/takumi-voice.wav" ]]'
+reset; ready; : > "$FAKE/wtype-fail"
+run main >/dev/null; res=$(run main)
+check "no typing: copied instead, and said ($res)" '[[ "$res" == "0|Hello there. How are you?" && "$(cat "$FAKE/copied")" == "Hello there. How are you?" ]] && grep -q "^mic|Copied what you said|paste it with Super+V|" "$FAKE/notices"'
+reset; ready
+run main >/dev/null; res=$(run main cancel)
+check "cancel: stopped, nothing written down or typed ($res)" '[[ "$res" == "0|Stopped; nothing was typed" ]] && ! grep -q whisper-cli "$FAKE/calls" && [[ ! -e "$FAKE/typed" && ! -e "$XDG_RUNTIME_DIR/takumi-voice.wav" ]] && ! listening'
+reset; ready; : > "$FAKE/pw-fail"
+res=$(run main)
+check "a microphone that will not start: 1 ($res)" '[[ "$res" == "1|The microphone did not start" ]] && ! listening'
+reset; ready; sleep 0 & gone=$!; wait "$gone"
+printf '%s %s 1 %s\n' "$gone" "$gone" "$XDG_RUNTIME_DIR/takumi-voice.wav" > "$XDG_RUNTIME_DIR/takumi-voice"; : > "$XDG_RUNTIME_DIR/takumi-voice.wav"
+res=$(run main)
+check "a dictation that ended by itself is cleared, and a new one starts ($res)" '[[ "$res" == "0|Listening" ]] && listening'
+run main cancel >/dev/null
+check "usage: 2" '[[ "$(run main loud)" == 2\|usage:* && "$(run main start stop)" == 2\|usage:* ]]'
+
+# A dictation left running stops itself and is typed.
+reset; cp "$t/fake-stop" "$t/commands/voice/stop"
+wav 16000 8000 > "$t/run.wav"; sleep 30 & held=$!
+bash -c '. lib/voice.sh; voice_limit=0; voice_meter "$@"' _ "$held" "$t/run.wav" "$(date +%s)"
+waitfor 'grep -qx "voice stop" "$FAKE/calls"' || true
+kill "$held" 2>/dev/null || true; wait "$held" 2>/dev/null || true
+check "at the limit it stops itself" 'grep -qx "voice stop" "$FAKE/calls" && grep -q "^mic|Listening…|Super+H again to stop|9[0-9]|" "$FAKE/notices"'
+
+echo "   $(grep -c '^check ' "$0") dictation checks against a fake recorder, model and keyboard"
+exit $status

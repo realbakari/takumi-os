@@ -1,0 +1,11 @@
+[Unit]
+Description=Takumi: back up every hour
+
+[Timer]
+# On the hour; an hour missed while the computer was off or asleep is made up when it is back.
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

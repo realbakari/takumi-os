@@ -1,0 +1,33 @@
+# The first start of a computer nobody owns yet (set up for someone else, or erased): before the login screen,
+# the setup screen asks its owner (takumi setup owner, docs/setup.md). It runs only while the mark is there.
+# A session of its own on the first console, as systemd.exec(5) describes for PAMName= and TTYPath=:
+# https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
+[Unit]
+Description=Takumi: the first start asks who this computer is for
+ConditionPathExists=/var/lib/takumi/first-start
+ConditionPathExists=/dev/tty1
+Wants=systemd-logind.service dbus.socket
+After=systemd-user-sessions.service plymouth-quit-wait.service systemd-logind.service dbus.socket getty@tty1.service
+Before=greetd.service display-manager.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=oneshot
+# As root: finish an erase, and let the screen give the computer to its owner.
+ExecStartPre=+/usr/bin/takumi setup owner prepare
+ExecStart=/usr/bin/takumi setup start --owner
+User=greeter
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+Environment=XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=logind
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=graphical.target

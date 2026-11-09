@@ -1,0 +1,7 @@
+# Takumi's login screen (greetd reads this through /etc/systemd/system/greetd.service.d/takumi.conf).
+[terminal]
+vt = 1
+
+[default_session]
+command = "takumi greeter"
+user = "greeter"

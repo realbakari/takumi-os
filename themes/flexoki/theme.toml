@@ -1,0 +1,34 @@
+# Flexoki Dark: inky, paper-born colour for reading
+# Colours after Flexoki by Steph Ango (https://stephango.com/flexoki); phases by Takumi.
+
+[meta]
+name = "flexoki"
+mode = "dark"
+title = "Flexoki Dark"
+about = "inky, paper-born colour for reading"
+credit = "Flexoki by Steph Ango (https://stephango.com/flexoki)"
+
+[palette]
+accent     = "#3aa99f"
+background = "#100f0f"
+surface    = "#1c1b1a"
+foreground = "#cecdc3"
+muted      = "#6f6e69"
+red        = "#d14d41"
+yellow     = "#d0a215"
+green      = "#879a39"
+cyan       = "#3aa99f"
+blue       = "#4385be"
+magenta    = "#ce5d97"
+
+[phase.dawn]
+accent     = "#da702c"
+
+[phase.dusk]
+accent     = "#d76433"
+
+[phase.night]
+accent     = "#756aa7"
+background = "#0a0a0a"
+surface    = "#141312"
+foreground = "#b7b6ad"

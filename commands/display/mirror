@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Show the built-in screen on the other screens too, for a projector or a TV; off gives each its own again
+usage: <on|off|toggle|status>
+example: takumi display mirror on
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/display.sh" ]] && { . "$l/display.sh"; break; }; done
+declare -F display_screens >/dev/null || { echo "takumi: the display library is missing" >&2; exit 1; }
+
+# niri gives every screen its own space and does not mirror one onto another, so wl-mirror draws a live copy
+# of the screen you present from (the built-in one, else the first) full screen on each other screen; a
+# niri window rule keeps that copy from taking the keyboard (docs/display.md, "Mirroring"). One background
+# job holds the copies and looks every two seconds: a screen unplugged, or a copy closed, ends mirroring,
+# so a copy never lands on the screen it copies. Its marker holds "<job pid> <source> <target…>". status
+# prints "on <source> <target…>" or "off".
+marker="$display_run/mirror"
+mirroring() { local pid; [[ -r "$marker" ]] && read -r pid _ < "$marker" && [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; }
+stop() { local pid; if [[ -r "$marker" ]] && read -r pid _ < "$marker" && [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi; rm -f "$marker"; }
+say() { takumi notice display "$1" "$2" -1 >/dev/null 2>&1 || true; echo "$1"; }
+
+# The job, started by "on" as: mirror --job <source> <target...>
+if [[ "${1:-}" == --job ]]; then
+  shift; src=$1; shift
+  pids=()
+  for t in "$@"; do wl-mirror --fullscreen-output "$t" "$src" </dev/null >/dev/null 2>&1 & pids+=("$!"); done
+  done_() {
+    kill "${pids[@]}" 2>/dev/null || true
+    local pid; if [[ -r "$marker" ]] && read -r pid _ < "$marker" && [[ "$pid" == "$$" ]]; then rm -f "$marker"; fi
+  }
+  trap done_ EXIT
+  trap 'exit 0' TERM INT
+  while :; do
+    sleep "${TAKUMI_MIRROR_LOOK:-2}" & wait "$!" || true   # wait, unlike sleep, lets "off" end it at once
+    for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null || exit 0; done
+    on=$(niri msg --json outputs 2>/dev/null | jq -r '.[] | select(.logical != null) | .name' 2>/dev/null) || continue
+    for t in "$src" "$@"; do
+      grep -qxF "$t" <<< "$on" || { takumi notice display "Mirroring stopped" "a screen was unplugged" -1 >/dev/null 2>&1 || true; exit 0; }
+    done
+  done
+  exit 0
+fi
+
+want=${1:-}
+case "$want" in
+  status) if mirroring; then read -r _ src targets < "$marker"; echo "on $src $targets"; else echo off; fi; exit 0 ;;
+  toggle) if mirroring; then want=off; else want=on; fi ;;
+  on|off) ;;
+  *) echo "usage: takumi display mirror <on|off|toggle|status>" >&2; exit 2 ;;
+esac
+if [[ $want == off ]]; then
+  if mirroring; then stop; say "Mirroring off" "each screen shows its own again"; else rm -f "$marker"; echo "Not mirroring"; fi
+  exit 0
+fi
+if ! command -v wl-mirror >/dev/null; then
+  takumi notice warn "Mirroring needs wl-mirror" "it comes with Takumi's desktop packages" -1 >/dev/null 2>&1 || true
+  echo "Mirroring needs wl-mirror" >&2; exit 1
+fi
+screens=$(display_screens 2>/dev/null) || { echo "The screens could not be read" >&2; exit 1; }
+[[ $(grep -c . <<< "$screens") -ge 2 ]] || { echo "There is only one screen" >&2; exit 1; }
+# display_screens lists the built-in screen first: it is the one shown everywhere.
+IFS=$'\t' read -r src label _ <<< "$(head -n 1 <<< "$screens")"
+targets=(); names=""
+while IFS=$'\t' read -r n l _; do
+  [[ -n "$n" ]] || continue
+  targets+=("$n"); names+="${names:+ and }$l"
+done <<< "$(sed 1d <<< "$screens")"
+stop
+mkdir -p "$display_run"
+if command -v setsid >/dev/null; then setsid "$0" --job "$src" "${targets[@]}" </dev/null >/dev/null 2>&1 &
+else "$0" --job "$src" "${targets[@]}" </dev/null >/dev/null 2>&1 & fi
+echo "$! $src ${targets[*]}" > "$marker"
+say "Mirroring $label" "it shows on $names too"

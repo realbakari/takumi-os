@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for fingerprints, Secure Boot and the disk's security chip as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "security", "fingerprint", "secure boot", "tpm" (docs/security.md). Each row shows only where it can work: a
+# finger with a reader, Secure Boot on a UEFI computer, the chip with an encrypted disk and a TPM. Changing your
+# password is a command row of its own (takumi password).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do
+  [[ -f "$l/security.sh" ]] && { . "$l/security.sh"; . "$l/palette.sh"; . "$l/rooms.sh"; . "$l/disk.sh"; break; }
+done
+declare -F security_fingers >/dev/null && declare -F palette_filter >/dev/null || exit 0
+q=${1:-}
+palette_short "$q" && exit 0
+command -v jq >/dev/null || exit 0
+
+# Each kind of row and every word it can show. What is behind a kind (fprintd, the firmware, the disk) is asked
+# only when every word of the query is among its words, as the filter at the end would want.
+fw="security privacy fingerprint finger touch id hello biometric sensor reader unlock login"
+bw="security privacy secure boot uefi firmware keys signed start"
+tw="security privacy tpm chip disk encryption encrypted open unlock start automatically password"
+fhay="$fw unlock with your finger touch the sensor instead of typing your password on adds another stop unlocking with your finger removes your fingerprints from this computer"
+bhay="$bw secure boot is on the computer starts only what its own keys signed turn on secure boot the firmware is ready for this computer's own keys off enter shows how"
+thay="$tw open the disk by itself this computer's security chip opens it your password still works the disk opens by itself on enter to ask for the password at every start"
+read -r -a qw <<< "$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]' | tr -d '-')"
+wants() {
+  local hay w
+  hay=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '-')
+  for w in ${qw[@]+"${qw[@]}"}; do [[ "$hay" == *"$w"* ]] || return 1; done
+  return 0
+}
+
+{
+  if wants "$fhay" && fingers=$(security_fingers "$(id -un)"); then
+    n=$(security_count "$fingers")
+    if [[ "$n" == 0 ]]; then
+      W=$fw jq -cn '{id: "security:finger", title: "Unlock with your finger", subtitle: "Touch the sensor instead of typing your password",
+        glyph: "finger", kind: "Security", keywords: env.W, converse: true, risk: 1,
+        run: ["takumi", "security", "fingerprint", "on"], score: 0.9}'
+    else
+      W=$fw N=$n jq -cn '{id: "security:finger", title: "Unlock with your finger",
+        subtitle: ("On · " + env.N + (if env.N == "1" then " finger" else " fingers" end) + " · Enter adds another"),
+        glyph: "finger", kind: "Security", keywords: env.W, converse: true, risk: 1,
+        run: ["takumi", "security", "fingerprint", "on"], score: 0.9}'
+      W=$fw jq -cn '{id: "security:finger-off", title: "Stop unlocking with your finger", subtitle: "Removes your fingerprints from this computer",
+        glyph: "finger", kind: "Security", keywords: (env.W + " remove delete off"), converse: true, risk: 1,
+        run: ["takumi", "security", "fingerprint", "off"], score: 0.6}'
+    fi
+  fi
+  if wants "$bhay"; then
+    case "$(security_boot_state)" in
+      on) W=$bw jq -cn '{id: "security:boot", title: "Secure Boot is on", subtitle: "The computer starts only what its own keys signed",
+            glyph: "shield", kind: "Security", keywords: env.W, converse: true, run: ["takumi", "security", "secure-boot"], score: 0.8}' ;;
+      setup) W=$bw jq -cn '{id: "security:boot", title: "Turn on Secure Boot", subtitle: "The firmware is ready for this computer'"'"'s own keys",
+            glyph: "shield", kind: "Security", keywords: env.W, converse: true, risk: 2, run: ["takumi", "security", "secure-boot"], score: 0.85}' ;;
+      off) W=$bw jq -cn '{id: "security:boot", title: "Turn on Secure Boot", subtitle: "Off · Enter shows how",
+            glyph: "shield", kind: "Security", keywords: env.W, converse: true, risk: 2, run: ["takumi", "security", "secure-boot"], score: 0.8}' ;;
+    esac
+  fi
+  if wants "$thay" && [[ "$(disk_tpm_chip)" == 2 ]] && rooms_encrypted; then
+    if disk_opens_by_itself; then
+      W=$tw jq -cn '{id: "security:tpm", title: "The disk opens by itself", subtitle: "On · Enter to ask for the password at every start",
+        glyph: "chip", kind: "Security", keywords: env.W, converse: true, risk: 2, run: ["takumi", "disk", "tpm", "off"], score: 0.8}'
+    else
+      W=$tw jq -cn '{id: "security:tpm", title: "Open the disk by itself", subtitle: "This computer'"'"'s security chip opens it; your password still works",
+        glyph: "chip", kind: "Security", keywords: env.W, converse: true, risk: 2, run: ["takumi", "disk", "tpm", "on"], score: 0.8}'
+    fi
+  fi
+} | palette_filter "$q"

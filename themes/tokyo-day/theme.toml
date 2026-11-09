@@ -1,0 +1,35 @@
+# Tokyo Night Day: Tokyo Night's blues by daylight
+# Colours after Tokyo Night by folke (https://github.com/folke/tokyonight.nvim); phases by Takumi.
+
+[meta]
+name = "tokyo-day"
+mode = "light"
+title = "Tokyo Night Day"
+about = "Tokyo Night's blues by daylight"
+credit = "Tokyo Night by folke (https://github.com/folke/tokyonight.nvim)"
+
+[palette]
+accent     = "#2e7de9"
+background = "#e1e2e7"
+surface    = "#d6d8df"
+foreground = "#28458a"
+muted      = "#777ea3"
+red        = "#f52a65"
+yellow     = "#8c6c3e"
+green      = "#587539"
+cyan       = "#007197"
+blue       = "#2e7de9"
+magenta    = "#9854f1"
+
+[phase.dawn]
+accent     = "#b15c00"
+background = "#ece7e5"
+
+[phase.dusk]
+accent     = "#c94a23"
+
+[phase.night]
+accent     = "#286cc8"
+background = "#d8dae2"
+surface    = "#cccfda"
+foreground = "#2d4273"

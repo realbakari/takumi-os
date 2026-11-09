@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Started by niri at login. Links the shell config, starts the shell and runs the phase tick. Migrations
+# ran before niri, in takumi session start.
+set -euo pipefail
+mkdir -p "$HOME/.config/quickshell"
+[[ -e "$HOME/.config/quickshell/takumi" ]] || ln -s /usr/share/takumi/shell "$HOME/.config/quickshell/takumi"
+# What niri gives the apps it starts, for the shell and the apps it opens too. XMODIFIERS and QT_IM_MODULES lead
+# X11 and Qt apps to an input method (takumi keys input, docs/harmony-keys.md).
+systemctl --user import-environment WAYLAND_DISPLAY NIRI_SOCKET XDG_CURRENT_DESKTOP SUDO_ASKPASS TAKUMI_DRAWING XMODIFIERS QT_IM_MODULES 2>/dev/null || true
+# The language and formats as /etc/locale.conf says them now (takumi language, docs/languages.md): a login soon
+# after a change can find the last session's service manager still running with the old ones.
+if [[ -r /etc/locale.conf ]]; then
+  systemctl --user unset-environment LANGUAGE LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MONETARY LC_MESSAGES LC_PAPER \
+    LC_NAME LC_ADDRESS LC_TELEPHONE LC_MEASUREMENT LC_IDENTIFICATION 2>/dev/null || true
+  locale_vars=()
+  while IFS= read -r v; do locale_vars+=("$v"); done < <(grep -E '^(LANG|LANGUAGE|LC_[A-Z]+)=' /etc/locale.conf | tr -d '"')
+  (( ${#locale_vars[@]} == 0 )) || systemctl --user set-environment "${locale_vars[@]}" 2>/dev/null || true
+fi
+# Japanese, Korean or Chinese through an input method, when one is set up (takumi keys input): before the shell,
+# so the shell and the apps it opens find it.
+takumi keys input start >/dev/null 2>&1 || true
+systemctl --user start takumi-shell.service takumi-phase.timer takumi-idle.service takumi-battery.timer takumi-clipboard.service \
+  takumi-tuning.service takumi-micled.service pipewire-pulse.service takumi-crash.service takumi-update-check.timer \
+  takumi-printer.service takumi-drives.service takumi-docks.service
+# The apps you chose to open at login (takumi app login, docs/apps.md): niri-session starts them through
+# xdg-desktop-autostart.target; where niri runs on its own (a VM, or drawing on the CPU) nothing does, so here.
+# The target itself cannot be started by hand, so its apps are, one by one.
+if ! systemctl --user is-active --quiet graphical-session.target; then
+  systemctl --user list-dependencies --plain --no-legend xdg-desktop-autostart.target 2>/dev/null | awk '$1 ~ /@autostart\.service$/ { print $1 }' |
+    while IFS= read -r u; do systemctl --user start --no-block "$u" 2>/dev/null || true; done
+fi
+# A paired phone (takumi phone pair, docs/sharing.md).
+systemctl --user is-enabled --quiet takumi-phone.service 2>/dev/null && systemctl --user start takumi-phone.service || true
+# Reminders set before this login come back (takumi remind, docs/time.md).
+(sleep 10; takumi remind restore) >/dev/null 2>&1 &
+# Once the shell is up, say what happened to the last update, if anything did.
+(sleep 8; takumi room report) >/dev/null 2>&1 &
+takumi phase tick || true
+takumi display nightlight --restore >/dev/null 2>&1 || true

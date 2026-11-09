@@ -1,0 +1,33 @@
+# Umi: the deep sea and its teal glow
+# A Takumi theme.
+
+[meta]
+name = "umi"
+mode = "dark"
+title = "Umi"
+about = "the deep sea and its teal glow"
+
+[palette]
+accent     = "#3fc1c9"
+background = "#08131c"
+surface    = "#0d1c28"
+foreground = "#d4e3ee"
+muted      = "#4f6a7d"
+red        = "#f0727d"
+yellow     = "#f2c86b"
+green      = "#7ad3a0"
+cyan       = "#3fc1c9"
+blue       = "#5fa8f0"
+magenta    = "#b593f0"
+
+[phase.dawn]
+accent     = "#f2a36b"
+
+[phase.dusk]
+accent     = "#f19271"
+
+[phase.night]
+accent     = "#4f8dca"
+background = "#050c12"
+surface    = "#09141c"
+foreground = "#bccad5"

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Which app the media keys control: the next, the previous or one by name, remembered
+usage: <next|previous|name>
+example: takumi audio player next
+example: takumi audio player spotify
+risk: 0
+ABOUT
+set -euo pipefail
+# Shift and the play key run `takumi audio player next`. With no word it lists the players, the one the keys
+# control marked. Exit 3 when no media app is open, or none has that name; 1 without playerctl.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/audio.sh" ]] && { . "$l/audio.sh"; break; }; done
+declare -F audio_player_choose >/dev/null || { echo "takumi: the sound library is missing" >&2; exit 1; }
+command -v playerctl >/dev/null || { echo "playerctl is not installed"; exit 1; }
+if [[ -n "${1:-}" ]]; then audio_player_choose "$1"; exit 0; fi
+players=$(audio_players)
+[[ -n "$players" ]] || { echo "No media app is open"; exit 3; }
+now=$(audio_player_now || true)
+while IFS= read -r p; do
+  track=$(playerctl -p "$p" metadata title 2>/dev/null || true)
+  printf '%s %s%s\n' "$([[ "$p" == "$now" ]] && echo '*' || echo ' ')" "$(audio_player_name "$p")" "${track:+ · $track}"
+done <<< "$players"

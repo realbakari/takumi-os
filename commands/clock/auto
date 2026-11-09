@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Let the time zone follow you: on, off, or look once now (asks ipinfo.io where your internet address is)
+usage: <on|off|check>
+example: takumi clock auto on
+risk: 1
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/core.sh"; break; }; done
+declare -F clock_zone >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# Opt-in and off by default. When it is on, NetworkManager's dispatcher (default/networkmanager/dispatcher.d/
+# 90-takumi-clock) runs `takumi clock auto check --network` in this person's session whenever a network comes
+# up or the internet appears. That sends one HTTPS request to ipinfo.io, which sees the internet address every
+# website sees and answers with the time zone and city it belongs to; nothing else is sent, and nothing at
+# all while a VPN is on (the answer would be the VPN's). A new zone is set through timedated and said:
+# "You're in Lisbon · clock set to 14:05". --network looks at most every five minutes and stays quiet when it
+# cannot. Exit status: 0 done · 1 the lookup or the change failed · 2 usage.
+lookup_url="https://ipinfo.io/json"
+
+vpn_on() {
+  local types
+  types=$(LC_ALL=C nmcli -t -f TYPE connection show --active 2>/dev/null || true)
+  [[ $'\n'"$types"$'\n' == *$'\n'vpn$'\n'* || $'\n'"$types"$'\n' == *$'\n'wireguard$'\n'* || $'\n'"$types"$'\n' == *$'\n'tun$'\n'* ]]
+}
+
+# check <manual|network|quiet>: look once and set the zone when it changed. quiet: as manual, but never fails.
+check() {
+  local mode=$1 now json zone city stamp="$clock_cache/takumi-clock-auto" last
+  now=$(clock_now)
+  if [[ $mode == network ]]; then
+    clock_auto_on || exit 0
+    last=$(cat "$stamp" 2>/dev/null || echo 0); [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    (( now - last >= 300 )) || exit 0
+  fi
+  if vpn_on; then
+    [[ $mode == manual ]] || return 1
+    core_fail 1 "A VPN is on, so the network's place would be the VPN's; the time zone stays"
+  fi
+  core_note "Asking ipinfo.io where this network is…"
+  if ! json=$(curl -fsS --max-time 8 --proto '=https' "$lookup_url" 2>/dev/null); then
+    [[ $mode == manual ]] || return 1
+    core_fail 1 "ipinfo.io did not answer; the time zone stays"
+  fi
+  zone=$(jq -r '.timezone // empty' <<< "$json" 2>/dev/null || true)
+  city=$(jq -r '.city // empty' <<< "$json" 2>/dev/null || true)
+  if [[ ! "$zone" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ || ! -f "$TAKUMI_ZONEINFO/$zone" ]]; then
+    [[ $mode == manual ]] || return 1
+    core_fail 1 "ipinfo.io gave no time zone this computer knows; it stays"
+  fi
+  [[ -n "$city" ]] || city=$(clock_city "$zone")
+  if [[ $mode == network ]]; then mkdir -p "$clock_cache"; echo "$now" > "$stamp"; fi
+  if [[ "$zone" == "$(clock_zone)" ]]; then found="$city"; changed=no; return 0; fi
+  if ! clock_set_zone "$zone"; then
+    if [[ $mode == network ]]; then
+      takumi notice clock "You're in $city" "the clock could not change to $(clock_hm "$now" "$zone"); type time zone in the Core" -1 8 >/dev/null 2>&1 || true
+      return 1
+    fi
+    core_sudo "Changing the time zone needs your password" timedatectl set-timezone "$zone" >/dev/null 2>&1 \
+      || { [[ $mode == quiet ]] && return 1; core_fail 1 "The time zone did not change"; }   # /etc/localtime
+  fi
+  takumi notice clock "You're in $city" "clock set to $(clock_hm "$now" "$zone")" -1 6 >/dev/null 2>&1 || true
+  found="$city"; changed=yes
+}
+
+found="" changed=no
+case "${1:-}" in
+  on)
+    clock_save "$(clock_setting format)" true "$(clock_cities)"
+    if check quiet; then
+      if [[ $changed == yes ]]; then core_done "The time zone follows you now · you're in $found"
+      else core_done "The time zone follows you now · it is right for $found"; fi
+    else core_done "The time zone follows you now · it looks the next time you join a network"; fi ;;
+  off)
+    clock_save "$(clock_setting format)" false "$(clock_cities)"
+    core_done "The time zone stays as it is · $(clock_city "$(clock_zone)")" ;;
+  check)
+    if [[ "${2:-}" == --network ]]; then check network || exit 0; exit 0; fi
+    check manual
+    if [[ $changed == yes ]]; then core_done "You're in $found · the clock follows"
+    else core_done "The time zone is right for $found"; fi ;;
+  *) echo "usage: takumi clock auto <on|off|check>" >&2; exit 2 ;;
+esac

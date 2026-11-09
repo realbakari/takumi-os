@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Turn a screen a quarter; it goes back unless you keep it
+usage: [screen]
+example: takumi display rotate
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/display.sh" ]] && { . "$l/display.sh"; . "$l/core.sh"; break; }; done
+declare -F display_screens >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+screens=$(display_screens) || core_fail 1 "The screens could not be read"
+line=$(if [[ -n "${1:-}" ]]; then display_pick "$1" <<< "$screens"; else head -n 1 <<< "$screens"; fi)
+[[ -n "$line" ]] || core_fail 1 "There is no screen called ${1:-}"
+IFS=$'\t' read -r name label _ transform _ <<< "$line"
+to=$(display_next_turn "$transform")
+apply() { niri msg output "$name" transform "$to"; }
+undo()  { niri msg output "$name" transform "$(display_transform_word "$transform")"; }
+display_change "$label is turned" apply undo

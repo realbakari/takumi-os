@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for power, the battery, the lid and hibernation as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# The power mode, the battery and its charge limit, staying awake, when the screen locks and the computer sleeps,
+# what closing the lid does, and hibernation (docs/power.md). Shut down, restart, sleep and log out are command
+# rows of their own. Every row carries "power", so that word lists them all.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; . "$l/palette.sh"; break; }; done
+declare -F power_profiles >/dev/null || exit 0
+q=${1:-}
+palette_short "$q" && exit 0
+command -v jq >/dev/null || exit 0
+words="power energy"
+src=$(power_source); where=$([[ $src == battery ]] && echo "on battery" || echo "when plugged in")
+ready=no; if power_hibernate_ready; then ready=yes; fi
+after=$(power_hibernate_after)
+limit=$(power_charge_limit_now)
+{
+  now=$(power_profile_now)
+  while IFS= read -r p; do
+    p=${p#\*}; [[ -n "$p" ]] || continue
+    P=$p NAME="$(power_profile_name "$p")" NOW=$now WHERE=$where W="$words" jq -cn '
+      {id: ("power:profile:" + env.P), title: env.NAME, kind: "Power", steady: true,
+       glyph: (if env.P == "power-saver" then "leaf" else "bolt" end),
+       keywords: (env.W + " mode profile saver battery life performance fast quiet"),
+       subtitle: (if env.P == env.NOW then "In use · " + env.WHERE else
+                  {"power-saver": "Longer battery, a little slower", "balanced": "The everyday choice", "performance": "Fastest, louder and warmer"}[env.P] end),
+       run: (if env.P == env.NOW then ["true"] else ["takumi", "power", "profile", env.P] end),
+       score: (if env.P == env.NOW then 0.9 else 0.85 end)}'
+  done <<< "$(power_profiles)"
+  if line=$(power_battery) && [[ -n "$line" ]]; then
+    read -r cap status mins <<< "$line"
+    left=""; (( mins > 0 )) && left=" · $(power_duration "$mins") left"
+    # Held below full, a plugged-in battery says so rather than "Full".
+    C=$cap S=$status L=$left M=${limit:-100} jq -cn '{id: "power:battery", title: ("Battery " + env.C + "%"), glyph: "battery", kind: "Power", steady: true,
+      keywords: "power battery charge charging left energy",
+      subtitle: (if env.S == "charging" then (if env.M != "100" then "Charging to " + env.M + "%" else "Charging" end)
+                 elif env.S == "full" then (if env.M != "100" and (env.C | tonumber) < 100 then "Plugged in · kept at " + env.M + "% so it lasts" else "Full, plugged in" end)
+                 else "On battery" + env.L end),
+      run: ["true"], score: 0.95}'
+  fi
+  if until=$(power_awake_until); then
+    U=$(power_clock "$until") jq -cn '{id: "power:awake", title: ("Awake until " + env.U), subtitle: "No lock, no sleep · Enter to stop", glyph: "cup", kind: "Power",
+      keywords: "power awake caffeine stay keep on screen sleep lock", run: ["takumi", "power", "awake", "stop"], score: 0.97}'
+  else
+    jq -cn '{id: "power:awake", title: "Stay awake for an hour", subtitle: "No lock, no sleep, then back to normal", glyph: "cup", kind: "Power",
+      keywords: "power awake caffeine stay keep on screen sleep lock presentation movie", run: ["takumi", "power", "awake", "60"], score: 0.8}'
+  fi
+  for what in lock sleep; do
+    if [[ $what == lock ]]; then m=$(power_lock_after "$src"); else m=$(power_sleep_after "$src"); fi
+    WHAT=$what M=$m WHERE=$where jq -cn '
+      (if env.WHAT == "lock" then "Lock the screen" else "Sleep" end) as $verb |
+      {id: ("power:when:" + env.WHAT), kind: "Power", glyph: (if env.WHAT == "lock" then "lock" else "moon" end),
+       title: (if env.M == "0" then $verb + ": never" else $verb + " after " + env.M + " min" end),
+       subtitle: ("After no use, " + env.WHERE + " · Enter to change"),
+       keywords: "power idle lock sleep screen minutes timeout away", converse: true, run: ["takumi", "power", "when", env.WHAT], score: 0.7}'
+  done
+  # The lid, for the power source in use now. On battery a choice holds plugged in too, unless plugged in has
+  # one of its own; plugged in, a choice holds only there (takumi power lid ... on-charger).
+  if power_has_lid; then
+    cur=$(power_lid_choice "$src"); own=no; if power_lid_own_charger; then own=yes; fi
+    for c in sleep hibernate nothing; do
+      [[ $c != hibernate || $ready == yes || $cur == hibernate ]] || continue
+      C=$c CUR=$cur SRC=$src OWN=$own READY=$ready AFTER=$after jq -cn '
+        {id: ("power:lid:" + env.C), kind: "Power", glyph: "laptop", steady: true, converse: true,
+         title: {"sleep": "Sleep when the lid closes", "hibernate": "Hibernate when the lid closes", "nothing": "Keep running when the lid closes"}[env.C],
+         keywords: "power lid close closed closing laptop clamshell sleep hibernate keep running",
+         subtitle: (if env.C == env.CUR then
+                      (if env.C == "hibernate" and env.READY != "yes" then "Hibernation is off, so closing the lid does nothing · choose another"
+                       elif env.SRC == "power" then "In use · when plugged in"
+                       elif env.OWN == "yes" then "In use · on battery"
+                       else "In use · on battery and plugged in" end)
+                    elif env.C == "sleep" then (if env.AFTER != "" then "Sleeps, then hibernates after " + env.AFTER + " h" else "Wakes the moment you open it" end)
+                    elif env.C == "hibernate" then "Lasts for days; everything comes back as it was"
+                    else "The screen locks; music and downloads go on" end),
+         run: (["takumi", "power", "lid", env.C] + (if env.SRC == "power" then ["on-charger"] else [] end)),
+         score: (if env.C == env.CUR then 0.72 else 0.7 end)}'
+    done
+  fi
+  # Hibernation: on, off, hibernate now, and sleep that becomes hibernation after two hours.
+  hw="power hibernate hibernation suspend sleep disk days"
+  if [[ $ready == yes ]]; then
+    G=$(power_swapfile_gib) A=$after W="$hw" jq -cn '
+      {id: "power:hibernate:now", title: "Hibernate", subtitle: "Everything is kept on the disk and the computer turns off; it all comes back",
+       glyph: "drive", kind: "Power", keywords: env.W, run: ["takumi", "power", "hibernate", "now"], score: 0.66},
+      (if env.A == "" then
+         {id: "power:hibernate:after", title: "Sleep, then hibernate after 2 hours", subtitle: "Asleep that long, it keeps everything on the disk and turns off",
+          glyph: "moon", kind: "Power", keywords: env.W, converse: true, run: ["takumi", "power", "hibernate-after", "2"], score: 0.64}
+       else
+         {id: "power:hibernate:after", title: ("Sleep, then hibernate after " + (if env.A == "1" then "an hour" else env.A + " hours" end)),
+          subtitle: "In use · Enter to just sleep", glyph: "moon", kind: "Power", keywords: env.W, converse: true,
+          run: ["takumi", "power", "hibernate-after", "never"], score: 0.66}
+       end),
+      {id: "power:hibernate:off", title: "Turn off hibernation", subtitle: ("Gives back " + env.G + " GB of the disk; sleep stays sleep"),
+       glyph: "drive", kind: "Power", keywords: env.W, converse: true, risk: 2, run: ["takumi", "power", "hibernate", "off"], score: 0.5}'
+  else
+    why=$(power_hibernate_unable)
+    if [[ -z "$why" ]]; then
+      gib=$(power_memory_gib); have=$(power_swapfile_gib); free=$(power_disk_free_gib)
+      need=$(( gib > have ? gib - have : 0 ))
+      if (( free < need + 8 )); then s="Needs $need GB of the disk with 8 GB left over for updates; $free GB is free"
+      else s="Sleep that lasts for days, kept on the disk · uses $gib GB"; fi
+      S=$s W="$hw" jq -cn '{id: "power:hibernate:on", title: "Turn on hibernation", subtitle: env.S, glyph: "drive", kind: "Power",
+        keywords: env.W, converse: true, risk: 2, run: ["takumi", "power", "hibernate", "on"], score: 0.6}'
+    elif [[ "$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')" == *hibernat* ]]; then
+      S=$why W="$hw" jq -cn '{id: "power:hibernate:none", title: "Hibernation is not available", subtitle: env.S, glyph: "drive", kind: "Power",
+        keywords: env.W, run: ["true"], score: 0.6}'
+    fi
+  fi
+  # Battery care, where the laptop can hold its battery below full.
+  if [[ -n "$limit" ]]; then
+    L=$limit jq -cn '
+      if env.L != "100" then
+        {id: "power:charge", title: ("Battery kept at " + env.L + "%"), subtitle: "So it lasts more years · Enter to charge to 100%", glyph: "battery", kind: "Power",
+         keywords: "power battery charge charging limit health care full 100 percent", converse: true, run: ["takumi", "power", "charge-limit", "100"], score: 0.68}
+      else
+        {id: "power:charge", title: "Keep the battery at 80%", subtitle: "It lasts more years; for a laptop that is mostly plugged in", glyph: "battery", kind: "Power",
+         keywords: "power battery charge charging limit health care 80 percent", converse: true, run: ["takumi", "power", "charge-limit", "80"], score: 0.68}
+      end'
+  fi
+} | palette_filter "$q"

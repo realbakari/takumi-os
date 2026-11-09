@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Choose the apps that open when you log in
+usage: [<app> on|off]
+example: takumi app login Spotify on
+risk: 0
+glyph: play
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; break; }; done
+declare -F apps_login_set >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# No arguments: the apps that open at login, one per line (id, then name). With an app and on or off: change
+# it, and say so in the Core. Exit status: 0 done · 2 usage · 4 no app by that name (docs/apps.md).
+if [[ $# -eq 0 ]]; then apps_login_list; exit 0; fi
+[[ $# -eq 2 && ( "$2" == on || "$2" == off ) ]] || { echo "usage: takumi app login [<app> on|off]" >&2; exit 2; }
+id=$(apps_find "$1") || { echo "No app called $1" >&2; exit 4; }
+name=$(apps_name "$id")
+apps_login_set "$id" "$2"
+if [[ "$2" == on ]]; then msg="$name opens when you log in"; else msg="$name no longer opens when you log in"; fi
+takumi notice play "$msg" >/dev/null 2>&1 || true
+echo "$msg"

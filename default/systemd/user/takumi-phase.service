@@ -1,0 +1,6 @@
+[Unit]
+Description=Re-render the theme when the phase changes
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/takumi phase tick

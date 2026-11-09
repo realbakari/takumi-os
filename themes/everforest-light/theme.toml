@@ -1,0 +1,35 @@
+# Everforest Light: forest greens on sunlit paper
+# Colours after Everforest by sainnhe (https://github.com/sainnhe/everforest); phases by Takumi.
+
+[meta]
+name = "everforest-light"
+mode = "light"
+title = "Everforest Light"
+about = "forest greens on sunlit paper"
+credit = "Everforest by sainnhe (https://github.com/sainnhe/everforest)"
+
+[palette]
+accent     = "#859701"
+background = "#fdf6e3"
+surface    = "#f4f0d9"
+foreground = "#4a555b"
+muted      = "#879285"
+red        = "#f85552"
+yellow     = "#b78300"
+green      = "#859701"
+cyan       = "#33a077"
+blue       = "#3a94c5"
+magenta    = "#d665b3"
+
+[phase.dawn]
+accent     = "#dc7022"
+background = "#fef4e2"
+
+[phase.dusk]
+accent     = "#e76832"
+
+[phase.night]
+accent     = "#728201"
+background = "#f4eedc"
+surface    = "#eae7d1"
+foreground = "#484f52"

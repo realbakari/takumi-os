@@ -1,0 +1,35 @@
+# GitHub Light: the colours of code review
+# Colours after GitHub's Primer colours (https://primer.style/foundations/color); phases by Takumi.
+
+[meta]
+name = "github-light"
+mode = "light"
+title = "GitHub Light"
+about = "the colours of code review"
+credit = "GitHub's Primer colours (https://primer.style/foundations/color)"
+
+[palette]
+accent     = "#0969da"
+background = "#ffffff"
+surface    = "#f6f8fa"
+foreground = "#1f2328"
+muted      = "#656d76"
+red        = "#cf222e"
+yellow     = "#9a6700"
+green      = "#1a7f37"
+cyan       = "#1b7c83"
+blue       = "#0969da"
+magenta    = "#8250df"
+
+[phase.dawn]
+accent     = "#bc4c00"
+background = "#fffaf4"
+
+[phase.dusk]
+accent     = "#c33d10"
+
+[phase.night]
+accent     = "#085abb"
+background = "#f4f4f4"
+surface    = "#e9ebed"
+foreground = "#35393e"

@@ -1,0 +1,7 @@
+#%PAM-1.0
+# Takumi lock screen (shell/Lock/Lock.qml): the password, with the same checks as a console login (ten wrong ones
+# and it waits two minutes: /etc/security/faillock.conf). A finger has its own file, takumi-lock-finger, checked
+# beside this one, so typing never waits for the sensor. The right password also opens the login keyring when it
+# is still locked, as after a start that opened the disk with your password (docs/security.md).
+auth include login
+auth optional pam_gnome_keyring.so

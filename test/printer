@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+# Contract checks for printers and scanners (lib/printer.sh, commands/printer/*, commands/scan/main, the
+# Palette's printer rows) against fake CUPS and SANE tools that keep their state in files: what each printer
+# says, the rows, setting one up driverless or with a driver as a conversation, sudo only when CUPS refuses,
+# the notices for a finished job and an empty tray, and a scan that lands in Documents.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; printer checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-printer.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice"   # fake takumi commands go in front of the real ones
+me=$(id -un)
+
+# CUPS, kept in $FAKE: queues holds "name|description|state|alerts|uri|message" per printer.
+cat > "$t/bin/lpstat" <<'FAKE'
+#!/usr/bin/env bash
+printf 'lpstat %s\n' "$*" >> "$FAKE/calls"
+[[ -e "$FAKE/cups-down" ]] && { echo "lpstat: Unable to connect to server" >&2; exit 1; }
+def=$(cat "$FAKE/user-default" 2>/dev/null || cat "$FAKE/default" 2>/dev/null || true)
+case "$*" in
+  "-d -v -l -p")
+    if [[ -n "$def" ]]; then echo "system default destination: $def"; else echo "no system default destination"; fi
+    awk -F'|' '{ print "device for " $1 ": " $5 }' "$FAKE/queues"
+    awk -F'|' '{
+      if ($3 == "printing") print "printer " $1 " now printing " $1 "-7.  enabled since Sun 09 Nov 2026 10:00:00 AM CET"
+      else if ($3 == "stopped") print "printer " $1 " disabled since Sun 09 Nov 2026 10:00:00 AM CET -"
+      else print "printer " $1 " is idle.  enabled since Sun 09 Nov 2026 10:00:00 AM CET"
+      if ($6 != "") print "\t" $6; else if ($3 == "stopped") print "\treason unknown"
+      print "\tForm mounted:"; print "\tContent types: any"; print "\tPrinter types: unknown"
+      print "\tDescription: " $2; print "\tAlerts: " ($4 == "" ? "none" : $4)
+      print "\tLocation: "; print "\tConnection: direct"; print "\tBanner required"; print "\tUsers allowed:"; print "\t\t(all)" }' "$FAKE/queues" ;;
+  "-d") if [[ -n "$def" ]]; then echo "system default destination: $def"; else echo "no system default destination"; fi ;;
+  "-W not-completed -o") cat "$FAKE/jobs-active" 2>/dev/null || true ;;
+  "-l -W completed -o") cat "$FAKE/jobs-done" 2>/dev/null || true ;;
+  *) echo "fake lpstat: unexpected: $*" >&2; exit 99 ;;
+esac
+FAKE
+cat > "$t/bin/lpadmin" <<'FAKE'
+#!/usr/bin/env bash
+# Refuses an ordinary account in "forbidden" mode, as CUPS does outside its SystemGroup; sudo sets FAKE_ROOT.
+printf 'lpadmin %s\n' "$*" >> "$FAKE/calls"
+mode=$(cat "$FAKE/lpadmin-mode" 2>/dev/null || echo ok)
+if [[ "$mode" == forbidden && -z "${FAKE_ROOT:-}" ]]; then echo "lpadmin: Forbidden" >&2; exit 1; fi
+if [[ " $* " == *" -m everywhere "* ]]; then
+  case "$mode" in
+    notdriverless) echo "lpadmin: Unable to create PPD file: Printer does not support required IPP attributes or document formats." >&2; exit 1 ;;
+    offline) echo 'lpadmin: Unable to connect to "192.168.1.20:631": No route to host' >&2; exit 1 ;;
+  esac
+fi
+name="" desc="" uri=""
+while (( $# )); do
+  case "$1" in
+    -p) name=$2; shift ;;
+    -D) desc=$2; shift ;;
+    -v) uri=$2; shift ;;
+    -x) awk -F'|' -v n="$2" '$1 != n' "$FAKE/queues" > "$FAKE/q" && mv "$FAKE/q" "$FAKE/queues"; exit 0 ;;
+  esac
+  shift
+done
+[[ -z "$name" ]] || printf '%s|%s|idle||%s|\n' "$name" "$desc" "$uri" >> "$FAKE/queues"
+FAKE
+cat > "$t/bin/sudo" <<'FAKE'
+#!/usr/bin/env bash
+printf 'sudo %s|why=%s\n' "$*" "${TAKUMI_SUDO_WHY:-}" >> "$FAKE/calls"
+[[ "${1:-}" == -A ]] && shift
+if [[ -e "$FAKE/not-sudoer" ]]; then echo "$(id -un) is not in the sudoers file." >&2; exit 1; fi
+if [[ -e "$FAKE/no-password" ]]; then echo "sudo: no password was provided" >&2; echo "sudo: a password is required" >&2; exit 1; fi
+FAKE_ROOT=1 exec "$@"
+FAKE
+cat > "$t/bin/lpinfo" <<'FAKE'
+#!/usr/bin/env bash
+printf 'lpinfo %s\n' "$*" >> "$FAKE/calls"
+case " $* " in
+  *" -v "*) [[ -e "$FAKE/lpinfo-slow" ]] && sleep 2; cat "$FAKE/devices" 2>/dev/null || true ;;
+  *" --device-id "*) if [[ -s "$FAKE/ppds-id" ]]; then cat "$FAKE/ppds-id"; else echo "lpinfo: client-error-not-found" >&2; exit 1; fi ;;
+  *" --make-and-model "*) if [[ -s "$FAKE/ppds" ]]; then cat "$FAKE/ppds"; else echo "lpinfo: client-error-not-found" >&2; exit 1; fi ;;
+  *) echo "fake lpinfo: unexpected: $*" >&2; exit 99 ;;
+esac
+FAKE
+cat > "$t/bin/lpoptions" <<'FAKE'
+#!/usr/bin/env bash
+printf 'lpoptions %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  -d) echo "$2" > "$FAKE/user-default" ;;
+  -p) echo "copies=1 device-uri=ipp://x marker-types=$(cat "$FAKE/marker-$2" 2>/dev/null || echo toner) printer-state=3" ;;
+esac
+FAKE
+cat > "$t/bin/lp" <<'FAKE'
+#!/usr/bin/env bash
+printf 'lp %s\n' "$*" >> "$FAKE/calls"
+last=""; for a in "$@"; do last=$a; done
+[[ -f "$last" ]] || cat > "$FAKE/lp-stdin"
+echo "request id is X-12 (1 file(s))"
+FAKE
+for c in cupsenable cupsaccept; do
+  printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "$FAKE/calls"\n[[ "$(cat "$FAKE/lpadmin-mode" 2>/dev/null)" == forbidden && -z "${FAKE_ROOT:-}" ]] && { echo "%s: Forbidden" >&2; exit 1; }\nexit 0\n' "$c" "$c" > "$t/bin/$c"
+done
+printf '#!/bin/sh\ncat "$FAKE/lpq" 2>/dev/null || echo "no entries"\n' > "$t/bin/lpq"
+printf '#!/bin/sh\n[ "$*" = "is-active --quiet cups.service" ] && [ -e "$FAKE/cups-running" ]\n' > "$t/bin/systemctl"
+# SANE and the PDF makers.
+cat > "$t/bin/scanimage" <<'FAKE'
+#!/usr/bin/env bash
+printf 'scanimage %s\n' "$*" >> "$FAKE/calls"
+if [[ "${1:-}" == -L ]]; then cat "$FAKE/scanners" 2>/dev/null || echo "No scanners were identified."; exit 0; fi
+case " $* " in *" --mode "*) [[ -e "$FAKE/scan-nomode" ]] && { echo "scanimage: setting of option --mode failed (Invalid argument)" >&2; exit 1; } ;; esac
+if [[ -s "$FAKE/scan-fail" ]]; then cat "$FAKE/scan-fail" >&2; exit 1; fi
+printf 'IMAGE %s\n' "$*"
+FAKE
+printf '#!/bin/sh\nprintf "img2pdf %%s\\n" "$*" >> "$FAKE/calls"\n[ -e "$FAKE/convert-fail" ] && exit 1\n{ echo PDF; cat "$3"; } > "$2"\n' > "$t/bin/img2pdf"
+printf '#!/bin/sh\nprintf "magick %%s\\n" "$*" >> "$FAKE/calls"\nexit 1\n' > "$t/bin/magick"
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+chmod +x "$t/bin/"* "$t/commands/notice/main"
+
+hp_uri="dnssd://HP%20LaserJet%20M110w%20%5B4C1A2B%5D._ipp._tcp.local/?uuid=1"
+reset() {
+  rm -rf "${FAKE:?}"/* "${HOME:?}"/.local "${HOME:?}/Documents" "${XDG_RUNTIME_DIR:?}"/*
+  printf '%s\n' "HP_LaserJet_M110w|HP LaserJet M110w|idle||$hp_uri|" "Office|Office Color|idle|media-empty-error|ipp://10.0.0.5/ipp/print|" > "$FAKE/queues"
+  echo HP_LaserJet_M110w > "$FAKE/default"
+  : > "$FAKE/calls"; : > "$FAKE/notices"
+}
+check() { if eval "$2"; then :; else echo "printer: $1"; status=1; fi; }
+lib() { bash -c '. lib/printer.sh; . lib/core.sh; "$@"' _ "$@"; }
+rows() { commands/palette/printer "$1"; }
+settle() { for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do compgen -G "$XDG_RUNTIME_DIR/*.lock" >/dev/null || return 0; sleep 0.2; done; }
+sep=$(printf '\037')
+
+reset
+q=$(lib printer_queues | tr "$sep" '|')
+check "queues: name, description, state, alerts, default, uri" '[[ "$(head -n 1 <<< "$q")" == "HP_LaserJet_M110w|HP LaserJet M110w|idle|none|1|$hp_uri|" ]]'
+check "a printer is found by its label or its queue name, any case" '[[ "$(lib printer_find "office color")" == Office && "$(lib printer_find "hp laserjet m110w")" == HP_LaserJet_M110w ]]'
+check "problems in one word" '[[ "$(lib printer_problem idle "media-empty-error") $(lib printer_problem idle "media-jam-error") $(lib printer_problem idle "offline-report") $(lib printer_problem stopped "" "Unable to locate printer") $(lib printer_problem stopped paused "") $(lib printer_problem idle "marker-supply-low-warning")" == "paper jam offline offline paused low" ]]'
+check "status in words, with the printer's own supply" '[[ "$(lib printer_status Office idle "toner-empty-error" "")" == "Out of toner" && "$(echo ink-cartridge > "$FAKE/marker-Office"; lib printer_status Office idle "marker-supply-low-warning" "")" == "Ready · low on ink" ]]'
+check "a new queue name: CUPS letters, never one in use" '[[ "$(lib printer_queue_name "HP LaserJet M110w")" == HP_LaserJet_M110w_2 && "$(lib printer_queue_name "Café Printer #2")" == Caf_Printer_2 ]]'
+check "a name from an address" '[[ "$(lib printer_name_from_uri "$hp_uri")" == "HP LaserJet M110w" && "$(lib printer_name_from_uri "usb://HP/LaserJet%201020?serial=X")" == "HP LaserJet 1020" && "$(lib printer_name_from_uri ipp://10.0.0.5:631/ipp/print)" == "Printer at 10.0.0.5" ]]'
+
+# What CUPS finds: one HP announced on the network and plugged in by USB, an Epson, and lpinfo's bare schemes.
+cat > "$FAKE/devices" <<DEV
+Device: uri = $hp_uri
+        class = network
+        info = HP LaserJet M110w [4C1A2B]
+        make-and-model = HP LaserJet M110w
+        device-id = MFG:HP;MDL:LaserJet M110w;
+        location =
+Device: uri = ipp
+        class = network
+        info = Internet Printing Protocol (ipp)
+        make-and-model = Unknown
+        device-id =
+        location =
+Device: uri = usb://HP/LaserJet%20M110w?serial=VNB3K12345
+        class = direct
+        info = HP LaserJet M110w
+        make-and-model = HP LaserJet M110w
+        device-id = MFG:HP;MDL:LaserJet M110w;
+        location =
+Device: uri = dnssd://EPSON%20ET-2850%20Series._ipp._tcp.local/?uuid=2
+        class = network
+        info = EPSON ET-2850 Series
+        make-and-model = EPSON ET-2850 Series
+        device-id = MFG:EPSON;MDL:ET-2850 Series;
+        location =
+Device: uri = usb://Brother/HL-1110%20series?serial=E12345
+        class = direct
+        info = Brother HL-1110 series
+        make-and-model = Brother HL-1110 series
+        device-id = MFG:Brother;MDL:HL-1110 series;
+        location =
+DEV
+found=$(lib printer_discover | tr "$sep" '|')
+check "found: one line per printer, the network kept over USB, no bare schemes" '[[ "$(cut -d"|" -f2,4 <<< "$found" | tr "\n" ",")" == "HP LaserJet M110w|network,EPSON ET-2850 Series|network,Brother HL-1110 series|usb," ]]'
+
+# The rows.
+touch "$FAKE/cups-running"; lib printer_found >/dev/null
+r=$(rows printer)
+check "rows are JSON with an id, a title and a kind" '[[ -n "$r" ]] && jq -e "select(.id and .title and .kind) | true" <<< "$r" >/dev/null'
+check "the default printer, ready" '[[ "$(jq -r "select(.id == \"printer:HP_LaserJet_M110w\") | .subtitle + \"|\" + (.run | join(\" \"))" <<< "$r")" == "Ready · apps print to it|true" ]]'
+check "another printer: out of paper, Enter makes it the default" '[[ "$(jq -r "select(.id == \"printer:Office\") | .subtitle + \"|\" + (.run | join(\" \"))" <<< "$r")" == "Out of paper · Enter makes it the one apps print to|takumi printer default Office" ]]'
+check "found printers not yet set up, as conversations" '[[ "$(jq -r "select(.id | startswith(\"printer-add:\")) | .title + \" · \" + .subtitle" <<< "$r" | tr "\n" "|")" == "Add EPSON ET-2850 Series · On this network · Enter sets it up|Add Brother HL-1110 series · Plugged in by USB · Enter sets it up|" ]]'
+check "adding runs the add command with the address and the name" '[[ "$(jq -c "select(.title == \"Add EPSON ET-2850 Series\") | [.converse, .run]" <<< "$r")" == "[true,[\"takumi\",\"printer\",\"add\",\"dnssd://EPSON%20ET-2850%20Series._ipp._tcp.local/?uuid=2\",\"EPSON ET-2850 Series\"]]" ]]'
+check "by address, for one that does not show up" '[[ "$(jq -c "select(.id == \"printer:address\") | .run" <<< "$r")" == "[\"takumi\",\"printer\",\"add\"]" ]]'
+check "no test or remove rows for a plain printer query" '[[ "$r" != *printer-test:* && "$r" != *printer-remove:* ]]'
+check "test page rows by their words" '[[ "$(rows "test page" | jq -r .title | tr "\n" "|")" == "Print a test page on HP LaserJet M110w|Print a test page on Office Color|" ]]'
+check "remove rows ask first" '[[ "$(rows "remove printer" | jq -r "[.title, .risk, .converse] | map(tostring) | join(\"/\")" | tr "\n" "|")" == "Remove HP LaserJet M110w/1/true|Remove Office Color/1/true|" ]]'
+check "a printer's name finds it while the print service runs" '[[ "$(rows office | jq -r .id)" == "printer:Office" ]]'
+rm -f "$FAKE/cups-running"; : > "$FAKE/calls"
+check "an unrelated word never starts the print service" '[[ -z "$(rows office)" ]] && ! grep -q "^lpstat" "$FAKE/calls"'
+check "under three letters, nothing" '[[ -z "$(rows pr)" ]]'
+printf '%s\n' "Lobby|Lobby Printer|stopped||socket://10.0.0.9|Unable to locate printer \"10.0.0.9\"." >> "$FAKE/queues"
+check "a stopped printer: Enter starts it again, in the Core" '[[ "$(rows lobby | jq -r .title)" == "" ]] && [[ "$(rows printer | jq -c "select(.id == \"printer:Lobby\") | [.subtitle, .converse, .run]")" == "[\"Offline · Enter starts it again\",true,[\"takumi\",\"printer\",\"resume\",\"Lobby\"]]" ]]'
+reset; touch "$FAKE/lpinfo-slow"; : > "$FAKE/queues"
+check "while the first search runs: looking for printers" '[[ "$(rows printer | jq -r "select(.id == \"printer:looking\") | .refresh")" == 3 ]]'
+settle; rm -f "$FAKE/lpinfo-slow"
+check "nothing found: says so" '[[ "$(rows printer | jq -r "select(.kind == \"Printer\" and .run == [\"true\"]) | .title")" == "No printers found" ]]'
+reset
+printf '%s\n' "device \`airscan:w1:HP LaserJet M110w' is a WSD HP LaserJet M110w ip=192.168.1.20" "device \`airscan:e0:HP LaserJet M110w' is a eSCL HP LaserJet M110w ip=192.168.1.20" "device \`v4l:/dev/video0' is a Noname Integrated Camera virtual device" > "$FAKE/scanners"
+check "scanners: eSCL kept over WSD, cameras left out" '[[ "$(lib printer_scanners_now | tr "$sep" "|")" == "airscan:e0:HP LaserJet M110w|HP LaserJet M110w" ]]'
+rows scan >/dev/null; settle
+s=$(rows scan)
+check "scan rows once a scanner answered" '[[ "$(jq -r ".title + \" · \" + .subtitle" <<< "$s" | tr "\n" "|")" == "Scan a document · A PDF in Documents · HP LaserJet M110w|Scan a photo · A PNG in Documents, every detail kept · HP LaserJet M110w|" ]] && [[ "$(jq -c "select(.id == \"scan:pdf\") | [.converse, .run]" <<< "$s")" == "[true,[\"takumi\",\"scan\",\"pdf\"]]" ]]'
+
+# Setting one up.
+add() { local out rc=0; out=$(commands/printer/add "$@") || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+reset; : > "$FAKE/queues"; rm -f "$FAKE/default"
+res=$(add "$hp_uri" </dev/null)
+check "driverless: set up, and the first printer is the default ($res)" '[[ "$res" == "0|HP LaserJet M110w is ready to print, and apps print to it" ]] && [[ "$(cat "$FAKE/user-default")" == HP_LaserJet_M110w ]]'
+check "driverless: the lpadmin line" 'grep -qxF "lpadmin -p HP_LaserJet_M110w -D HP LaserJet M110w -E -v $hp_uri -m everywhere -o printer-error-policy=retry-job -o printer-is-shared=false" "$FAKE/calls"'
+check "no password asked when CUPS allows it" '! grep -q "^sudo" "$FAKE/calls"'
+res=$(add "$hp_uri" </dev/null)
+check "already set up: says so, changes nothing ($res)" '[[ "$res" == "0|HP LaserJet M110w is already set up" ]] && [[ $(grep -c "^lpadmin" "$FAKE/calls") -eq 1 ]]'
+reset; echo forbidden > "$FAKE/lpadmin-mode"
+res=$(add 192.168.1.20 "Studio" </dev/null)
+check "a bare address, refused by CUPS: sudo, naming the file ($res)" '[[ "$res" == "0|Studio is ready to print" ]] && grep -q "^sudo env LC_ALL=C lpadmin -p Studio -D Studio -E -v ipp://192.168.1.20/ipp/print -m everywhere" "$FAKE/calls"'
+said=$(TAKUMI_CORE=1 commands/printer/add 192.168.1.21 "Studio Two" </dev/null; echo "rc=$?")
+check "in the Core, sudo asks there, saying why" 'grep -q "^sudo -A env LC_ALL=C lpadmin .*|why=Adding a printer needs your password" "$FAKE/calls" && [[ "$said" == *"done Studio Two is ready to print"* ]]'
+touch "$FAKE/not-sudoer"
+res=$(add 192.168.1.22 "Studio Three" </dev/null)
+check "an account that may not: 6 ($res)" '[[ "$res" == "6|Only an administrator of this computer can add printers" ]]'
+rm -f "$FAKE/not-sudoer"; touch "$FAKE/no-password"
+res=$(add 192.168.1.23 "Studio Four" </dev/null)
+check "no password given: 3, nothing set up ($res)" '[[ "$res" == "3|Without the password, Studio Four was not set up" ]]'
+reset; echo notdriverless > "$FAKE/lpadmin-mode"
+printf '%s\n' "drv:///hpcups.drv/hp-laserjet_1020.ppd HP LaserJet 1020, hpcups 3.22.10" "everywhere IPP Everywhere" "drv:///sample.drv/generic.ppd Generic PostScript Printer" "lsb/usr/HP/hp-laserjet_1020.ppd.gz HP LaserJet 1020 Foomatic/foo2zjs-z1" > "$FAKE/ppds"
+check "drivers: the brand's, closest first, never raw or driverless" '[[ "$(lib printer_drivers "HP LaserJet 1020" | cut -d "$sep" -f1 | tr "\n" "|")" == "drv:///hpcups.drv/hp-laserjet_1020.ppd|lsb/usr/HP/hp-laserjet_1020.ppd.gz|" ]]'
+said=$(printf 'yes\n' | TAKUMI_CORE=1 commands/printer/add ipp://10.0.0.7/ipp/print "HP LaserJet 1020"; echo "rc=$?")
+want=$(printf '%s\n' "note Setting up HP LaserJet 1020…" "confirm HP LaserJet 1020 needs a driver. Use “HP LaserJet 1020, hpcups 3.22.10”?" "note Setting up HP LaserJet 1020…" "done HP LaserJet 1020 is ready to print" "rc=0")
+check "not driverless: the closest driver, offered in words" '[[ "$said" == "$want" ]] && grep -q "lpadmin -p HP_LaserJet_1020 -D HP LaserJet 1020 -E -v ipp://10.0.0.7/ipp/print -m drv:///hpcups.drv/hp-laserjet_1020.ppd" "$FAKE/calls"'
+res=$(printf 'no\nno\n' | add ipp://10.0.0.8/ipp/print "HP LaserJet 1020")
+check "every driver declined: 3, nothing set up ($res)" '[[ "$res" == "3|No driver was chosen, so HP LaserJet 1020 was not set up" ]] && ! grep -q "10.0.0.8.*-m drv" "$FAKE/calls"'
+: > "$FAKE/calls"
+res=$(printf 'yes\n' | add "usb://Brother/HL-1110%20series?serial=E1" "Brother HL-1110")
+check "USB goes straight to a driver; none here: 4 ($res)" '[[ "$res" == "4|Brother HL-1110 needs a driver this computer does not have" ]] && ! grep -q "everywhere" "$FAKE/calls"'
+reset; echo offline > "$FAKE/lpadmin-mode"
+res=$(add 192.168.1.20 </dev/null)
+check "a printer that does not answer: 5 ($res)" '[[ "$res" == "5|Printer at 192.168.1.20 did not answer. Is it on, and on this network?" ]]'
+res=$(add "not a printer!" </dev/null)
+check "not an address: 2 ($res)" '[[ "$res" == "2|That is not a printer'"'"'s address" ]]'
+said=$(printf '192.168.1.30\n' | TAKUMI_CORE=1 commands/printer/add; echo "rc=$?")
+check "with no address it asks for one ($said)" '[[ "$said" == "ask The printer'"'"'s address, like 192.168.1.20"* && "$said" == *"rc=5" ]]'
+
+# Remove, default, test page, start again, the list.
+reset
+said=$(printf 'yes\n' | TAKUMI_CORE=1 commands/printer/remove "office color"; echo "rc=$?")
+check "remove asks in the Core, then removes ($said)" '[[ "$said" == "$(printf "%s\n" "confirm Remove Office Color from this computer?" "done Removed Office Color" "rc=0")" ]] && grep -qx "lpadmin -x Office" "$FAKE/calls"'
+said=$(printf 'no\n' | TAKUMI_CORE=1 commands/printer/remove "HP LaserJet M110w"; echo "rc=$?")
+check "remove declined: 3, nothing removed" '[[ "$said" == *"rc=3" ]] && ! grep -qx "lpadmin -x HP_LaserJet_M110w" "$FAKE/calls"'
+rc=0; commands/printer/remove Nowhere >/dev/null 2>&1 || rc=$?
+check "remove: no such printer, 5" '[[ $rc -eq 5 ]]'
+reset
+out=$(commands/printer/default office)
+check "default: yours, by lpoptions ($out)" '[[ "$out" == "Apps print to Office Color" && "$(cat "$FAKE/user-default")" == Office ]] && grep -q "^printer|Apps print to Office Color|" "$FAKE/notices"'
+out=$(commands/printer/test "HP LaserJet M110w")
+check "test page sent ($out)" '[[ "$out" == "Test page sent to HP LaserJet M110w" ]] && grep -q "^lp -d HP_LaserJet_M110w -t Test page" "$FAKE/calls" && grep -q "|Test page sent to HP LaserJet M110w|the Core says when it has printed|" "$FAKE/notices"'
+commands/printer/test office >/dev/null
+check "test page on a printer with a problem says it" 'grep -q "|Test page sent to Office Color|Office Color says: out of paper|" "$FAKE/notices"'
+echo forbidden > "$FAKE/lpadmin-mode"
+said=$(TAKUMI_CORE=1 commands/printer/resume office </dev/null; echo "rc=$?")
+check "start again: enable and accept, through sudo when CUPS refuses ($said)" '[[ "$said" == *"done Office Color is started again"*"rc=0" ]] && grep -q "^sudo -A env LC_ALL=C cupsenable Office" "$FAKE/calls" && grep -q "^sudo -A env LC_ALL=C cupsaccept Office" "$FAKE/calls"'
+reset
+out=$(commands/printer/main)
+check "the list: default marked, status in words" '[[ "$out" == *"* HP LaserJet M110w"*"Ready"*"(default)"* && "$out" == *"Office Color"*"Out of paper"* ]]'
+touch "$FAKE/cups-down"
+check "no printers, or no print service: the list says how to add one" '[[ "$(commands/printer/main)" == "No printers yet. Type \"printer\" in the Core to find one, or: takumi printer add <address>" && -z "$(commands/printer/main --json)" ]]'
+rm -f "$FAKE/cups-down"
+check "the list as JSON" '[[ "$(commands/printer/main --json | jq -r "[.queue, .problem, .default] | map(tostring) | join(\"/\")" | tr "\n" "|")" == "HP_LaserJet_M110w//true|Office/paper/false|" ]]'
+
+# The watch: finished jobs and printer problems, told once.
+watch() { commands/printer/watch --once; }
+job() { printf '%s-%s  %s  1024  Sun 09 Nov 2026 10:0%s:00 AM CET\n' "$1" "$2" "$3" "$4"; }
+done_job() { job "$@"; printf '\tStatus: \n\tAlerts: %s\n\tqueued for %s\n' "$5" "$1"; }
+reset
+{ done_job HP_LaserJet_M110w 1 "$me" 1 job-completed-successfully; done_job Office 2 "$me" 2 job-completed-successfully; } > "$FAKE/jobs-done"
+watch
+check "while the print service is off, CUPS is not asked" '! grep -q "^lpstat" "$FAKE/calls"'
+touch "$FAKE/cups-running"; watch
+check "the first look: what is there is history" '[[ ! -s "$FAKE/notices" && "$(cat "$HOME/.local/state/takumi/printer-watermark")" == 2 ]]'
+job HP_LaserJet_M110w 3 "$me" 3 > "$FAKE/jobs-active"
+printf '%s\n' "Rank    Owner   Job     File(s)                         Total Size" "active  $me 3       Quarterly report.pdf            1024 bytes" > "$FAKE/lpq"
+watch
+check "a document printing: its name is kept for the notice" 'grep -q "^3${sep}Quarterly report.pdf$" "$XDG_RUNTIME_DIR/takumi-printer-titles"'
+: > "$FAKE/jobs-active"; done_job HP_LaserJet_M110w 3 "$me" 3 job-completed-successfully >> "$FAKE/jobs-done"
+watch
+check "printed: told, with its name and the printer" '[[ "$(cat "$FAKE/notices")" == "printer|Printed|Quarterly report.pdf · HP LaserJet M110w|" ]]'
+: > "$FAKE/notices"; watch
+check "told once" '[[ ! -s "$FAKE/notices" ]]'
+{ done_job Office 4 someone 4 job-completed-successfully; done_job Office 5 "$me" 5 job-canceled-by-user; done_job Office 6 "$me" 6 aborted-by-system; } >> "$FAKE/jobs-done"
+watch
+check "another person's job and a cancelled one say nothing; a failed one says so" '[[ "$(cat "$FAKE/notices")" == "warn|Could not print|Office Color could not take it|-1|8|" ]]'
+: > "$FAKE/notices"
+job HP_LaserJet_M110w 7 "$me" 7 > "$FAKE/jobs-active"; done_job Office 8 "$me" 8 job-completed-successfully >> "$FAKE/jobs-done"
+watch
+check "a later job that finished first is told; the earlier one still waits" '[[ "$(cat "$FAKE/notices")" == "printer|Printed|Office Color|" && "$(cat "$HOME/.local/state/takumi/printer-watermark")" == 6 ]]'
+: > "$FAKE/notices"; : > "$FAKE/jobs-active"; done_job HP_LaserJet_M110w 7 "$me" 7 job-completed-successfully >> "$FAKE/jobs-done"
+watch
+check "then the earlier one, when it finishes" '[[ "$(cat "$FAKE/notices")" == "printer|Printed|HP LaserJet M110w|" ]]'
+: > "$FAKE/notices"; awk -F'|' -v OFS='|' '$1 == "HP_LaserJet_M110w" { $4 = "media-empty-error" } { print }' "$FAKE/queues" > "$FAKE/q" && mv "$FAKE/q" "$FAKE/queues"
+watch; watch
+check "out of paper: told once" '[[ "$(cat "$FAKE/notices")" == "printer|HP LaserJet M110w is out of paper|add paper and it goes on by itself|-1|10|" ]]'
+: > "$FAKE/notices"; awk -F'|' -v OFS='|' '$1 == "HP_LaserJet_M110w" { $4 = "marker-supply-low-warning" } { print }' "$FAKE/queues" > "$FAKE/q" && mv "$FAKE/q" "$FAKE/queues"
+watch
+check "low on toner, by the printer's own supply" '[[ "$(cat "$FAKE/notices")" == "printer|HP LaserJet M110w is low on toner|it still prints; have more ready|-1|8|" ]]'
+: > "$FAKE/notices"; awk -F'|' -v OFS='|' '$1 == "Office" { $4 = "offline-report" } { print }' "$FAKE/queues" > "$FAKE/q" && mv "$FAKE/q" "$FAKE/queues"
+watch
+check "offline with nothing waiting: nothing to say" '[[ ! -s "$FAKE/notices" ]]'
+awk -F'|' -v OFS='|' '$1 == "Office" { $4 = "media-empty-error" } { print }' "$FAKE/queues" > "$FAKE/q" && mv "$FAKE/q" "$FAKE/queues"; watch
+awk -F'|' -v OFS='|' '$1 == "Office" { $4 = "offline-report" } { print }' "$FAKE/queues" > "$FAKE/q" && mv "$FAKE/q" "$FAKE/queues"
+: > "$FAKE/notices"; job Office 9 "$me" 9 > "$FAKE/jobs-active"; watch
+check "offline while your document waits: told" '[[ "$(cat "$FAKE/notices")" == "warn|Office Color is offline|turn it on; your document waits for it|-1|10|" ]]'
+
+# Scanning.
+scan() { local out rc=0; out=$(commands/scan/main "$@") || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+reset
+res=$(scan </dev/null)
+check "no scanner: 5 ($res)" '[[ "$res" == "5|No scanner found. Is it on, and on this network or plugged in?" ]]'
+printf '%s\n' "device \`airscan:e0:HP LaserJet M110w' is a eSCL HP LaserJet M110w ip=192.168.1.20" > "$FAKE/scanners"; rm -f "$XDG_RUNTIME_DIR/takumi-scanners"
+res=$(scan </dev/null); pdf=$(ls "$HOME/Documents"/Scan\ *.pdf 2>/dev/null | head -n 1)
+check "a PDF in Documents ($res)" '[[ "$res" == "0|Saved $pdf" && -n "$pdf" && "$(head -n 1 "$pdf")" == PDF ]]'
+check "scanned as a JPEG at 300 dpi in colour, the PDF made by img2pdf" 'grep -q "^scanimage -d airscan:e0:HP LaserJet M110w --format=jpeg --resolution 300 --mode Color$" "$FAKE/calls" && grep -q "^img2pdf -o $pdf " "$FAKE/calls"'
+check "the Core offers it, a press away" '[[ "$(tail -n 1 "$FAKE/notices")" == "--open|$pdf|scan|Scanned|${pdf##*/} · in Documents · press to open|-1|8|" ]]'
+reset; printf '%s\n' "device \`test:0' is a Noname frontend-tester virtual device" > "$FAKE/scanners"; touch "$FAKE/scan-nomode"
+res=$(scan png </dev/null); png=$(ls "$HOME/Documents"/Scan\ *.png 2>/dev/null | head -n 1)
+check "a PNG; a scanner without colour words scans without them ($res)" '[[ "$res" == "0|Saved $png" && -n "$png" ]] && grep -q "^scanimage -d test:0 --format=png --resolution 300$" "$FAKE/calls"'
+reset; printf '%s\n' "device \`test:0' is a Noname frontend-tester virtual device" > "$FAKE/scanners"; touch "$FAKE/convert-fail"
+res=$(scan </dev/null)
+check "no PDF could be made: the picture is kept, and the notice says why ($res)" '[[ "$res" == "0|Saved $HOME/Documents/Scan "*".jpg" ]] && grep -q "|Scanned as a picture|.*the PDF could not be made" "$FAKE/notices"'
+reset; printf '%s\n' "device \`test:0' is a Noname frontend-tester virtual device" > "$FAKE/scanners"; echo "scanimage: sane_start: Device busy" > "$FAKE/scan-fail"
+res=$(scan </dev/null)
+check "a busy scanner says so ($res)" '[[ "$res" == "1|Noname frontend-tester is busy. Try again in a moment" ]]'
+reset; printf '%s\n' "device \`test:0' is a Noname frontend-tester virtual device" > "$FAKE/scanners"
+said=$(TAKUMI_CORE=1 commands/scan/main </dev/null; echo "rc=$?")
+check "in the Core: what it does, then no last sentence, so the offer stays ($said)" '[[ "$said" == "$(printf "%s\n" "note Looking for the scanner…" "note Scanning on Noname frontend-tester…" "rc=0")" ]]'
+
+echo "   $(grep -c '^check ' "$0") printer and scanner checks against fake CUPS and SANE"
+exit $status

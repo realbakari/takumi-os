@@ -1,0 +1,9 @@
+[Unit]
+Description=Takumi: look at the battery every two minutes
+
+[Timer]
+OnStartupSec=20s
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target

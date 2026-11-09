@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Keep the microphone light on the keyboard showing whether the microphone in use is muted
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# Run by takumi-micled.service on a computer with a microphone-mute light (/sys/class/leds/<name>::micmute). The light
+# says what wpctl says about the microphone in use, whoever muted it: its key, a row in the Core, an app. While this
+# runs, each light is taken from the kernel's own trigger, which follows only the built-in microphone, and it is
+# given back when this stops. default/udev/70-takumi-micmute.rules lets the people at the computer write the light;
+# where it does not, brightnessctl asks logind. See docs/laptop-keys.md.
+leds=${TAKUMI_LEDS:-/sys/class/leds}
+lights=()
+for d in "$leds"/*::micmute; do if [[ -e "$d/brightness" ]]; then lights+=("$d"); fi; done
+(( ${#lights[@]} )) || exit 0
+command -v wpctl >/dev/null || { echo "wpctl is not installed" >&2; exit 1; }
+
+triggers=()
+take() {
+  local d t
+  for d in "${lights[@]}"; do
+    t=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$d/trigger" 2>/dev/null || true)
+    triggers+=("${t:-none}")
+    if [[ -n "$t" && "$t" != none && -w "$d/trigger" ]]; then printf 'none\n' > "$d/trigger" 2>/dev/null || true; fi
+  done
+}
+give_back() {
+  local i
+  for i in "${!lights[@]}"; do
+    if [[ "${triggers[$i]:-none}" != none && -w "${lights[$i]}/trigger" ]]; then printf '%s\n' "${triggers[$i]}" > "${lights[$i]}/trigger" 2>/dev/null || true; fi
+  done
+}
+light() {   # <0|1>
+  local d
+  for d in "${lights[@]}"; do
+    if [[ -w "$d/brightness" ]]; then printf '%s\n' "$1" > "$d/brightness" 2>/dev/null || true
+    else brightnessctl -q -d "${d##*/}" set "$1" >/dev/null 2>&1 || true; fi
+  done
+}
+last=""
+follow() {
+  local now=0
+  if [[ "$(wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>/dev/null || true)" == *MUTED* ]]; then now=1; fi
+  if [[ "$now" != "$last" ]]; then light "$now"; last=$now; fi
+}
+
+take
+trap give_back EXIT
+trap 'exit 0' TERM INT
+# 0 first: writing 0 also lifts a trigger this user may not change, so nothing else drives the light.
+light 0; last=0
+follow
+# pactl says when a microphone or the choice of microphone changes; without it, look every two seconds.
+if command -v pactl >/dev/null; then
+  pactl info >/dev/null 2>&1 || exit 1   # the sound server is not up yet: systemd starts this again
+  while IFS= read -r line; do
+    case "$line" in *" on source #"* | *" on server #"*) follow ;; esac
+  done < <(pactl subscribe 2>/dev/null)
+  exit 1   # the sound server went away: systemd starts this again
+fi
+while :; do sleep 2; follow; done

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print the Palette row for remote help, on or off, as a JSON line
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "remote", "help me", "support", "vnc" or "share screen" find it: "Let someone help remotely", or while it is on,
+# "Stop remote help" (takumi screen remote, docs/capture.md). Both are conversations in the Core.
+command -v jq >/dev/null || exit 0
+q=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+case " $q " in
+  *" remote"* | *" vnc "* | *" support "* | *" assist"* | *"help me"* | *"share screen"* | *"share my screen"* | *"screen sharing"* | *"desktop sharing"* | *"control my"*) ;;
+  *) exit 0 ;;
+esac
+state=$(takumi screen remote status 2>/dev/null || echo off)
+S=$state jq -cn '(env.S | split(" ")) as $s
+  | {id: "remote", glyph: "person", kind: "Remote", steady: true, converse: true, score: 0.9,
+     keywords: "remote help support assist vnc share screen sharing desktop control someone"}
+  + (if $s[0] == "on" then
+       {title: "Stop remote help",
+        subtitle: (if (($s[2] // "0") | tonumber) > 0 then "Someone is connected now" else "On · no one is connected" end),
+        run: ["takumi", "screen", "remote", "off"]}
+     else
+       {title: "Let someone help remotely", subtitle: "They see this screen and use it, with a password made for this time",
+        run: ["takumi", "screen", "remote", "on"]}
+     end)'

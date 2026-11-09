@@ -1,0 +1,290 @@
+// The Strip. See docs/the-strip.md. Harmony owns Super+C/V/X/Z/A/S/F/W/T/N, so none are bound here.
+
+input {
+    keyboard {
+        // No xkb here: the layout is the system's (localectl set-x11-keymap; the installer sets it),
+        // which niri reads from systemd-localed, the same one the login screen uses.
+        repeat-delay 280
+        repeat-rate 40
+        numlock
+    }
+    touchpad {
+        tap
+        natural-scroll
+        dwt
+        accel-profile "adaptive"
+        click-method "clickfinger"   // two fingers press for the right button, three for the middle, as on a Mac
+        scroll-factor 0.5            // libinput's own speed runs well ahead of the fingers
+    }
+    mouse { accel-profile "flat"; }
+    focus-follows-mouse max-scroll-amount="0%"
+    warp-mouse-to-focus
+}
+
+// Theme colours are rendered by takumi theme render into this file.
+include "../../../.local/state/takumi/look/niri-theme.kdl"
+
+// Your accessibility choices from the Core: the pointer's size and the screen reader at login, written by
+// takumi switch pointer and takumi switch reader (docs/accessibility.md). Missing until you choose one.
+include optional=true "accessibility.kdl"
+
+// Your pointer, touchpad and key repeat from the Core (takumi keys pointer, docs/laptop-keys.md), written whole
+// by that command. Its touchpad and mouse blocks replace the ones above: niri does not merge a pointing device's
+// block, so the file restates every setting. Missing until you change one.
+include optional=true "input.kdl"
+
+layout {
+    gaps 10
+    // The sky (in the backdrop) shows through and stays still while workspaces slide in front of it.
+    background-color "transparent"
+    center-focused-column "on-overflow"
+    always-center-single-column
+    preset-column-widths {
+        proportion 0.33333
+        proportion 0.5
+        proportion 0.66667
+    }
+    default-column-width { proportion 0.5; }
+    focus-ring { width 2; }
+    border { off; }
+    shadow { on; softness 24; spread 4; offset x=0 y=6; }
+}
+
+prefer-no-csd
+overview {
+    workspace-shadow {
+        off
+    }
+}
+screenshot-path "~/Pictures/Screenshots/%Y-%m-%d %H-%M-%S.png"
+hotkey-overlay { skip-at-startup; }
+
+// Super+Tab (or Alt+Tab) goes back to the last window; keep holding Super (or Alt) and press Tab again to
+// choose among the recent ones, with Shift to go back. Super+` does the same among one app's windows.
+recent-windows {
+    binds {
+        Mod+Tab         { next-window; }
+        Mod+Shift+Tab   { previous-window; }
+        Mod+grave       { next-window filter="app-id"; }
+        Mod+Shift+grave { previous-window filter="app-id"; }
+        Alt+Tab         { next-window; }
+        Alt+Shift+Tab   { previous-window; }
+        Alt+grave       { next-window filter="app-id"; }
+        Alt+Shift+grave { previous-window filter="app-id"; }
+    }
+}
+
+animations {
+    slowdown 0.9
+    workspace-switch { spring damping-ratio=1.0 stiffness=1000 epsilon=0.0001; }
+    window-open { duration-ms 180; curve "ease-out-expo"; }
+    window-close { duration-ms 140; curve "ease-out-quad"; }
+    horizontal-view-movement { spring damping-ratio=1.0 stiffness=800 epsilon=0.0001; }
+}
+// Animations off, when you turn them off (takumi switch motion, docs/accessibility.md). Missing until then.
+include optional=true "motion.kdl"
+
+environment {
+    SUDO_ASKPASS "/usr/lib/takumi/commands/approve/askpass"   // sudo -A asks in the Core (docs/approvals.md)
+    QT_QPA_PLATFORM "wayland"
+    QT_QPA_PLATFORMTHEME "gtk3"       // Qt apps take GTK's font, its size and dark mode
+    GDK_BACKEND "wayland,x11"
+    MOZ_ENABLE_WAYLAND "1"
+    ELECTRON_OZONE_PLATFORM_HINT "auto"
+    XMODIFIERS "@im=fcitx"            // X11 apps find an input method when one runs (docs/harmony-keys.md)
+    QT_IM_MODULES "wayland;fcitx"     // Qt 6.7 and later: Wayland's own text input first, then fcitx5
+}
+
+spawn-at-startup "takumi-session"
+
+// The built-in screen shown on a projector (takumi display mirror, docs/display.md).
+window-rule {
+    match app-id=r#"^at\.yrlf\.wl_mirror$"#
+    open-fullscreen true
+    open-focused false
+    geometry-corner-radius 0
+}
+
+window-rule {
+    match app-id=r#"^foot$"#
+    default-column-width { proportion 0.5; }
+}
+window-rule {
+    match app-id=r#"^firefox$"#
+    default-column-width { proportion 0.66667; }
+}
+window-rule {
+    geometry-corner-radius 12
+    clip-to-geometry true
+}
+// Picture in picture: a video kept small in the bottom-right corner, above the strip, without taking the
+// keyboard. Firefox titles that window "Picture-in-Picture"; Chromium and the browsers built on it,
+// "Picture in picture".
+window-rule {
+    match title=r#"^(?i)picture[- ]in[- ]picture$"#
+    open-floating true
+    open-focused false
+    default-floating-position x=24 y=24 relative-to="bottom-right"
+    default-column-width { fixed 480; }
+    default-window-height { fixed 270; }
+}
+// The shell draws its own shadows (the Core's surface is larger than the capsule it shows).
+layer-rule {
+    match namespace="^takumi-"
+    shadow { off; }
+}
+// The sky stays put behind the overview, so zooming out shows the workspaces against it.
+layer-rule {
+    match namespace="^takumi-sky$"
+    place-within-backdrop true
+}
+
+binds {
+    Mod+Space hotkey-overlay-title="The Core" { spawn "qs" "-c" "takumi" "ipc" "call" "core" "toggle"; }
+    // Super+I, the key Windows opens Settings with (Super+A is select all: docs/harmony-keys.md).
+    Mod+I hotkey-overlay-title="Quick settings" { spawn "qs" "-c" "takumi" "ipc" "call" "core" "quick"; }
+    // Emoji where Windows (Win+. and Win+;) and macOS (Ctrl+Cmd+Space) keep them; clipboard history on Super+P
+    // (Super+V and its friends are paste: docs/harmony-keys.md).
+    Mod+Period hotkey-overlay-title="Emoji" { spawn "qs" "-c" "takumi" "ipc" "call" "core" "search" ":"; }
+    Mod+Semicolon { spawn "qs" "-c" "takumi" "ipc" "call" "core" "search" ":"; }
+    Mod+Ctrl+Space { spawn "qs" "-c" "takumi" "ipc" "call" "core" "search" ":"; }
+    Mod+P hotkey-overlay-title="Clipboard history" { spawn "qs" "-c" "takumi" "ipc" "call" "core" "search" "clipboard"; }
+    // The apps you chose for each kind (takumi app default, docs/apps.md).
+    Mod+Return hotkey-overlay-title="Terminal" { spawn "takumi" "app" "open" "terminal"; }
+    Mod+E hotkey-overlay-title="Files" { spawn "takumi" "app" "open" "files"; }
+    Mod+B hotkey-overlay-title="Browser" { spawn "takumi" "app" "open" "browser"; }
+    Mod+Q { close-window; }
+    Mod+L hotkey-overlay-title="Lock" { spawn "takumi" "lock"; }
+    Mod+Shift+Slash { show-hotkey-overlay; }
+    // Notices (docs/notifications.md): Super+Shift+Space acts on the one on show (the app's own action, or
+    // Copy for a code); Super+Escape puts them all away.
+    Mod+Shift+Space hotkey-overlay-title="Act on the notice" { spawn "qs" "-c" "takumi" "ipc" "call" "notices" "act"; }
+    Mod+Escape hotkey-overlay-title="Put every notice away" { spawn "qs" "-c" "takumi" "ipc" "call" "notices" "clear"; }
+    // Super+Alt+Page Up and Page Down (with Fn on a Mac keyboard: Fn+Up, Fn+Down) go back and forth through the
+    // notices waiting behind the one on show. Super+Shift+Up and Down stay with moving windows.
+    Mod+Alt+Page_Up hotkey-overlay-title="The notice before" { spawn "qs" "-c" "takumi" "ipc" "call" "notices" "previous"; }
+    Mod+Alt+Page_Down hotkey-overlay-title="The next notice" { spawn "qs" "-c" "takumi" "ipc" "call" "notices" "next"; }
+    // Accessibility (docs/accessibility.md): the screen reader on the keys Windows (Ctrl+Win+Enter) and the Mac
+    // (Cmd+F5) use, at the lock screen too; Super+U, Windows' key for these settings, opens the Core on them.
+    Mod+Ctrl+Return allow-when-locked=true hotkey-overlay-title="Screen reader on or off" { spawn "takumi" "switch" "reader"; }
+    Mod+F5 allow-when-locked=true { spawn "takumi" "switch" "reader"; }
+    Mod+U hotkey-overlay-title="Accessibility" { spawn "qs" "-c" "takumi" "ipc" "call" "core" "search" "accessibility"; }
+    // Zoom (docs/accessibility.md): a magnified strip docked at the top of the screen. Super+Alt+= closer,
+    // Super+Alt+- farther, Super+Alt+0 off; Super+Alt+arrows move what it shows.
+    Mod+Alt+Equal hotkey-overlay-title="Zoom in" { spawn "qs" "-c" "takumi" "ipc" "call" "zoom" "closer"; }
+    Mod+Alt+Minus hotkey-overlay-title="Zoom out" { spawn "qs" "-c" "takumi" "ipc" "call" "zoom" "farther"; }
+    Mod+Alt+0 hotkey-overlay-title="Zoom off" { spawn "qs" "-c" "takumi" "ipc" "call" "zoom" "hide"; }
+    Mod+Alt+Left  { spawn "qs" "-c" "takumi" "ipc" "call" "zoom" "pan" "left"; }
+    Mod+Alt+Right { spawn "qs" "-c" "takumi" "ipc" "call" "zoom" "pan" "right"; }
+    Mod+Alt+Up    { spawn "qs" "-c" "takumi" "ipc" "call" "zoom" "pan" "up"; }
+    Mod+Alt+Down  { spawn "qs" "-c" "takumi" "ipc" "call" "zoom" "pan" "down"; }
+    // Force quit, on the Mac's keys (Cmd+Option+Esc): the Core opens on the apps you can force to quit
+    // (docs/harmony-keys.md).
+    Mod+Alt+Escape hotkey-overlay-title="Force quit an app" { spawn "qs" "-c" "takumi" "ipc" "call" "core" "search" "force quit"; }
+
+    Mod+Left  { focus-column-left; }
+    Mod+Right { focus-column-right; }
+    Mod+Up    { focus-window-or-workspace-up; }
+    Mod+Down  { focus-window-or-workspace-down; }
+    Mod+Home  { focus-column-first; }
+    Mod+End   { focus-column-last; }
+
+    Mod+Shift+Left  { move-column-left; }
+    Mod+Shift+Right { move-column-right; }
+    Mod+Shift+Up    { move-window-up-or-to-workspace-up; }
+    Mod+Shift+Down  { move-window-down-or-to-workspace-down; }
+
+    // Floating: Super+Ctrl+Up lifts a window off the strip to float above it, and puts it back; Super+Ctrl+Down
+    // moves the keyboard between the floating windows and the strip.
+    Mod+Ctrl+Up hotkey-overlay-title="Float the window, or put it back" { toggle-window-floating; }
+    Mod+Ctrl+Down { switch-focus-between-floating-and-tiling; }
+    // Two screens: Super+Ctrl+Left or Right goes to the screen on that side; with Shift the column goes too.
+    Mod+Ctrl+Left        { focus-monitor-left; }
+    Mod+Ctrl+Right       { focus-monitor-right; }
+    Mod+Shift+Ctrl+Left  { move-column-to-monitor-left; }
+    Mod+Shift+Ctrl+Right { move-column-to-monitor-right; }
+
+    Mod+R { switch-preset-column-width; }
+    Mod+M { maximize-column; }
+    Mod+Shift+M { fullscreen-window; }
+    Mod+Ctrl+C { center-column; }
+    // Super+, is Harmony's Preferences key, so stacking uses the brackets.
+    Mod+BracketLeft { consume-window-into-column; }
+    Mod+BracketRight { expel-window-from-column; }
+    Mod+Minus { set-column-width "-10%"; }
+    Mod+Equal { set-column-width "+10%"; }
+
+    Mod+O { toggle-overview; }
+    Mod+1 { focus-workspace 1; }
+    Mod+2 { focus-workspace 2; }
+    Mod+3 { focus-workspace 3; }
+    Mod+4 { focus-workspace 4; }
+    Mod+5 { focus-workspace 5; }
+    Mod+6 { focus-workspace 6; }
+    Mod+7 { focus-workspace 7; }
+    Mod+8 { focus-workspace 8; }
+    Mod+9 { focus-workspace 9; }
+    // Super+Shift+3/4/5 are the screenshot keys your hands already know, so moving uses Ctrl.
+    Mod+Ctrl+1 { move-column-to-workspace 1; }
+    Mod+Ctrl+2 { move-column-to-workspace 2; }
+    Mod+Ctrl+3 { move-column-to-workspace 3; }
+    Mod+Ctrl+4 { move-column-to-workspace 4; }
+    Mod+Ctrl+5 { move-column-to-workspace 5; }
+    Mod+WheelScrollDown cooldown-ms=150 { focus-workspace-down; }
+    Mod+WheelScrollUp   cooldown-ms=150 { focus-workspace-up; }
+    Mod+WheelScrollRight { focus-column-right; }
+    Mod+WheelScrollLeft  { focus-column-left; }
+
+    // Screenshots: the whole screen, a part of it, or a window. Saved to Pictures and copied.
+    Mod+Shift+3 { screenshot-screen; }
+    Mod+Shift+4 { screenshot; }
+    Mod+Shift+5 { screenshot-window; }
+    Mod+Shift+6 repeat=false hotkey-overlay-title="Record the screen (again to stop)" { spawn "takumi" "screen" "record"; }
+    Mod+Shift+7 hotkey-overlay-title="Screenshot of a part, then mark it up" { spawn "takumi" "screen" "shot" "area" "--markup"; }
+    // Dictation: press, speak, press again; it is typed where you were (docs/dictation.md).
+    Mod+H repeat=false hotkey-overlay-title="Dictate (again to stop)" { spawn "takumi" "voice"; }
+    Mod+Shift+S { screenshot; }
+    Print { screenshot-screen; }
+
+    // Sound: Alt steps finely, Shift goes to the top or the bottom; Shift+Mute sends the sound to the next
+    // output, Alt+Mute mutes the microphone (docs/sound.md).
+    XF86AudioRaiseVolume       allow-when-locked=true { spawn "takumi" "audio" "volume" "up"; }
+    XF86AudioLowerVolume       allow-when-locked=true { spawn "takumi" "audio" "volume" "down"; }
+    Alt+XF86AudioRaiseVolume   allow-when-locked=true { spawn "takumi" "audio" "volume" "up" "--fine"; }
+    Alt+XF86AudioLowerVolume   allow-when-locked=true { spawn "takumi" "audio" "volume" "down" "--fine"; }
+    Shift+XF86AudioRaiseVolume allow-when-locked=true { spawn "takumi" "audio" "volume" "up" "--max"; }
+    Shift+XF86AudioLowerVolume allow-when-locked=true { spawn "takumi" "audio" "volume" "down" "--min"; }
+    XF86AudioMute          allow-when-locked=true repeat=false { spawn "takumi" "audio" "volume" "mute"; }
+    Shift+XF86AudioMute    allow-when-locked=true repeat=false { spawn "takumi" "audio" "output" "next"; }
+    Alt+XF86AudioMute      allow-when-locked=true repeat=false { spawn "takumi" "audio" "mic" "toggle"; }
+    XF86AudioMicMute       allow-when-locked=true repeat=false { spawn "takumi" "audio" "mic" "toggle"; }
+    Shift+XF86AudioMicMute allow-when-locked=true repeat=false { spawn "takumi" "audio" "input" "next"; }
+    Alt+XF86AudioMicMute   repeat=false { spawn "qs" "-c" "takumi" "ipc" "call" "core" "search" "microphone"; }
+    // Media: the player you chose answers (takumi audio player); Alt skips ten seconds, Alt+Play pauses all.
+    XF86AudioPlay          allow-when-locked=true repeat=false { spawn "takumi" "audio" "media" "play-pause"; }
+    XF86AudioPause         allow-when-locked=true repeat=false { spawn "takumi" "audio" "media" "play-pause"; }
+    XF86AudioNext          allow-when-locked=true repeat=false { spawn "takumi" "audio" "media" "next"; }
+    XF86AudioPrev          allow-when-locked=true repeat=false { spawn "takumi" "audio" "media" "previous"; }
+    Alt+XF86AudioNext      allow-when-locked=true { spawn "takumi" "audio" "media" "forward"; }
+    Alt+XF86AudioPrev      allow-when-locked=true { spawn "takumi" "audio" "media" "back"; }
+    Alt+XF86AudioPlay      allow-when-locked=true repeat=false { spawn "takumi" "audio" "media" "pause-all"; }
+    Shift+XF86AudioPlay    repeat=false { spawn "takumi" "audio" "player" "next"; }
+    Shift+XF86AudioNext    repeat=false { spawn "takumi" "audio" "player" "next"; }
+    Shift+XF86AudioPrev    repeat=false { spawn "takumi" "audio" "player" "previous"; }
+    // A laptop's keyboard light and touchpad keys (docs/laptop-keys.md).
+    XF86KbdBrightnessUp   allow-when-locked=true { spawn "takumi" "keys" "backlight" "up"; }
+    XF86KbdBrightnessDown allow-when-locked=true { spawn "takumi" "keys" "backlight" "down"; }
+    XF86KbdLightOnOff     allow-when-locked=true { spawn "takumi" "keys" "backlight" "cycle"; }
+    XF86TouchpadToggle    allow-when-locked=true { spawn "takumi" "switch" "touchpad"; }
+    XF86TouchpadOn        allow-when-locked=true { spawn "takumi" "switch" "touchpad" "on"; }
+    XF86TouchpadOff       allow-when-locked=true { spawn "takumi" "switch" "touchpad" "off"; }
+    XF86MonBrightnessUp   allow-when-locked=true { spawn "takumi" "display" "brightness" "up"; }
+    XF86MonBrightnessDown allow-when-locked=true { spawn "takumi" "display" "brightness" "down"; }
+    Alt+XF86MonBrightnessUp   allow-when-locked=true { spawn "takumi" "display" "brightness" "up" "--fine"; }
+    Alt+XF86MonBrightnessDown allow-when-locked=true { spawn "takumi" "display" "brightness" "down" "--fine"; }
+    XF86Display { spawn "takumi" "display" "mirror" "toggle"; }
+
+    // The power key opens the Core on power: shut down, restart, sleep, log out.
+    XF86PowerOff { spawn "qs" "-c" "takumi" "ipc" "call" "core" "search" "power"; }
+    Mod+Shift+Ctrl+Q { quit; }
+}

@@ -1,0 +1,34 @@
+# One Dark: the editor classic: calm blues on charcoal
+# Colours after One Dark and One Light from Atom (https://github.com/atom/atom/tree/master/packages/one-dark-syntax); phases by Takumi.
+
+[meta]
+name = "one-dark"
+mode = "dark"
+title = "One Dark"
+about = "the editor classic: calm blues on charcoal"
+credit = "One Dark and One Light from Atom (https://github.com/atom/atom/tree/master/packages/one-dark-syntax)"
+
+[palette]
+accent     = "#61afef"
+background = "#282c34"
+surface    = "#2f343e"
+foreground = "#b2b8c4"
+muted      = "#707681"
+red        = "#e06c75"
+yellow     = "#e5c07b"
+green      = "#98c379"
+cyan       = "#56b6c2"
+blue       = "#61afef"
+magenta    = "#c678dd"
+
+[phase.dawn]
+accent     = "#d19a66"
+
+[phase.dusk]
+accent     = "#d68a6b"
+
+[phase.night]
+accent     = "#aa6abf"
+background = "#1a1d22"
+surface    = "#21242b"
+foreground = "#a3a9b5"

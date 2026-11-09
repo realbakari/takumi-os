@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set up a language for coding, just for you: Node.js, Python, Ruby, Go, Rust, Java or PHP
+usage: [node|python|ruby|go|rust|java|php]
+example: takumi dev node
+example: takumi dev python
+risk: 1
+converse: yes
+title: Set up a language for coding
+words: developer development programming code node nodejs javascript npm python ruby rails go golang rust cargo java jdk php mise
+glyph: term
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/apps.sh" ]] && { . "$l/apps.sh"; . "$l/core.sh"; break; }; done
+declare -F apps_slug >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh, docs/development.md). Languages come through mise
+# (https://mise.jdx.dev), which keeps every version in your home folder: no password, nothing in the
+# system's /usr, and a project's own versions (.mise.toml, .tool-versions, .nvmrc) used inside it. PHP comes
+# from Arch's packages instead, because mise builds PHP from source, which needs a dozen libraries and a
+# long wait. Exit status: 0 · 2 not a language · 3 an answer was needed and none came, or no · 1 anything
+# else. The last line says it in words.
+log="$apps_state/dev.log"; mkdir -p "$apps_state"
+admin() { core_sudo "Setting up $label needs your password" "$@"; }
+run() { if core_in_core; then "$@" >> "$log" 2>&1; else "$@"; fi; }
+lang_of() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ')" in
+    node | nodejs | node.js | js | javascript | typescript | npm) echo node ;;
+    python | python3 | py) echo python ;;
+    ruby | rb | rails) echo ruby ;;
+    go | golang) echo go ;;
+    rust | rs | cargo) echo rust ;;
+    java | jdk | openjdk) echo java ;;
+    php | composer | laravel) echo php ;;
+  esac
+}
+every="Node.js, Python, Ruby, Go, Rust, Java and PHP"
+lang=$(lang_of "${1:-}")
+[[ -z "${1:-}" || -n "$lang" ]] || core_fail 2 "usage: takumi dev [node|python|ruby|go|rust|java|php]"
+while [[ -z "$lang" ]]; do
+  core_ask answer "Which language: Node.js, Python, Ruby, Go, Rust, Java or PHP?" || core_fail 3 "Nothing changed"
+  lang=$(lang_of "$answer")
+  if [[ -z "$lang" ]]; then core_wrong "Takumi sets up $every"; core_in_core || core_fail 2 "Takumi sets up $every"; fi
+done
+case "$lang" in
+  node) label=Node.js spec=node@lts ;; python) label=Python spec=python@latest ;; ruby) label=Ruby spec=ruby@latest ;;
+  go) label=Go spec=go@latest ;; rust) label=Rust spec=rust@stable ;; java) label=Java spec=java@temurin-25 ;; php) label=PHP spec="" ;;
+esac
+
+if [[ $lang == php ]]; then
+  if command -v php >/dev/null && command -v composer >/dev/null; then core_done "PHP $(php -r 'echo PHP_VERSION;' 2>/dev/null) is already here, with Composer"; exit 0; fi
+  core_confirm "PHP comes from Arch's packages, with Composer, and needs your password. Install it?" || core_fail 3 "Nothing changed"
+  core_note "Installing PHP…"
+  # pacman: PHP's and Composer's files under /usr and their entries in /var/lib/pacman
+  run admin pacman -S --needed --noconfirm php composer || core_fail 1 "PHP did not install. What happened is in $log"
+  core_done "PHP $(php -r 'echo PHP_VERSION;' 2>/dev/null) is ready, with Composer"
+  exit 0
+fi
+
+mise=$(command -v mise 2>/dev/null || true)
+if [[ -z "$mise" && -x "$HOME/.local/bin/mise" ]]; then mise="$HOME/.local/bin/mise"; fi
+if [[ -z "$mise" ]]; then
+  core_confirm "Languages come through mise, which keeps each version in your home folder. Install mise from its makers? No password needed." ||
+    core_fail 3 "Nothing changed"
+  core_note "Installing mise…"
+  # mise's own installer (https://mise.jdx.dev/getting-started.html) puts one file in ~/.local/bin.
+  run sh -c 'curl -q -fsSL https://mise.run | sh' || core_fail 1 "mise did not install. What happened is in $log"
+  [[ -x "$HOME/.local/bin/mise" ]] || core_fail 1 "mise did not install. What happened is in $log"
+  mise="$HOME/.local/bin/mise"
+fi
+if [[ $lang == ruby ]] && command -v pacman >/dev/null && ! pacman -Q libyaml >/dev/null 2>&1; then
+  core_note "Installing what Ruby is built with…"
+  # pacman: libyaml's files under /usr, which Ruby, built here from source, needs for YAML
+  run admin pacman -S --needed --noconfirm libyaml || core_fail 1 "Ruby's libraries did not install. What happened is in $log"
+fi
+if [[ $lang == ruby ]]; then core_note "Building Ruby, which takes a few minutes…"; else core_note "Installing $label…"; fi
+run "$mise" use --global --yes "$spec" || core_fail 1 "$label did not install. What happened is in $log"
+
+# Terminals find it through mise's hook in your shell's settings, which switches versions as you enter a
+# project; apps started from the Core through its shims, from your next login.
+if [[ "$mise" == "$HOME/.local/bin/mise" ]]; then m='"$HOME/.local/bin/mise"'; else m=mise; fi
+case "${SHELL##*/}" in
+  zsh) rc="$HOME/.zshrc"; hook="eval \"\$($m activate zsh)\"" ;;
+  fish) rc="$apps_config/fish/conf.d/takumi-mise.fish"; hook="$m activate fish | source" ;;
+  *) rc="$HOME/.bashrc"; hook="eval \"\$($m activate bash)\"" ;;
+esac
+if ! grep -q 'takumi dev: mise' "$rc" 2>/dev/null; then
+  mkdir -p "$(dirname "$rc")"
+  printf '\n# takumi dev: mise, the language versions kept for you (docs/development.md)\n%s\n' "$hook" >> "$rc"
+fi
+envd="$apps_config/environment.d/60-takumi-mise.conf"
+if [[ ! -f "$envd" ]]; then
+  mkdir -p "$(dirname "$envd")"
+  # shellcheck disable=SC2016 # ${PATH} is for systemd to expand
+  printf '# takumi dev: apps started from the Core find the languages mise keeps for you (docs/development.md)\nPATH=%s/.local/share/mise/shims:%s/.local/bin:${PATH}\n' "$HOME" "$HOME" > "$envd"
+fi
+ver=$("$mise" current "$lang" 2>/dev/null | head -n 1 || true)
+core_done "$label${ver:+ $ver} is ready. Open a new terminal to use it."

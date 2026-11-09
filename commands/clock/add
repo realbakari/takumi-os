@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Add a clock for another city to Today, with how far ahead or behind it is
+usage: [city]
+example: takumi clock add Tokyo
+risk: 0
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/weather.sh"; . "$l/core.sh"; break; }; done
+declare -F clock_place >/dev/null && declare -F weather_find >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# A conversation: asks "Which city?" when none is given, and again when one is not found. Today shows six at
+# most. Exit status: 0 added, or already there · 3 no answer came · 4 no such place, or too many clocks.
+place="$*"
+if [[ -z "$place" ]]; then core_ask place "Which city?" || core_fail 3 "No clock was added"; fi
+while :; do
+  [[ -n "$(clock_find "$place")" ]] || core_note "Looking for $place on Open-Meteo…"
+  rc=0; found=$(clock_place "$place") || rc=$?
+  (( rc == 0 )) && break
+  if (( rc == 4 )); then why="$place has several time zones: try $(clock_several "$found")"; else why="No time zone found for $place"; fi
+  core_wrong "$why"
+  [[ "${TAKUMI_CORE:-}" == 1 ]] || core_fail 4 "$why"
+  core_ask place "Which city?" || core_fail 3 "No clock was added"
+done
+IFS=$'\t' read -r zone city _ <<< "$found"
+[[ $(clock_cities | grep -c . || true) -lt 6 ]] || core_fail 4 "Today has six clocks already: take one out first"
+now=$(clock_now)
+said="$city · $(clock_hm "$now" "$zone") · $(clock_diff $(( $(clock_offset "$zone") - $(clock_offset) )))"
+if clock_city_add "$city" "$zone"; then core_done "$said · in Today"; else core_done "$city is in Today already"; fi

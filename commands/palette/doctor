@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for checking the computer as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "something is wrong", "fix", "doctor", "broken", "slow": the row that checks everything, in the Core, and
+# what the last check found. "restart wifi", "no sound", "bluetooth not working", "fix": the rows that
+# restart one thing. "speed", "internet slow": the speed test and its last result (docs/doctor.md).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/palette.sh" ]] && { . "$l/palette.sh"; break; }; done
+command -v jq >/dev/null || exit 0
+q=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+
+# Fix-it rows and the speed test, found by their words (every word of the query in a row).
+if declare -F palette_filter >/dev/null && ! palette_short "$q"; then
+  {
+    while IFS='|' read -r what title sub glyph words; do
+      jq -cn --arg w "$what" --arg t "$title" --arg s "$sub" --arg g "$glyph" --arg k "$words" \
+        '{id: ("doctor:restart:" + $w), title: $t, subtitle: $s, glyph: $g, kind: "Doctor", converse: true, risk: 1,
+          keywords: ("restart fix reset reload broken not working stopped problem " + $k), run: ["takumi", "doctor", "restart", $w], score: 0.85}'
+    done <<'ROWS'
+wifi|Restart Wi-Fi|Reloads the Wi-Fi driver and joins your network again|wifi|wifi wireless internet network no internet offline disconnected keeps dropping driver
+bluetooth|Restart Bluetooth|Restarts Bluetooth and connects your devices again|bt|bluetooth headphones airpods keyboard mouse controller wont won't connect
+sound|Restart sound|Restarts the sound service when nothing plays|vol|sound audio no sound speakers headphones microphone mic crackling pipewire
+desktop|Restart the desktop|The Core, the Sky and the Lock start again; apps stay open|restart|desktop shell core bar panel frozen stuck screen
+ROWS
+    jq -cn '{id: "doctor:speed", title: "Test the internet speed", subtitle: "Download, upload and how quickly it answers; about 20 seconds", glyph: "down",
+      kind: "Doctor", converse: true, keywords: "speed speedtest test internet slow fast bandwidth download upload mbps ping connection", run: ["takumi", "doctor", "speed"], score: 0.85}'
+    s="$HOME/.local/state/takumi/speed.txt"
+    if [[ -s "$s" ]]; then
+      IFS=$'\t' read -r when said < "$s" || true
+      WHEN=${when:-} SAID=${said:-} jq -cn '{id: "doctor:speed:last", title: ("Last speed test: " + env.SAID), subtitle: (env.WHEN + " · Enter tests again"), glyph: "down",
+        kind: "Doctor", converse: true, keywords: "speed speedtest internet slow fast bandwidth download upload mbps ping last result", run: ["takumi", "doctor", "speed"], score: 0.6}'
+    fi
+  } | palette_filter "$q"
+fi
+
+match=no
+for w in doctor wrong fix broken diagnose check slow problem help trouble repair "not working"; do
+  if [[ ${#q} -ge 3 && ( "$q" == *"$w"* || "$w" == "$q"* ) ]]; then match=yes; fi
+done
+[[ $match == yes ]] || exit 0
+jq -cn '{id:"doctor:run", title:"Check this computer", subtitle:"Wi-Fi, sound, space, updates, services and the clock; fixes what is safe", glyph:"pulse", kind:"Doctor",
+  keywords:"doctor something wrong fix broken diagnose check", converse:true, run:["takumi", "doctor"], score:0.97}'
+r="$HOME/.local/state/takumi/doctor.txt"
+if [[ -s "$r" ]]; then
+  when=$(head -n 1 "$r" | sed 's/^takumi doctor, //'); needs=$(grep -c '^needs ' "$r" || true)
+  WHEN=$when N=$needs jq -cn '{id:"doctor:last", title:("Last check: " + (if env.N == "0" then "all fine" else env.N + " needed you" end)),
+    subtitle:(env.WHEN + " · Enter shows the report"), glyph:"pulse", kind:"Doctor", run:["gio", "open", (env.HOME + "/.local/state/takumi/doctor.txt")], score:0.6}'
+fi
+if [[ -s "$r" ]] && grep -q '^needs Only .* GB free' "$r"; then
+  jq -cn '{id:"doctor:space", title:"Free up space", subtitle:"Old downloads, older systems, old logs; the Trash if you say so", glyph:"drive", kind:"Doctor", converse:true, run:["takumi","update","clean"], score:0.9}'
+fi
+exit 0

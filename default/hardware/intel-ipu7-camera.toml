@@ -1,0 +1,14 @@
+# Built-in cameras behind Intel's IPU7 (Lunar Lake, 0x645d) and IPU7.5 (Panther Lake, 0xb05d): the kernel's
+# driver for them is still in staging, so they work on fewer models than IPU6 does.
+# Kernel: drivers/staging/media/ipu7  libcamera: https://libcamera.org/
+title = "Intel IPU7 camera"
+part = "camera"
+works = "partly"
+says = "works on few models yet"
+
+[match]
+pci = ["8086:645d", "8086:b05d"]
+
+[apply]
+packages = ["libcamera", "pipewire-libcamera"]
+note = "The newest Intel laptop cameras (Lunar Lake and Panther Lake) have only early drivers in Linux. On a few models they work in apps that take the camera through PipeWire, such as web browsers; on most, no app sees the camera yet. A USB camera works everywhere."

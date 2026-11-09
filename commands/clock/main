@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: The time here, the time zone, the clock's format and the clocks for other places; or the time in one
+usage: [place]
+example: takumi clock
+example: takumi clock Tokyo
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/weather.sh"; break; }; done
+declare -F clock_zone >/dev/null && declare -F weather_find >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+now=$(clock_now); here=$(clock_offset)
+# line <city> <zone>: "Tokyo · 23:05 tomorrow · +9 h"
+line() {
+  local off day="" d
+  off=$(clock_offset "$2")
+  d=$(( ((now + off) / 86400) - ((now + here) / 86400) ))
+  if (( d > 0 )); then day=" tomorrow"; elif (( d < 0 )); then day=" yesterday"; fi
+  printf '%s · %s%s · %s\n' "$1" "$(clock_hm "$now" "$2")" "$day" "$(clock_diff $(( off - here )))"
+}
+
+if (( $# )); then
+  place="$*"
+  rc=0; found=$(clock_place "$place") || rc=$?
+  case $rc in
+    0) IFS=$'\t' read -r zone city _ <<< "$found"; line "$city" "$zone"; exit 0 ;;
+    4) echo "$place could mean several time zones: $(clock_several "$found")"; exit 4 ;;
+    *) echo "No time zone found for $place"; exit 4 ;;
+  esac
+fi
+
+zone=$(clock_zone)
+printf '%s · %s · %s (%s)\n' "$(clock_hm "$now")" "$(clock_date "$now" '+%A %-d %B')" "$(clock_city "$zone")" "$zone"
+if [[ "$(clock_format)" == 12h ]]; then f="12-hour clock"; else f="24-hour clock"; fi
+if clock_auto_on; then a="the network sets the time zone"; else a="the time zone is set by hand"; fi
+echo "$f · $a"
+while IFS='|' read -r city z; do [[ -n "$city" && -n "$z" ]] && line "$city" "$z"; done <<< "$(clock_cities)"
+exit 0

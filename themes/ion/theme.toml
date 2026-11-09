@@ -1,0 +1,31 @@
+[meta]
+name = "ion"
+title = "Ion"
+about = "electric blue on near-black, the default"
+mode = "dark"
+
+[palette]
+accent     = "#5ad7ff"
+background = "#0b0f14"
+surface    = "#111821"
+foreground = "#d9e2ec"
+muted      = "#5c6b7a"
+red        = "#ff6b81"
+yellow     = "#ffd166"
+green      = "#7ee787"
+cyan       = "#5ad7ff"
+blue       = "#6ea8fe"
+magenta    = "#c792ea"
+
+[phase.dawn]
+accent     = "#ffb080"
+background = "#0d1016"
+
+[phase.dusk]
+accent     = "#ff9f6e"
+
+[phase.night]
+accent     = "#3fb6e0"
+background = "#06090d"
+surface    = "#0c1218"
+foreground = "#c2cad3"

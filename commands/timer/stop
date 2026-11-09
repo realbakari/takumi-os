@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Stop a running timer by its number, or every running timer when none is named
+usage: [number]
+example: takumi timer stop
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; break; }; done
+declare -F remind_lines >/dev/null || { echo "takumi: the clock library is missing" >&2; exit 1; }
+want=${1:-}
+[[ -z "$want" || "$want" =~ ^[0-9]+$ ]] || { echo "usage: takumi timer stop [number]" >&2; exit 2; }
+n=0
+while IFS=$'\t' read -r id kind at made text; do
+  [[ $kind == timer ]] || continue
+  [[ -z "$want" || "$id" == "$want" ]] || continue
+  remind_unschedule "$id" timer; remind_drop "$id"; n=$((n + 1))
+  last=${text:-$(clock_length $(( at - made ))) timer}
+done <<< "$(remind_lines)"
+if (( n == 0 )); then
+  if [[ -n "$want" ]]; then echo "There is no timer $want"; exit 4; fi
+  echo "No timer is running"; exit 0
+fi
+if (( n == 1 )); then said="Timer stopped: $last"; else said="$n timers stopped"; fi
+takumi notice clock "$said" >/dev/null 2>&1 || true
+echo "$said"

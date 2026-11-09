@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Join a Wi-Fi network; asks for its password only when it has to, and at work or school for your username too
+usage: <name> | --hidden [name]
+example: takumi wifi join "Corner Café"
+example: takumi wifi join eduroam
+risk: 0
+words: wifi wi-fi wireless join connect network password eduroam work school
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/wifi.sh" ]] && { . "$l/wifi.sh"; . "$l/core.sh"; break; }; done
+declare -F wifi_scan >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# A conversation (lib/core.sh): in the Core the password is asked for in place and a wrong one is asked for
+# again. A work or school network (WPA2 or WPA3-Enterprise, eduroam) also asks for a username and the domain of
+# its server, whose certificate must belong to that domain and come from an authority this computer trusts. Exit
+# status, for scripts: 0 joined · 3 an answer was needed and none came · 4 the password (or the username) did not
+# work · 5 not nearby · 6 a work or school network whose server could not be checked · 1 anything else. The last
+# line says it in words.
+hidden=no; name=${1:-}
+if [[ "$name" == --hidden ]]; then hidden=yes; name=${2:-}; fi
+if [[ $hidden == yes && -z "$name" ]]; then core_ask name "Network name" || core_fail 3 "A hidden network needs its name"; fi
+[[ -n "$name" ]] || { echo "usage: takumi wifi join <name> | --hidden [name]" >&2; exit 2; }
+
+secret="" identity="" domain=""
+bytes() { local LC_ALL=C; echo "${#1}"; }
+password_ok() {  # WPA wants 8 to 63 characters, or 64 hex digits; a work or school password only has to be there
+  local n
+  case "$kind" in
+    psk) n=$(bytes "$1"); (( n >= 8 && n <= 63 )) || [[ "$1" =~ ^[0-9a-fA-F]{64}$ ]] ;;
+    enterprise) [[ -n "$1" ]] ;;
+    *) return 0 ;;
+  esac
+}
+ask_password() {  # <why>: asks until the answer could be a password; exits 3 when none comes
+  local wrong="Wi-Fi passwords have 8 to 63 characters" code=4
+  if [[ "$kind" == enterprise ]]; then wrong="$name needs your password"; code=3; fi
+  while :; do
+    core_secret secret "Password for $name" || core_fail 3 "$1"
+    [[ $hidden == yes && -z "$secret" ]] && return 0   # a hidden network with no password is open
+    password_ok "$secret" && return 0
+    core_wrong "$wrong"
+    [[ "${TAKUMI_CORE:-}" == 1 ]] || core_fail "$code" "$wrong"
+  done
+}
+ask_identity() {  # <why>: the username; when one is known, Enter keeps it
+  local was=$identity answer
+  while :; do
+    if [[ -n "$was" ]]; then core_ask answer "Username, or Enter to keep $was" || core_fail 3 "$1"
+    else core_ask answer "Username for $name" || core_fail 3 "$1"; fi
+    [[ -n "$answer" ]] || answer=$was
+    answer=$(printf '%s' "$answer" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [[ -z "$answer" ]] || { identity=$answer; return 0; }
+    core_wrong "$name needs your username"
+    [[ "${TAKUMI_CORE:-}" == 1 ]] || core_fail 3 "$name needs your username"
+  done
+}
+ask_domain() {  # <why> [the domain Enter takes]: the domain the server's certificate must belong to
+  local offer=${2:-} answer
+  while :; do
+    if [[ -n "$offer" ]]; then core_ask answer "Server domain, or Enter for $offer" || core_fail 3 "$1"
+    else core_ask answer "Server domain, from your IT department's Wi-Fi page" || core_fail 3 "$1"; fi
+    [[ -n "$answer" ]] || answer=$offer
+    answer=$(wifi_domain_clean "$answer")
+    wifi_domain_ok "$answer" && { domain=$answer; return 0; }
+    core_wrong "That is not a domain, such as example.edu"
+    [[ "${TAKUMI_CORE:-}" == 1 ]] || core_fail 3 "That is not a domain, such as example.edu"
+  done
+}
+
+# Activate a saved profile with nobody standing by to answer for secrets, so a wrong password fails in
+# seconds instead of being retried until a timeout. Sets $reason when it fails for another cause.
+reason=""
+up() {
+  local out
+  if out=$(LC_ALL=C nmcli --wait 60 connection up uuid "$1" </dev/null 2>&1); then return 0; fi
+  case "$out" in
+    *"Secrets were required"*) return 4 ;;      # what a wrong password looks like, WPA2, WPA3 and work or school alike
+    *"Timeout expired"*) reason="it did not answer in time" ;;
+    *"IP configuration"*) reason="it gave this computer no address" ;;
+    *) reason=$(sed -n 's/^Error: //p' <<< "$out" | sed 's/^Connection activation failed: //; s/^([0-9]*) //' | head -n 1) ;;
+  esac
+  return 1
+}
+joined() {
+  keep=yes
+  nmcli connection modify uuid "$1" connection.autoconnect yes >/dev/null 2>&1 || true
+  core_done "Connected to $name"
+  exit 0
+}
+# Join with the profile's password; on a wrong one, ask again until it works or no answer comes.
+join_with_password() {  # <uuid> <key>
+  local rc
+  while :; do
+    rc=0; up "$1" || rc=$?
+    (( rc == 0 )) && joined "$1"
+    (( rc == 4 )) || core_fail 1 "Could not join $name${reason:+: $reason}"
+    core_wrong "That password did not work"
+    [[ "${TAKUMI_CORE:-}" == 1 ]] || core_fail 4 "That password did not work"
+    ask_password "That password did not work"
+    wifi_store_secret "$1" "$2" "$secret" || core_fail 4 "That password cannot be right for $name"
+  done
+}
+# A work or school network turned us away. wpa_supplicant's journal says whether the certificate was the trouble (a
+# domain other than the one given, or an authority this computer does not trust); otherwise it was the username or
+# the password. In the Core each is asked for again until it joins or no answer comes; elsewhere the exit status
+# says which. A saved network's first failure asks for the password again, as a pipe can answer.
+enterprise_retry() {  # <uuid> <since, epoch seconds> <saved yes|no>
+  local uuid=$1 since=$2 saved=$3 rc round=0 was why
+  while :; do
+    round=$((round + 1))
+    case "$(wifi_cert_problem "$since")" in
+      trust) core_fail 6 "$name's certificate is not from an authority this computer trusts: ask your IT department" ;;
+      domain)
+        core_wrong "$name's certificate is not for $domain"
+        [[ "${TAKUMI_CORE:-}" == 1 ]] || core_fail 6 "$name's certificate is not for $domain"
+        ask_domain "$name's certificate is not for $domain"
+        LC_ALL=C nmcli connection modify uuid "$uuid" 802-1x.domain-suffix-match "$domain" >/dev/null 2>&1 || core_fail 1 "Could not change $name" ;;
+      *)
+        why="That username or password did not work"
+        if [[ $saved == yes && $round == 1 ]]; then why="The saved password for $name did not work"; fi
+        core_wrong "$why"
+        [[ "${TAKUMI_CORE:-}" == 1 || ( $saved == yes && $round == 1 ) ]] || core_fail 4 "$why"
+        was=$identity
+        ask_identity "$why"
+        ask_password "$why"
+        if [[ "$identity" != "$was" ]]; then
+          LC_ALL=C nmcli connection modify uuid "$uuid" 802-1x.identity "$identity" >/dev/null 2>&1 || core_fail 1 "Could not change $name"
+        fi
+        wifi_store_secret "$uuid" 802-1x.password "$secret" || core_fail 4 "That password cannot be right for $name" ;;
+    esac
+    core_note "Joining $name…"
+    since=$(date +%s); rc=0; up "$uuid" || rc=$?
+    (( rc == 0 )) && joined "$uuid"
+    (( rc == 4 )) || core_fail 1 "Could not join $name${reason:+: $reason}"
+  done
+}
+
+command -v nmcli >/dev/null || core_fail 1 "NetworkManager is not installed"
+wifi_present || core_fail 1 "There is no Wi-Fi on this computer"
+if ! wifi_on; then nmcli radio wifi on >/dev/null 2>&1 || core_fail 1 "Wi-Fi could not be turned on"; sleep 2; fi
+
+kind=""
+if [[ $hidden == no ]]; then
+  [[ "$(wifi_current)" == "$name" ]] && { core_done "Already connected to $name"; exit 0; }
+  kind_of() { wifi_scan "$1" | N="$name" awk -F '\t' '{ n = $0; sub(/^[^\t]*\t[^\t]*\t[^\t]*\t/, "", n) } n == ENVIRON["N"] { print $3; exit }'; }
+  kind=$(kind_of auto)
+  [[ -n "$kind" ]] || kind=$(kind_of yes)   # the list may be old: look once more
+fi
+
+uuid=$(wifi_saved_uuids "$name" | head -n 1)
+
+# A saved network: its saved password, or a new one when that stopped working.
+if [[ -n "$uuid" ]]; then
+  [[ -n "$kind" || $hidden == yes ]] || core_fail 5 "$name is not nearby"
+  key=$(wifi_secret_key "$kind")
+  core_note "Joining $name…"
+  since=$(date +%s); rc=0; up "$uuid" || rc=$?
+  (( rc == 0 )) && joined "$uuid"
+  (( rc == 4 )) || core_fail 1 "Could not join $name${reason:+: $reason}"
+  if [[ "$kind" == enterprise ]]; then
+    identity=$(LC_ALL=C nmcli -e no -g 802-1x.identity connection show uuid "$uuid" 2>/dev/null || true)
+    domain=$(LC_ALL=C nmcli -e no -g 802-1x.domain-suffix-match connection show uuid "$uuid" 2>/dev/null || true)
+    enterprise_retry "$uuid" "$since" yes
+  fi
+  core_wrong "The saved password for $name did not work"
+  ask_password "The saved password for $name did not work"
+  wifi_store_secret "$uuid" "$key" "$secret" || core_fail 4 "That password cannot be right for $name"
+  core_note "Joining $name…"
+  join_with_password "$uuid" "$key"
+fi
+
+# A new network.
+if [[ $hidden == yes ]]; then
+  ask_password "$name needs its password, or Enter if it has none"
+  [[ -n "$secret" ]] && kind=psk || kind=open
+elif [[ -z "$kind" ]]; then
+  core_fail 5 "$name is not nearby"
+fi
+if [[ "$kind" == enterprise ]]; then
+  [[ -r "$wifi_ca_bundle" ]] || core_fail 1 "This computer has no list of trusted certificates to check $name against"
+  ask_identity "$name needs your username"
+  ask_password "$name needs your password"
+  ask_domain "$name needs the domain of its server" "$(wifi_realm "$identity")"
+fi
+case "$kind" in psk|sae|wep) [[ -n "$secret" ]] || ask_password "$name needs a password" ;; esac
+core_note "Joining $name…"
+
+# Saved for everyone when this user may (an administrator at this computer), else just for this user.
+args=(type wifi con-name "$name" ssid "$name" connection.autoconnect no)
+perm=$(LC_ALL=C nmcli -t -f PERMISSION,VALUE general permissions 2>/dev/null | sed -n 's/^org\.freedesktop\.NetworkManager\.settings\.modify\.system://p')
+[[ "$perm" == yes ]] || args+=(connection.permissions "user:$(id -un)")
+[[ $hidden == yes ]] && args+=(802-11-wireless.hidden yes)
+case "$kind" in
+  psk) args+=(wifi-sec.key-mgmt wpa-psk) ;;
+  sae) args+=(wifi-sec.key-mgmt sae) ;;
+  owe) args+=(wifi-sec.key-mgmt owe) ;;
+  wep) args+=(wifi-sec.key-mgmt none wifi-sec.auth-alg open wifi-sec.wep-key-type 1) ;;
+  # PEAP or TTLS, whichever the server offers, with MSCHAPv2 inside; the username and the domain are no secrets.
+  enterprise) args+=(wifi-sec.key-mgmt wpa-eap 802-1x.eap peap,ttls 802-1x.phase2-auth mschapv2 802-1x.identity "$identity"
+                     802-1x.ca-cert "$wifi_ca_bundle" 802-1x.domain-suffix-match "$domain") ;;
+esac
+out=$(LC_ALL=C nmcli connection add "${args[@]}" 2>&1) || core_fail 1 "Could not save $name: $(sed -n 's/^Error: //p' <<< "$out" | head -n 1)"
+uuid=$(sed -n 's/.*(\([0-9a-f-]\{36\}\)).*/\1/p' <<< "$out" | head -n 1)
+[[ -n "$uuid" ]] || core_fail 1 "Could not save $name"
+# A network that never joined is not kept, however it ends: no saved wrong password, no "Saved" in
+# the list. joined() is the one place that keeps it.
+keep=no
+trap '[[ $keep == yes ]] || nmcli connection delete uuid "$uuid" >/dev/null 2>&1 || true' EXIT
+key=$(wifi_secret_key "$kind")
+if [[ -n "$secret" ]]; then wifi_store_secret "$uuid" "$key" "$secret" || core_fail 4 "That password cannot be right for $name"; fi
+since=$(date +%s); rc=0; up "$uuid" || rc=$?
+(( rc == 0 )) && joined "$uuid"
+(( rc == 4 )) || core_fail 1 "Could not join $name${reason:+: $reason}"
+[[ "$kind" != enterprise ]] || enterprise_retry "$uuid" "$since" no
+core_wrong "That password did not work"
+[[ "${TAKUMI_CORE:-}" == 1 ]] || core_fail 4 "That password did not work"
+ask_password "That password did not work"
+wifi_store_secret "$uuid" "$key" "$secret" || core_fail 4 "That password cannot be right for $name"
+join_with_password "$uuid" "$key"

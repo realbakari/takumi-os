@@ -1,0 +1,9 @@
+[Unit]
+Description=Takumi: lock, then sleep, after no use (minutes in ~/.config/takumi/power.toml)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/takumi power idle
+Restart=on-failure
+RestartSec=2

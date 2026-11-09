@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Show the weather in Today; it asks Open-Meteo for it at most every 30 minutes
+usage: [place]
+example: takumi weather on
+risk: 1
+converse: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/clock.sh" ]] && { . "$l/clock.sh"; . "$l/weather.sh"; . "$l/core.sh"; break; }; done
+declare -F weather_fetch >/dev/null && declare -F core_done >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# Off until someone turns it on: Today then asks Open-Meteo for its place's weather, at most every half hour and
+# only while Today or the Palette is open. With a place, the weather is for it (takumi weather place).
+if (( $# )); then exec takumi weather place "$@"; fi
+weather_save true "$(weather_setting place)" "$(weather_setting units)"
+core_note "Asking Open-Meteo…"
+if out=$(weather_fetch "" yes); then core_done "Today shows the weather: $(jq -r '.line' <<< "$out")"
+else core_done "Today shows the weather once Open-Meteo answers"; fi

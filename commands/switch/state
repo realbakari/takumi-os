@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print every quick setting as one JSON line, for the Core's Quick settings
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# Read by shell/Core/Quick.qml when it opens, every few seconds while it is open, and after each change.
+# A missing tool (no Bluetooth service, no backlight, no power profiles) leaves its field empty or -1,
+# and the tile says it is not available. Brightness here is the built-in screen's; external monitors
+# answer too slowly over DDC/CI to be read while a panel is open (docs/display.md).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do
+  [[ -f "$l/power.sh" ]] && { . "$l/power.sh"; . "$l/display.sh"; break; }
+done
+command -v jq >/dev/null || exit 0
+
+wifi="" ssid=""
+if command -v nmcli >/dev/null; then
+  wifi=$([[ "$(nmcli radio wifi 2>/dev/null || true)" == enabled ]] && echo on || echo off)
+  ssid=$( (nmcli -t -f ACTIVE,SSID device wifi list --rescan no 2>/dev/null || true) | sed -n 's/^yes://p' | head -n 1)
+fi
+
+bt="" btdev="" btcount=0
+if command -v bluetoothctl >/dev/null && systemctl is-active --quiet bluetooth 2>/dev/null; then
+  bt=$([[ "$(bluetoothctl show 2>/dev/null || true)" == *"Powered: yes"* ]] && echo on || echo off)
+  connected=$( (bluetoothctl devices Connected 2>/dev/null || true) | sed -n 's/^Device [0-9A-Fa-f:]* //p')
+  btdev=$(head -n 1 <<< "$connected"); btcount=$(grep -c . <<< "$connected" || true)
+fi
+
+dnd=$([[ -e "$HOME/.local/state/takumi/dnd" ]] && echo on || echo off)
+
+night=off nightmode=off
+if declare -F display_nightlight_running >/dev/null; then
+  display_nightlight_running && night=on
+  nightmode=$(display_nightlight_mode || echo off)
+fi
+
+awake=""
+if declare -F power_awake_until >/dev/null && until=$(power_awake_until); then awake=$(power_clock "$until"); fi
+
+profile="" profiles=""
+if declare -F power_profiles >/dev/null; then
+  profile=$(power_profile_now)
+  profiles=$( (power_profiles || true) | tr -d '*' | paste -sd ' ' -)
+fi
+
+bright=-1
+if command -v brightnessctl >/dev/null && compgen -G "${TAKUMI_BACKLIGHT:-/sys/class/backlight}/*" >/dev/null; then
+  now=$(brightnessctl get 2>/dev/null || echo 0); max=$(brightnessctl max 2>/dev/null || echo 0)
+  (( max > 0 )) && bright=$(( (now * 100 + max / 2) / max ))
+fi
+
+cap=-1 charge="" mins=-1
+if declare -F power_battery >/dev/null && line=$(power_battery) && [[ -n "$line" ]]; then read -r cap charge mins <<< "$line"; fi
+
+# takumi audio state: "<percent> <muted yes|no> <the output's plain name…> <microphone in use yes|no>"
+output=""
+if state=$(takumi audio state 2>/dev/null); then
+  output=$(awk '{ $1 = ""; $2 = ""; $NF = ""; gsub(/^ +| +$/, ""); print }' <<< "$state")
+  [[ "$output" == "No output" ]] && output=""
+fi
+
+# Screens, for the Mirror switch: how many are on, and whether the built-in one is shown on the others.
+screens=1 mirror=off
+if command -v niri >/dev/null && [[ -n "${NIRI_SOCKET:-}" ]]; then
+  screens=$(niri msg --json outputs 2>/dev/null | jq '[.[] | select(.current_mode != null)] | length' 2>/dev/null || echo 1)
+  [[ "$screens" =~ ^[0-9]+$ ]] || screens=1
+  (( screens > 1 )) && mirror=$(takumi display mirror status 2>/dev/null | awk '{print $1}' || echo off)
+fi
+
+jq -cn --arg wifi "$wifi" --arg ssid "$ssid" --arg bt "$bt" --arg btdev "$btdev" --argjson btcount "${btcount:-0}" \
+  --argjson screens "$screens" --arg mirror "${mirror:-off}" \
+  --arg dnd "$dnd" --arg night "$night" --arg nightmode "$nightmode" --arg awake "$awake" \
+  --arg profile "$profile" --arg profiles "$profiles" --argjson bright "$bright" \
+  --argjson battery "${cap:--1}" --arg charge "$charge" --argjson left "${mins:--1}" --arg output "$output" \
+  '{wifi: $wifi, ssid: $ssid, bt: $bt, btDevice: $btdev, btCount: $btcount, dnd: ($dnd == "on"),
+    night: ($night == "on"), nightMode: $nightmode, awake: $awake, profile: $profile,
+    profiles: ($profiles | split(" ") | map(select(. != ""))), brightness: $bright,
+    battery: $battery, charge: $charge, left: $left, output: $output, screens: $screens, mirror: $mirror}'

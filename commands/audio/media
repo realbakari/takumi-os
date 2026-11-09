@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Play, pause, skip or seek in the app the media keys control
+usage: <play-pause|next|previous|forward|back|pause-all>
+example: takumi audio media play-pause
+risk: 0
+ABOUT
+set -euo pipefail
+# The media keys run this. The app is the one `takumi audio player` chose; while it is closed, another of its
+# kind, then any. forward and back move ten seconds; pause-all pauses every app that plays. Exit 3 when no
+# media app is open, 1 without playerctl.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/audio.sh" ]] && { . "$l/audio.sh"; break; }; done
+declare -F audio_player_targets >/dev/null || { echo "takumi: the sound library is missing" >&2; exit 1; }
+command -v playerctl >/dev/null || { echo "playerctl is not installed"; exit 1; }
+case "${1:-}" in
+  play-pause | next | previous) args=("--player=$(audio_player_targets)" "$1") ;;
+  forward) args=("--player=$(audio_player_targets)" position 10+) ;;
+  back) args=("--player=$(audio_player_targets)" position 10-) ;;
+  pause-all) args=(--all-players pause) ;;
+  *) echo "usage: takumi audio media <play-pause|next|previous|forward|back|pause-all>" >&2; exit 2 ;;
+esac
+rc=0; out=$(playerctl "${args[@]}" 2>&1) || rc=$?
+if (( rc != 0 )); then
+  [[ -n "$(audio_players)" ]] || { echo "No media app is open"; exit 3; }
+  printf '%s\n' "${out:-playerctl could not do that}"; exit 1
+fi

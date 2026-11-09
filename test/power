@@ -1,0 +1,426 @@
+#!/usr/bin/env bash
+# Contract checks for power and the laptop's own keys (lib/power.sh, commands/power/*, the Palette's power rows,
+# commands/keys/backlight, commands/switch/touchpad) against a fake battery, fake power profiles, a fake systemd, a
+# fake computer's /etc, /proc and /sys under one folder, fake disk tools, a fake sudo, and fake keyboard lights: the
+# battery line, profiles kept per power source, idle minutes as a conversation, the swayidle command, low-battery
+# warnings once each, staying awake, the lid, hibernation set up and undone, the charge limit, the keyboard light,
+# the touchpad and the microphone light.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; power checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-power.XXXXXX"); trap 'pkill -f "$t/bin/systemd-inhibit" 2>/dev/null || true; rm -rf "${t:?}"' EXIT
+root=$t/root
+export FAKE=$t/state HOME=$t/home XDG_RUNTIME_DIR=$t/run TAKUMI_POWER_SUPPLY=$t/supply
+export TAKUMI_POWER_ROOT=$root TAKUMI_TOP=$root/top TAKUMI_LEDS=$t/leds
+mkdir -p "$t/bin" "$FAKE" "$HOME" "$XDG_RUNTIME_DIR"
+export PATH="$t/bin:$repo/bin:$PATH"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"   # fake takumi commands go in front of the real ones
+mkdir -p "$t/commands/notice" "$t/commands/room" "$t/commands/lock"
+
+fake() { printf '#!/bin/sh\n%s\n' "$2" > "$t/bin/$1"; chmod +x "$t/bin/$1"; }
+cat > "$t/bin/powerprofilesctl" <<'FAKE'
+#!/bin/sh
+case "$1" in
+  list) for p in performance balanced power-saver; do grep -qx "$p" "$FAKE/offered" || continue
+          if [ "$p" = "$(cat "$FAKE/profile")" ]; then echo "* $p:"; else echo "  $p:"; fi; echo "    PlatformDriver:  placeholder"; echo; done ;;
+  get) cat "$FAKE/profile" ;;
+  set) echo "$2" > "$FAKE/profile"; echo "powerprofilesctl set $2" >> "$FAKE/calls" ;;
+esac
+FAKE
+chmod +x "$t/bin/powerprofilesctl"
+fake systemctl 'if [ "$1" = --version ]; then cat "$FAKE/systemd-version" 2>/dev/null || echo "systemd 258 (258.2-1-arch)"; exit 0; fi; printf "systemctl %s\n" "$*" >> "$FAKE/calls"'
+fake systemd-inhibit 'printf "systemd-inhibit %s\n" "$*" >> "$FAKE/calls"; exec sleep 30'
+# The disk: findmnt and mountpoint answer for a Btrfs system disk with rooms; mount, umount, swapon, swapoff and btrfs
+# do what they say to folders and to /proc/swaps under the fake computer. Unmounting a folder empties it, as the
+# subvolume it showed goes away.
+fake findmnt 'case "$*" in *"FSTYPE /efi") echo vfat ;; *FSTYPE*) cat "$FAKE/fstype" ;; *UUID*) echo 0f7c2d1e-5b6a-4c3d-9e8f-123456789abc ;; *OPTIONS*) cat "$FAKE/options" 2>/dev/null || echo "rw,noatime,compress=zstd:1,subvol=/@rooms/20261108-093000" ;; *SOURCE*) echo /dev/mapper/takumi ;; esac'
+# systemd-boot: the entries as bootctl lists them, and the one-shot start written down.
+fake bootctl 'case "$1" in list) cat "$FAKE/entries.json" 2>/dev/null || echo "[]" ;; set-oneshot) printf "bootctl set-oneshot %s\n" "$2" >> "$FAKE/calls" ;; esac'
+fake mountpoint '[ "$1" = -q ] && shift; grep -qxF "$1" "$FAKE/mounts"'
+fake mount 'printf "mount %s\n" "$*" >> "$FAKE/calls"; for a; do last=$a; done; echo "$last" >> "$FAKE/mounts"'
+fake umount 'printf "umount %s\n" "$*" >> "$FAKE/calls"; grep -vxF "$1" "$FAKE/mounts" > "$FAKE/mounts.new" || true; mv "$FAKE/mounts.new" "$FAKE/mounts"; rm -rf "${1:?}"/*'
+fake swapon 'printf "swapon %s\n" "$*" >> "$FAKE/calls"; [ -e "$FAKE/swapon-fails" ] && exit 1; printf "%s file 16777212 0 -2\n" "$1" >> "$TAKUMI_POWER_ROOT/proc/swaps"'
+fake swapoff 'printf "swapoff %s\n" "$*" >> "$FAKE/calls"; grep -v "^$1 " "$TAKUMI_POWER_ROOT/proc/swaps" > "$FAKE/swaps.new" || true; mv "$FAKE/swaps.new" "$TAKUMI_POWER_ROOT/proc/swaps"'
+cat > "$t/bin/btrfs" <<'FAKE'
+#!/bin/sh
+printf 'btrfs %s\n' "$*" >> "$FAKE/calls"
+case "$1 $2" in
+  "subvolume create") mkdir -p "$3" ;;
+  "subvolume delete") rm -rf "$3" ;;
+  "filesystem mkswapfile") [ -e "$FAKE/mkswap-fails" ] && exit 1; g=${4%g}; dd if=/dev/zero of="$5" bs=1 count=0 seek=$((g * 1073741824)) 2>/dev/null ;;
+  "inspect-internal map-swapfile") echo 1234567 ;;
+esac
+FAKE
+chmod +x "$t/bin/btrfs"
+fake df 'printf "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/mapper/takumi 999999999 1 %s 1%% /\n" "$(cat "$FAKE/free-kib")"'
+# sudo writes down what it was asked and why (core_sudo's TAKUMI_SUDO_WHY), then runs it, unless the password is refused.
+fake sudo 'printf "sudo %s|%s\n" "$*" "${TAKUMI_SUDO_WHY:-}" >> "$FAKE/calls"; [ -e "$FAKE/sudo-refuses" ] && exit 1
+while [ $# -gt 0 ]; do case "$1" in -A|-k|-S|-n) shift ;; -p) shift 2 ;; *) break ;; esac; done; exec "$@"'
+fake brightnessctl 'printf "brightnessctl %s\n" "$*" >> "$FAKE/calls"; d=""; while [ $# -gt 0 ]; do case "$1" in -d) d=$2; shift 2 ;; set) echo "$2" > "$TAKUMI_LEDS/$d/brightness" 2>/dev/null; shift 2 ;; *) shift ;; esac; done; exit 0'
+fake wpctl 'if [ -e "$FAKE/mic-muted" ]; then echo "Volume: 1.00 [MUTED]"; else echo "Volume: 1.00"; fi'
+fake pactl 'case "$1" in info) exit 0 ;; subscribe) [ -f "$FAKE/events" ] && . "$FAKE/events" ;; esac'
+fake niri 'printf "niri %s\n" "$*" >> "$FAKE/calls"'
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"
+printf '#!/bin/sh\necho kernel-sync >> "$FAKE/calls"; [ ! -e "$FAKE/kernel-sync-fails" ]\n' > "$t/commands/room/kernel-sync"
+printf '#!/bin/sh\n[ -e "$FAKE/rooms" ]\n' > "$t/commands/room/enabled"
+printf '#!/bin/sh\necho lock >> "$FAKE/calls"\n' > "$t/commands/lock/main"
+chmod +x "$t/commands/notice/main" "$t/commands/room/kernel-sync" "$t/commands/room/enabled" "$t/commands/lock/main"
+
+battery() {  # <percent> <Status> [ac online 0|1]
+  rm -rf "${TAKUMI_POWER_SUPPLY:?}"; mkdir -p "$TAKUMI_POWER_SUPPLY/BAT0" "$TAKUMI_POWER_SUPPLY/AC"
+  echo "$1" > "$TAKUMI_POWER_SUPPLY/BAT0/capacity"; echo "$2" > "$TAKUMI_POWER_SUPPLY/BAT0/status"
+  echo 40000000 > "$TAKUMI_POWER_SUPPLY/BAT0/energy_now"; echo 18461538 > "$TAKUMI_POWER_SUPPLY/BAT0/power_now"
+  echo "${3:-0}" > "$TAKUMI_POWER_SUPPLY/AC/online"
+}
+fstab0="UUID=0f7c2d1e-5b6a-4c3d-9e8f-123456789abc / btrfs rw,noatime,compress=zstd:1,subvol=/@rooms/20261108-093000 0 0
+UUID=0f7c2d1e-5b6a-4c3d-9e8f-123456789abc /home btrfs rw,noatime,compress=zstd:1,subvol=/@home 0 0
+UUID=9A3C-11F0 /efi vfat rw,relatime 0 2"
+cmdline0="rd.luks.name=5e1d=takumi root=/dev/mapper/takumi rw quiet splash"
+# A laptop with 16 GiB of memory, 100 GiB free, a lid, a kernel that can hibernate and the systemd initramfs.
+computer() {
+  rm -rf "${root:?}"; mkdir -p "$root/etc/kernel" "$root/proc/bus/input" "$root/sys/power" "$root/sys/kernel/security" "$root/top/@rooms" "$root/var/lib/takumi"
+  printf '%s\n' "$fstab0" > "$root/etc/fstab"; printf '%s\n' "$cmdline0" > "$root/etc/kernel/cmdline"; printf '%s\n' "$cmdline0" > "$root/proc/cmdline"
+  echo 'HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block filesystems fsck)' > "$root/etc/mkinitcpio.conf"
+  echo "MemTotal:       16000000 kB" > "$root/proc/meminfo"
+  printf 'Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/dev/zram0 partition 8388604 0 100\n' > "$root/proc/swaps"
+  echo "freeze mem disk" > "$root/sys/power/state"; echo "[none] integrity confidentiality" > "$root/sys/kernel/security/lockdown"
+  printf '%s\n' 'N: Name="AT Translated Set 2 keyboard"' 'B: EV=120013' '' 'N: Name="Lid Switch"' 'B: EV=21' 'B: SW=1' '' > "$root/proc/bus/input/devices"
+  echo btrfs > "$FAKE/fstype"; touch "$FAKE/rooms"; echo 104857600 > "$FAKE/free-kib"; echo "$TAKUMI_TOP" > "$FAKE/mounts"
+}
+reset() {
+  rm -rf "${FAKE:?}"/* "${HOME:?}"/.config "${XDG_RUNTIME_DIR:?}"/* "${TAKUMI_LEDS:?}"
+  printf 'balanced\npower-saver\n' > "$FAKE/offered"; echo balanced > "$FAKE/profile"
+  : > "$FAKE/calls"; : > "$FAKE/notices"; battery 83 Discharging 0; computer
+}
+check() { if eval "$2"; then :; else echo "power: $1"; status=1; fi; }
+lib() { bash -c '. lib/power.sh; "$@"' _ "$@"; }
+talk() { local answers=$1; shift; printf '%b' "$answers" | TAKUMI_CORE=1 "$@" 2>&1; echo "rc=$?"; }
+lidconf=$root/etc/systemd/logind.conf.d/takumi-lid.conf sleepconf=$root/etc/systemd/sleep.conf.d/takumi.conf
+
+reset
+check "the battery: percent, state, minutes left" '[[ "$(lib power_battery)" == "83 discharging 130" && "$(lib power_duration 130)" == "2 h 10 min" ]]'
+check "on battery, then on power" '[[ "$(lib power_source)" == battery ]] && battery 83 Charging 1 && [[ "$(lib power_source)" == power ]]'
+rm -rf "${TAKUMI_POWER_SUPPLY:?}"; mkdir -p "$TAKUMI_POWER_SUPPLY"
+check "a computer with no battery is on power and has no battery line" '[[ "$(lib power_source)" == power && -z "$(lib power_battery)" ]]'
+reset
+check "the profiles offered, the one in use marked" '[[ "$(lib power_profiles | tr "\n" " ")" == "*balanced power-saver " ]]'
+
+r=$(commands/palette/power power)
+check "rows are JSON with an id, a title and a kind" '[[ -n "$r" ]] && jq -e "select(.id and .title and .kind) | true" <<< "$r" >/dev/null'
+check "the mode in use, and the other" '[[ "$(jq -r "select(.id | startswith(\"power:profile:\")) | .title + \" · \" + .subtitle" <<< "$r" | tr "\n" "|")" == "Balanced · In use · on battery|Power saver · Longer battery, a little slower|" ]]'
+check "the battery row" '[[ "$(jq -r "select(.id == \"power:battery\") | .title + \" · \" + .subtitle" <<< "$r")" == "Battery 83% · On battery · 2 h 10 min left" ]]'
+check "lock and sleep for this power source, as conversations" '[[ "$(jq -r "select(.id | startswith(\"power:when:\")) | .title + \" · \" + (.converse | tostring)" <<< "$r" | tr "\n" "|")" == "Lock the screen after 10 min · true|Sleep after 30 min · true|" ]]'
+check "stay awake" '[[ "$(jq -c "select(.id == \"power:awake\") | [.title, .run]" <<< "$r")" == "[\"Stay awake for an hour\",[\"takumi\",\"power\",\"awake\",\"60\"]]" ]]'
+check "under three letters, nothing" '[[ -z "$(commands/palette/power ba)" ]]'
+
+reset
+out=$(commands/power/profile power-saver || true)
+check "choosing a mode on battery keeps it for battery ($out)" '[[ "$out" == "Power saver, used on battery" ]] && grep -qx "powerprofilesctl set power-saver" "$FAKE/calls" && grep -q "^battery = \"power-saver\"" "$HOME/.config/takumi/power.toml"'
+rc=0; out=$(commands/power/profile performance) || rc=$?
+check "a mode this computer does not have: 3 ($out)" '[[ $rc -eq 3 && "$out" == "This computer has no performance mode" ]]'
+
+reset
+out=$(commands/power/when lock 15 2>&1 || true)
+check "lock minutes, saved and the watcher restarted ($out)" '[[ "$out" == "Lock the screen after 15 min on battery" ]] && grep -q "^lock = 15" "$HOME/.config/takumi/power.toml" && grep -qx "systemctl --user restart takumi-idle.service" "$FAKE/calls"'
+said=$(talk 'soon\n12\n' commands/power/when sleep)
+want=$(printf '%s\n' "ask Minutes on battery, 0 for never" "wrong That is not a number of minutes" "ask Minutes on battery, 0 for never" "done Sleep after 12 min on battery" "rc=0")
+check "minutes as a conversation, asked again after words" '[[ "$said" == "$want" ]]'
+said=$(talk '0\n' commands/power/when sleep)
+check "0 means never" '[[ "$said" == *"done Sleep: never on battery"* ]]'
+
+reset
+idle=$(commands/power/idle --print | tr "\n" "|")
+check "on battery: lock, screens off a minute later, sleep, the keyboard light back after waking ($idle)" '[[ "$idle" == "swayidle|-w|timeout|600|takumi lock|timeout|660|niri msg action power-off-monitors|timeout|1800|systemctl suspend|before-sleep|takumi lock|after-resume|takumi keys backlight restore|lock|takumi lock|" ]]'
+battery 83 Charging 1
+idle=$(commands/power/idle --print | tr "\n" "|")
+check "on power: lock after 20 min, no sleep ($idle)" '[[ "$idle" == "swayidle|-w|timeout|1200|takumi lock|timeout|1260|niri msg action power-off-monitors|before-sleep|takumi lock|after-resume|takumi keys backlight restore|lock|takumi lock|" ]]'
+battery 83 Discharging 0; mkdir -p "${lidconf%/*}"; lib power_logind_conf sleep "" "" > "$lidconf"
+idle=$(commands/power/idle --print | tr "\n" "|")
+check "once Takumi says what sleep means, logind's sleep ($idle)" '[[ "$idle" == *"timeout|1800|systemctl sleep|"* ]]'
+commands/power/sleep >/dev/null 2>&1 || true
+check "the Sleep row locks, then asks for the same sleep" 'grep -qx lock "$FAKE/calls" && grep -qx "systemctl sleep" "$FAKE/calls"'
+
+reset; battery 14 Discharging 0
+commands/power/battery
+check "below 15%: a warning" 'grep -q "^bolt|Battery low|14% left|" "$FAKE/notices"'
+: > "$FAKE/notices"; commands/power/battery
+check "once per fall below the level" '[[ ! -s "$FAKE/notices" ]]'
+battery 4 Discharging 0; commands/power/battery
+check "below 5%: plug in now" 'grep -q "^bolt|Plug in now|4% left; the computer sleeps at 3%|" "$FAKE/notices"'
+battery 3 Discharging 0; commands/power/battery
+check "at 3%: sleep" 'grep -qx "systemctl suspend" "$FAKE/calls"'
+battery 50 Charging 1; : > "$FAKE/calls"; commands/power/battery
+check "plugged in: the mode for power, the watcher restarted" 'grep -qx "systemctl --user restart takumi-idle.service" "$FAKE/calls" && [[ "$(cat "$FAKE/profile")" == balanced ]]'
+battery 14 Discharging 0; : > "$FAKE/notices"; commands/power/battery
+check "unplugged: the mode for battery, and the warning again" '[[ "$(cat "$FAKE/profile")" == power-saver ]] && grep -q "Battery low" "$FAKE/notices"'
+reset; battery 3 Discharging 0
+echo "$root/swap/swapfile file 16777212 0 -2" >> "$root/proc/swaps"; echo "$cmdline0 resume=UUID=x resume_offset=1" > "$root/etc/kernel/cmdline"
+commands/power/battery
+check "at 3% with hibernation on: hibernate, nothing is lost" 'grep -qx "systemctl hibernate" "$FAKE/calls" && ! grep -qx "systemctl suspend" "$FAKE/calls" && grep -q "^bolt|Hibernating|the battery is empty; everything is kept|" "$FAKE/notices"'
+
+reset
+out=$(commands/power/awake 60)
+for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q systemd-inhibit "$FAKE/calls" && break; sleep 0.2; done
+check "awake: until a time an hour away ($out)" '[[ "$out" == "Awake until "* ]] && [[ -s "$XDG_RUNTIME_DIR/takumi-awake" ]]'
+check "awake: the watcher stopped and sleep held off" 'grep -qx "systemctl --user stop takumi-idle.service" "$FAKE/calls" && grep -q "systemd-inhibit --what=sleep:idle --who=Takumi" "$FAKE/calls"'
+check "awake: the row says until when, and Enter stops" '[[ "$(commands/palette/power awake | jq -c "[.title, .run]")" == "[\"$out\",[\"takumi\",\"power\",\"awake\",\"stop\"]]" ]]'
+commands/power/awake stop >/dev/null
+check "stop: back to normal" '[[ ! -e "$XDG_RUNTIME_DIR/takumi-awake" ]] && grep -qx "systemctl --user start takumi-idle.service" "$FAKE/calls"'
+
+# --- The lid -----------------------------------------------------------------------------------------------------
+reset
+check "a laptop with a lid, sleeping when it closes, until told otherwise" 'lib power_has_lid && [[ "$(lib power_lid_choice battery) $(lib power_lid_choice power)" == "sleep sleep" ]]'
+r=$(commands/palette/power lid)
+check "lid rows: sleep in use, keep running; no hibernate while hibernation is off" '[[ "$(jq -r ".title + \" · \" + .subtitle" <<< "$r" | tr "\n" "|")" == "Sleep when the lid closes · In use · on battery and plugged in|Keep running when the lid closes · The screen locks; music and downloads go on|" ]]'
+check "a lid row is a conversation with takumi power lid" '[[ "$(jq -c "select(.id == \"power:lid:nothing\") | [.converse, .run]" <<< "$r")" == "[true,[\"takumi\",\"power\",\"lid\",\"nothing\"]]" ]]'
+said=$(talk '' commands/power/lid nothing)
+check "keep running: logind locks instead, on battery and plugged in ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$said" == *"done When the lid closes the computer keeps running and the screen locks"*"rc=0" ]] && grep -qx "HandleLidSwitch=lock" "$lidconf" && ! grep -q ExternalPower "$lidconf" && grep -qx "SleepOperation=suspend" "$lidconf"'
+check "the password asked for in the Core, saying why; logind told" 'grep -qF "sudo -A tee $lidconf|Changing what the lid does needs your password" "$FAKE/calls" && grep -qx "systemctl kill -s HUP systemd-logind.service" "$FAKE/calls"'
+said=$(talk '' commands/power/lid sleep on-charger)
+check "plugged in gets a choice of its own" '[[ "$said" == *"done Plugged in, when the lid closes the computer sleeps"* ]] && grep -qx "HandleLidSwitch=lock" "$lidconf" && grep -qx "HandleLidSwitchExternalPower=sleep" "$lidconf" && [[ "$(lib power_lid_choice battery) $(lib power_lid_choice power)" == "nothing sleep" ]]'
+check "on battery the row says the choice is for battery" '[[ "$(commands/palette/power lid | jq -r "select(.id == \"power:lid:nothing\") | .subtitle")" == "In use · on battery" ]]'
+battery 83 Charging 1
+check "plugged in, a row sets the choice for plugged in" '[[ "$(commands/palette/power lid | jq -c "select(.id == \"power:lid:nothing\") | .run")" == "[\"takumi\",\"power\",\"lid\",\"nothing\",\"on-charger\"]" ]]'
+said=$(talk '' commands/power/lid hibernate)
+check "hibernate while hibernation is off: 5, nothing written" '[[ "$said" == *"Hibernation is off. Turn it on first, then the lid can use it"*"rc=5" ]] && ! grep -q "=hibernate" "$lidconf"'
+touch "$FAKE/sudo-refuses"; said=$(talk '' commands/power/lid sleep)
+check "no password: 3, nothing changed" '[[ "$said" == *"Nothing changed: the password was not given"*"rc=3" ]] && grep -qx "HandleLidSwitch=lock" "$lidconf"'
+rm -f "$FAKE/sudo-refuses"; rm "$root/proc/bus/input/devices"
+check "no lid: no lid rows" '[[ -z "$(commands/palette/power lid)" ]]'
+
+# --- Hibernation ---------------------------------------------------------------------------------------------------
+reset
+check "a Takumi laptop can hibernate: nothing against it, 16 GB for 16 GB of memory" '[[ -z "$(lib power_hibernate_unable)" && "$(lib power_memory_gib)" == 16 ]]'
+r=$(commands/palette/power hibernate)
+check "off: one row turns it on, says what it takes, asks first" '[[ "$(jq -r "select(.id | startswith(\"power:hibernate\")) | [.title, .subtitle, (.risk | tostring), (.converse | tostring)] | join(\"|\")" <<< "$r")" == "Turn on hibernation|Sleep that lasts for days, kept on the disk · uses 16 GB|2|true" ]]'
+echo ext4 > "$FAKE/fstype"; want="Hibernation needs the disk layout a Takumi install has, and this computer does not have it"
+check "not Btrfs: says why" '[[ "$(lib power_hibernate_unable)" == "$want" ]]'
+check "not available: a row says why, only when asked about hibernation" '[[ "$(commands/palette/power hibernate | jq -r "select(.id == \"power:hibernate:none\") | .title + \" · \" + .subtitle")" == "Hibernation is not available · $want" && "$(commands/palette/power power)" != *power:hibernate* ]]'
+echo btrfs > "$FAKE/fstype"; rm "$FAKE/rooms"
+check "not started from rooms: the same" '[[ "$(lib power_hibernate_unable)" == "$want" ]]'
+touch "$FAKE/rooms"; echo "freeze mem" > "$root/sys/power/state"; echo "none [integrity] confidentiality" > "$root/sys/kernel/security/lockdown"
+want="Secure Boot has locked this computer's system, and a locked system cannot hibernate"
+check "Secure Boot's lockdown: says so" '[[ "$(lib power_hibernate_unable)" == "$want" ]]'
+said=$(talk '' commands/power/hibernate on)
+check "and refuses, before any password: 1" '[[ "$said" == *"$want"*"rc=1" ]] && ! grep -q sudo "$FAKE/calls"'
+echo "[none] integrity confidentiality" > "$root/sys/kernel/security/lockdown"; echo "$cmdline0 nohibernate" > "$root/proc/cmdline"
+check "nohibernate: says so" '[[ "$(lib power_hibernate_unable)" == "Hibernation is turned off in this computer'"'"'s start options" ]]'
+echo "freeze mem disk" > "$root/sys/power/state"; echo 'HOOKS=(base udev autodetect modconf block filesystems fsck)' > "$root/etc/mkinitcpio.conf"
+check "the older initramfs: says so" '[[ "$(lib power_hibernate_unable)" == "This computer starts in an older way that cannot wake from hibernation" ]]'
+
+reset; echo 20971520 > "$FAKE/free-kib"
+said=$(talk '' commands/power/hibernate on)
+check "20 GB free: not enough with 8 GB kept for updates, said with the numbers: 4" '[[ "$said" == *"Hibernation needs 16 GB of the disk for what is in memory, with 8 GB left over for updates; 20 GB is free"*"rc=4" ]] && ! grep -q sudo "$FAKE/calls"'
+check "and the row says it before Enter" '[[ "$(commands/palette/power hibernate | jq -r "select(.id == \"power:hibernate:on\") | .subtitle")" == "Needs 16 GB of the disk with 8 GB left over for updates; 20 GB is free" ]]'
+
+reset
+said=$(talk '' commands/power/hibernate on)
+want=$(printf '%s\n' "note Making room for hibernation: 16 GB of the disk…" "done Hibernation is on" "rc=0")
+check "on: a conversation that ends in one line ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$said" == "$want" ]]'
+check "the password asked for in the Core, saying why, for the root part" 'grep -qF "sudo -A $repo/commands/power/hibernate --root on 16|Turning on hibernation needs your password" "$FAKE/calls"'
+check "a @swap subvolume beside the rooms, mounted at /swap, with a 16 GiB swapfile made by Btrfs" '[[ -d "$TAKUMI_TOP/@swap" ]] && grep -qx "btrfs subvolume create $TAKUMI_TOP/@swap" "$FAKE/calls" && grep -qx "mount -o subvol=/@swap,noatime UUID=0f7c2d1e-5b6a-4c3d-9e8f-123456789abc $root/swap" "$FAKE/calls" && grep -qx "btrfs filesystem mkswapfile --size 16g $root/swap/swapfile" "$FAKE/calls" && [[ "$(lib power_swapfile_gib)" == 16 ]]'
+check "/etc/fstab mounts it and swaps on it at every start, never stopping a start" '[[ "$(tail -n 3 "$root/etc/fstab")" == "$(printf "%s\n" "# Hibernation, set up by takumi power hibernate (docs/power.md)" "UUID=0f7c2d1e-5b6a-4c3d-9e8f-123456789abc /swap btrfs subvol=/@swap,noatime,nofail 0 0" "/swap/swapfile none swap defaults,nofail 0 0")" && "$(head -n 3 "$root/etc/fstab")" == "$fstab0" ]]'
+check "in use now, after zram" 'grep -qx "swapon $root/swap/swapfile" "$FAKE/calls" && lib power_swap_active'
+check "where to wake from, in the kernel options every room's entry copies" '[[ "$(cat "$root/etc/kernel/cmdline")" == "$cmdline0 resume=UUID=0f7c2d1e-5b6a-4c3d-9e8f-123456789abc resume_offset=1234567" ]] && grep -qx "btrfs inspect-internal map-swapfile -r $root/swap/swapfile" "$FAKE/calls"'
+check "this room's boot entry rewritten; systemd and logind told" 'grep -qx kernel-sync "$FAKE/calls" && grep -qx "systemctl daemon-reload" "$FAKE/calls" && grep -qx "systemctl kill -s HUP systemd-logind.service" "$FAKE/calls"'
+check "sleep pinned to plain sleep: turning hibernation on changes nothing else" 'grep -qx "SleepOperation=suspend" "$lidconf" && grep -qx "HandleLidSwitch=sleep" "$lidconf" && lib power_hibernate_ready'
+said=$(talk '' commands/power/hibernate on)
+check "on again: already on, nothing asked" '[[ "$said" == *"done Hibernation is already on"*"rc=0" && "$(grep -c "^sudo " "$FAKE/calls")" == 1 ]]'
+r=$(commands/palette/power power)
+check "on: hibernate now, sleep then hibernate after 2 hours, turn it off" '[[ "$(jq -r "select(.id | startswith(\"power:hibernate\")) | .title + \" · \" + .subtitle" <<< "$r" | tr "\n" "|")" == "Hibernate · Everything is kept on the disk and the computer turns off; it all comes back|Sleep, then hibernate after 2 hours · Asleep that long, it keeps everything on the disk and turns off|Turn off hibernation · Gives back 16 GB of the disk; sleep stays sleep|" ]]'
+check "and the lid can hibernate" '[[ "$(commands/palette/power lid | jq -r ".id" | tr "\n" " ")" == "power:lid:sleep power:lid:hibernate power:lid:nothing " ]]'
+said=$(talk '' commands/power/lid hibernate)
+check "lid: hibernate" '[[ "$said" == *"done When the lid closes the computer hibernates"*"rc=0" ]] && grep -qx "HandleLidSwitch=hibernate" "$lidconf"'
+said=$(talk '' commands/power/hibernate-after 2)
+check "sleep, then hibernate after 2 hours: systemd's delay, logind's sleep falling back to suspend" '[[ "$said" == *"done Sleep, then hibernate after 2 hours asleep"*"rc=0" ]] && grep -qx "HibernateDelaySec=2h" "$sleepconf" && grep -qx "SleepOperation=suspend-then-hibernate suspend" "$lidconf" && grep -qx "HandleLidSwitch=hibernate" "$lidconf" && [[ "$(lib power_hibernate_after)" == 2 ]]'
+check "the row says so, and Enter just sleeps" '[[ "$(commands/palette/power power | jq -c "select(.id == \"power:hibernate:after\") | [.title, .subtitle, .run[3]]")" == "[\"Sleep, then hibernate after 2 hours\",\"In use · Enter to just sleep\",\"never\"]" ]]'
+check "a sleeping lid says it hibernates later" '[[ "$(commands/palette/power lid | jq -r "select(.id == \"power:lid:sleep\") | .subtitle")" == "Sleeps, then hibernates after 2 h" ]]'
+said=$(talk '' commands/power/hibernate-after never)
+check "never: sleep stays sleep" '[[ "$said" == *"done Sleep stays sleep: the computer no longer hibernates by itself"* ]] && [[ ! -e "$sleepconf" ]] && grep -qx "SleepOperation=suspend" "$lidconf"'
+rc=0; commands/power/hibernate-after soon >/dev/null 2>&1 || rc=$?
+check "hours that are not hours: 2" '[[ $rc -eq 2 ]]'
+: > "$FAKE/calls"; commands/power/hibernate now
+check "hibernate now: locks, then hibernates" '[[ "$(grep -E "^(lock|systemctl hibernate)$" "$FAKE/calls" | tr "\n" "|")" == "lock|systemctl hibernate|" ]]'
+talk '' commands/power/hibernate-after 2 >/dev/null; : > "$FAKE/calls"
+said=$(talk '' commands/power/hibernate off)
+check "off: a conversation that gives the space back ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$said" == *"done Hibernation is off; 16 GB of the disk is free again"*"rc=0" ]] && grep -qF "sudo -A $repo/commands/power/hibernate --root off|Turning off hibernation needs your password" "$FAKE/calls"'
+check "off: swapped off, /etc/fstab and the kernel options as they were" 'grep -qx "swapoff $root/swap/swapfile" "$FAKE/calls" && [[ "$(cat "$root/etc/fstab")" == "$fstab0" && "$(cat "$root/etc/kernel/cmdline")" == "$cmdline0" ]] && ! lib power_swap_active'
+check "off: the subvolume and the swapfile gone, the boot entry rewritten" '[[ ! -e "$TAKUMI_TOP/@swap" && ! -e "$root/swap" ]] && grep -qx "btrfs subvolume delete $TAKUMI_TOP/@swap" "$FAKE/calls" && grep -qx kernel-sync "$FAKE/calls"'
+check "off: the lid sleeps again, sleep stays sleep" '[[ ! -e "$sleepconf" ]] && grep -qx "HandleLidSwitch=sleep" "$lidconf" && grep -qx "SleepOperation=suspend" "$lidconf"'
+rc=0; out=$(commands/power/hibernate now 2>&1) || rc=$?
+check "hibernate now while off: 5" '[[ $rc -eq 5 && "$out" == "Hibernation is off. Turn it on first: takumi power hibernate on" ]]'
+said=$(talk '' commands/power/hibernate off)
+check "off again: already off" '[[ "$said" == *"done Hibernation is already off"* ]]'
+
+reset; touch "$FAKE/kernel-sync-fails"
+said=$(talk '' commands/power/hibernate on)
+check "a step that fails: said in words, 1 ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$said" == *"The computer'"'"'s start could not be updated, so hibernation stays off"*"rc=1" ]]'
+check "and everything it changed is put back" '[[ "$(cat "$root/etc/fstab")" == "$fstab0" && "$(cat "$root/etc/kernel/cmdline")" == "$cmdline0" && ! -e "$TAKUMI_TOP/@swap" && ! -e "$root/swap/swapfile" && ! -e "$lidconf" ]] && ! lib power_swap_active'
+reset; touch "$FAKE/sudo-refuses"
+said=$(talk '' commands/power/hibernate on)
+check "no password: 3, nothing touched" '[[ "$said" == *"Nothing changed: the password was not given"*"rc=3" && ! -e "$TAKUMI_TOP/@swap" && "$(cat "$root/etc/fstab")" == "$fstab0" ]]'
+# A systemd older than 256 has no sleep action that falls back: plain actions, and sleep asked for by name.
+reset; echo "systemd 255 (255.4-1-arch)" > "$FAKE/systemd-version"
+talk '' commands/power/hibernate on >/dev/null; talk '' commands/power/hibernate-after 2 >/dev/null
+check "an older systemd: suspend-then-hibernate by name, for the lid and after no use" 'grep -qx "HandleLidSwitch=suspend-then-hibernate" "$lidconf" && ! grep -q SleepOperation "$lidconf" && [[ "$(commands/power/idle --print | tr "\n" "|")" == *"|systemctl suspend-then-hibernate|"* ]]'
+talk '' commands/power/hibernate-after never >/dev/null
+check "and plain suspend when sleep stays sleep" 'grep -qx "HandleLidSwitch=suspend" "$lidconf" && [[ "$(commands/power/idle --print | tr "\n" "|")" == *"|systemctl suspend|"* && "$(lib power_lid_choice battery)" == sleep ]]'
+
+# --- The charge limit ------------------------------------------------------------------------------------------------
+reset
+said=$(talk '' commands/power/charge-limit 80)
+check "a battery without a limit: says so, 5" '[[ "$said" == *"This laptop does not let the system hold its battery below full"*"rc=5" ]]'
+check "and no row for it" '[[ "$(commands/palette/power battery)" != *power:charge* ]]'
+bat=$TAKUMI_POWER_SUPPLY/BAT0; echo 100 > "$bat/charge_control_end_threshold"; echo 96 > "$bat/charge_control_start_threshold"
+check "a battery with one: keep it at 80%" '[[ "$(commands/palette/power battery | jq -c "select(.id == \"power:charge\") | [.title, .subtitle, .converse, .run]")" == "[\"Keep the battery at 80%\",\"It lasts more years; for a laptop that is mostly plugged in\",true,[\"takumi\",\"power\",\"charge-limit\",\"80\"]]" ]]'
+said=$(talk '' commands/power/charge-limit 80)
+check "80: stops at 80, starts again under 75, asked for with the password ($(tail -n 2 <<< "$said" | head -n 1))" '[[ "$said" == *"done The battery stops charging at 80%, so it lasts more years"*"rc=0" && "$(cat "$bat/charge_control_end_threshold") $(cat "$bat/charge_control_start_threshold")" == "80 75" ]] && grep -qF "|Keeping the battery at 80% needs your password" "$FAKE/calls"'
+check "the choice kept for every start, with the old start threshold, and the service on" 'grep -qx "limit=80" "$root/var/lib/takumi/charge-limit" && grep -qx "start BAT0 96" "$root/var/lib/takumi/charge-limit" && grep -qx "systemctl enable takumi-charge-limit.service" "$FAKE/calls"'
+echo 80 > "$bat/capacity"; echo "Not charging" > "$bat/status"; echo 1 > "$TAKUMI_POWER_SUPPLY/AC/online"
+r=$(commands/palette/power battery)
+check "held: the battery row says so instead of full, and the row offers 100%" '[[ "$(jq -r "select(.id == \"power:battery\") | .subtitle" <<< "$r")" == "Plugged in · kept at 80% so it lasts" && "$(jq -c "select(.id == \"power:charge\") | [.title, .run[3]]" <<< "$r")" == "[\"Battery kept at 80%\",\"100\"]" ]]'
+echo 100 > "$bat/charge_control_end_threshold"; commands/power/charge-limit --apply
+check "a laptop that forgot it gets it back from the service" '[[ "$(cat "$bat/charge_control_end_threshold")" == 80 ]]'
+said=$(talk '' commands/power/charge-limit 100)
+check "100: charges to full, the old start threshold back, the choice gone (the service then does nothing)" '[[ "$said" == *"done The battery charges to 100% again"* && "$(cat "$bat/charge_control_end_threshold") $(cat "$bat/charge_control_start_threshold")" == "100 96" && ! -e "$root/var/lib/takumi/charge-limit" ]]'
+rm -rf "${TAKUMI_POWER_SUPPLY:?}"; mkdir -p "$TAKUMI_POWER_SUPPLY"; said=$(talk '' commands/power/charge-limit 80)
+check "no battery: says so, 5" '[[ "$said" == *"This computer has no battery"*"rc=5" ]]'
+
+# --- The keyboard light ------------------------------------------------------------------------------------------------
+kbd() { rm -rf "${TAKUMI_LEDS:?}"; mkdir -p "$TAKUMI_LEDS/tpacpi::kbd_backlight"; echo "$1" > "$TAKUMI_LEDS/tpacpi::kbd_backlight/max_brightness"; echo "$2" > "$TAKUMI_LEDS/tpacpi::kbd_backlight/brightness"; }
+level() { cat "$TAKUMI_LEDS/tpacpi::kbd_backlight/brightness"; }
+reset; kbd 2 0
+out=$(commands/keys/backlight up)
+check "up: a step, and a notice with a meter ($out)" '[[ "$out" == "Keyboard light 50%" && "$(level)" == 1 ]] && grep -qx "brightnessctl -q -d tpacpi::kbd_backlight set 1" "$FAKE/calls" && grep -q "^keyboard|Keyboard light||50|" "$FAKE/notices"'
+commands/keys/backlight up >/dev/null; commands/keys/backlight up >/dev/null
+check "up stops at the top" '[[ "$(level)" == 2 ]]'
+out=$(commands/keys/backlight down)
+check "down: a step ($out)" '[[ "$out" == "Keyboard light 50%" && "$(level)" == 1 ]]'
+out=$(commands/keys/backlight cycle); out2=$(commands/keys/backlight cycle)
+check "round: brighter, then off ($out, $out2)" '[[ "$out" == "Keyboard light 100%" && "$out2" == "Keyboard light off" && "$(level)" == 0 ]] && grep -q "^keyboard|Keyboard light off||0|" "$FAKE/notices"'
+commands/keys/backlight cycle >/dev/null; echo 0 > "$TAKUMI_LEDS/tpacpi::kbd_backlight/brightness"; : > "$FAKE/notices"
+commands/keys/backlight restore
+check "restore after waking: back to the level chosen, without a notice" '[[ "$(level)" == 1 && ! -s "$FAKE/notices" ]]'
+rm -f "$XDG_RUNTIME_DIR/takumi-kbd-backlight"; echo 0 > "$TAKUMI_LEDS/tpacpi::kbd_backlight/brightness"; commands/keys/backlight restore
+check "restore with nothing chosen here leaves the light to the laptop" '[[ "$(level)" == 0 ]]'
+kbd 255 0; seen=""; for _ in 1 2 3 4; do commands/keys/backlight cycle >/dev/null; seen+="$(level) "; done
+check "a light with many levels goes round in thirds ($seen)" '[[ "$seen" == "85 170 255 0 " ]]'
+rm -rf "${TAKUMI_LEDS:?}"; rc=0; out=$(commands/keys/backlight up) || rc=$?
+check "no keyboard light: says so, 3; restore stays quiet" '[[ $rc -eq 3 && "$out" == "This keyboard has no light" ]] && commands/keys/backlight restore'
+
+# --- The touchpad ---------------------------------------------------------------------------------------------------------
+reset; mkdir -p "$HOME/.config/niri/takumi"; printf '%s\n' 'include "takumi/defaults.kdl"' > "$HOME/.config/niri/config.kdl"
+rc=0; out=$(commands/switch/touchpad) || rc=$?
+check "a home whose niri config lacks the include: says when it works, 3" '[[ $rc -eq 3 && "$out" == "The touchpad switch works after you log out and back in" ]]'
+printf '%s\n' 'include "takumi/defaults.kdl"' 'include "takumi/touchpad.kdl"' 'include "takumi/overrides.kdl"' > "$HOME/.config/niri/config.kdl"
+out=$(commands/switch/touchpad)
+check "off: niri's touchpad off in the included file, read at once, said in the Core ($out)" '[[ "$out" == "Touchpad off" ]] && grep -qE "^ +off$" "$HOME/.config/niri/takumi/touchpad.kdl" && grep -qx "niri msg action load-config-file" "$FAKE/calls" && grep -q "^touchpad|Touchpad off|" "$FAKE/notices"'
+out=$(commands/switch/touchpad)
+check "the key again: on ($out)" '[[ "$out" == "Touchpad on" ]] && ! grep -q "off" <<< "$(grep -v "^//" "$HOME/.config/niri/takumi/touchpad.kdl")"'
+out=$(commands/switch/touchpad on)
+check "on when on stays on" '[[ "$out" == "Touchpad on" ]] && ! grep -qE "^ +off$" "$HOME/.config/niri/takumi/touchpad.kdl"'
+
+# --- The microphone light -----------------------------------------------------------------------------------------------------
+reset; mic=$TAKUMI_LEDS/platform::micmute; mkdir -p "$mic"; echo 0 > "$mic/brightness"; echo "none kbd-capslock [audio-micmute]" > "$mic/trigger"
+# pactl's events: muted, then the choice of microphone changes to an unmuted one, then something else. Each waits for
+# the light to show the last change, and writes down what it saw.
+cat > "$FAKE/events" <<'EVENTS'
+led="$TAKUMI_LEDS/platform::micmute"
+seen() { i=0; while [ "$(cat "$led/brightness")" != "$1" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done; cat "$led/brightness" >> "$FAKE/seen"; }
+cat "$led/trigger" > "$FAKE/trigger-while"
+seen 0
+touch "$FAKE/mic-muted"; echo "Event 'change' on source #57"; seen 1
+rm -f "$FAKE/mic-muted"; echo "Event 'change' on server #4294967295"; seen 0
+echo "Event 'new' on sink-input #9"
+EVENTS
+rc=0; commands/power/micled || rc=$?
+check "the light follows the mute of the microphone in use ($(tr "\n" " " < "$FAKE/seen"))" '[[ "$(tr "\n" " " < "$FAKE/seen")" == "0 1 0 " ]]'
+check "taken from the kernel's trigger while it runs, given back after" '[[ "$(cat "$FAKE/trigger-while")" == none && "$(cat "$mic/trigger")" == audio-micmute ]]'
+check "when the sound server goes away it ends for systemd to start it again: 1" '[[ $rc -eq 1 ]]'
+printf '%s\n' 'touch "$FAKE/mic-muted"; echo "Event '"'"'change'"'"' on source #57"; sleep 0.5' > "$FAKE/events"; rm -f "$FAKE/mic-muted"
+chmod 444 "$mic/brightness"; commands/power/micled || true
+check "a light this user may not write goes through brightnessctl and logind" '[[ -w "$mic/brightness" ]] || grep -qx "brightnessctl -q -d platform::micmute set 1" "$FAKE/calls"'
+chmod 644 "$mic/brightness"; rm -rf "${TAKUMI_LEDS:?}"
+check "no microphone light: nothing to do" 'commands/power/micled'
+
+# --- Hibernating while an update waits ---------------------------------------------------------------------------------
+# The room in use (the default) and an older one, their boot entries, and a start an hour ago. stage <room> <when>: an
+# update staged a room then, with its entry set to be tried.
+hook=default/systemd/system-sleep/takumi-rooms
+export TAKUMI_STATE=$root/var/lib/takumi/state
+rooms() {
+  mkdir -p "$TAKUMI_STATE" "$root/efi/loader/entries" "$root/run/takumi"
+  printf 'status=good\n' > "$TAKUMI_STATE/20261101-201512"; printf 'status=good\n' > "$TAKUMI_STATE/20261108-093000"
+  : > "$root/efi/loader/entries/takumi-20261101-201512.conf"; : > "$root/efi/loader/entries/takumi-20261108-093000.conf"
+  echo '[{"id":"takumi-20261108-093000.conf","isDefault":true},{"id":"takumi-20261101-201512.conf","isDefault":false}]' > "$FAKE/entries.json"
+  echo "btime $(( $(date +%s) - 3600 ))" > "$root/proc/stat"
+}
+stage() { printf 'status=staged\nstaged=%s\n' "$2" > "$TAKUMI_STATE/$1"; : > "$root/efi/loader/entries/takumi-$1+3.conf"; }
+oneshots() { grep '^bootctl set-oneshot' "$FAKE/calls" | sed 's/^bootctl set-oneshot //' | tr '\n' '|'; }
+sleeping() { SYSTEMD_SLEEP_ACTION=$1 "$hook" "$2" "$3"; }   # <what part> <pre|post> <the kind of sleep>
+reset; rooms
+sleeping suspend pre suspend; sleeping suspend post suspend; sleeping suspend pre suspend-then-hibernate
+sleeping hibernate pre hibernate; sleeping hibernate post hibernate
+check "sleep, and hibernating with no update waiting, leave the next start as it is" '[[ -z "$(oneshots)" && ! -e "$root/run/takumi/hibernating" ]]'
+stage 20261109-101500 "$(date -u +%FT%TZ)"; sleeping hibernate pre hibernate
+check "an update waiting: before hibernating, the next start is the room in use" '[[ "$(oneshots)" == "takumi-20261108-093000.conf|" && "$(cat "$root/run/takumi/hibernating")" == 20261109-101500 ]]'
+sleeping hibernate post hibernate
+check "after waking, the update is set to be tried at the next start again" '[[ "$(oneshots)" == "takumi-20261108-093000.conf|takumi-20261109-101500.conf|" && ! -e "$root/run/takumi/hibernating" ]]'
+: > "$FAKE/calls"; sleeping suspend pre suspend-then-hibernate; sleeping suspend post suspend-then-hibernate
+check "suspend-then-hibernate while it only sleeps: nothing" '[[ -z "$(oneshots)" ]]'
+sleeping hibernate pre suspend-then-hibernate; sleeping hibernate post suspend-then-hibernate
+check "suspend-then-hibernate once it hibernates: the same as hibernating" '[[ "$(oneshots)" == "takumi-20261108-093000.conf|takumi-20261109-101500.conf|" ]]'
+: > "$FAKE/calls"; "$hook" pre hybrid-sleep; "$hook" post hybrid-sleep
+check "a hybrid sleep, told only by its name, too" '[[ "$(oneshots)" == "takumi-20261108-093000.conf|takumi-20261109-101500.conf|" ]]'
+reset; rooms; stage 20261105-120000 2026-11-05T12:00:00Z
+sleeping hibernate pre hibernate; sleeping hibernate post hibernate
+check "a room staged before this start had its one try: it is not tried again" '[[ -z "$(oneshots)" ]]'
+reset; rooms; echo '[{"id":"takumi-20261101-201512.conf","isDefault":true},{"id":"takumi-20261108-093000.conf","isDefault":false}]' > "$FAKE/entries.json"
+sleeping hibernate pre hibernate; sleeping hibernate post hibernate
+check "an older room started by hand: it wakes as itself, then the default starts as before" '[[ "$(oneshots)" == "takumi-20261108-093000.conf||" ]]'
+reset; rooms; stage 20261109-101500 "$(date -u +%FT%TZ)"; rm "$root/efi/loader/entries/takumi-20261108-093000.conf"
+out=$(sleeping hibernate pre hibernate 2>&1)
+check "a room without a boot entry is not pointed at, and the journal says why" '[[ -z "$(oneshots)" && ! -e "$root/run/takumi/hibernating" && "$out" == "takumi-rooms: room 20261108-093000 has no boot entry, so the next start stays as it was" ]]'
+reset; rooms; stage 20261109-101500 "$(date -u +%FT%TZ)"; echo "rw,relatime,subvol=/@" > "$FAKE/options"
+sleeping hibernate pre hibernate
+check "a computer without rooms: nothing" '[[ -z "$(oneshots)" ]]'
+
+# Leaving: shut down, restart and log out ask every window to close first, and wait for an app that asks
+# about unsaved work. A fake niri keeps its windows in a file; a window whose app is "keeper" never closes.
+cp "$t/bin/niri" "$t/niri.plain"
+cat > "$t/bin/niri" <<'FAKE'
+#!/bin/sh
+printf "niri %s\n" "$*" >> "$FAKE/calls"
+case "$*" in
+  "msg --json windows") cat "$FAKE/windows" ;;
+  "msg action close-window --id "*) id=$5
+    jq -c --argjson id "$id" 'map(select(.id != $id or .app_id == "keeper"))' "$FAKE/windows" > "$FAKE/windows.new" && mv "$FAKE/windows.new" "$FAKE/windows" ;;
+esac
+FAKE
+chmod +x "$t/bin/niri"
+mkdir -p "$HOME/.local/share/applications"; printf '[Desktop Entry]\nName=Text Editor\n' > "$HOME/.local/share/applications/keeper.desktop"
+export TAKUMI_CLOSE_WAIT=1
+: > "$FAKE/calls"; : > "$FAKE/notices"
+echo '[{"id":4,"app_id":"firefox","title":"News"},{"id":9,"app_id":"foot","title":"~"}]' > "$FAKE/windows"
+rc=0; takumi power off >/dev/null 2>&1 || rc=$?
+check "shutting down asks each window to close, then turns off" '[[ $rc == 0 ]] && grep -q "close-window --id 4" "$FAKE/calls" && grep -q "close-window --id 9" "$FAKE/calls" && grep -q "systemctl poweroff" "$FAKE/calls"'
+: > "$FAKE/calls"
+echo '[{"id":4,"app_id":"firefox","title":"News"},{"id":7,"app_id":"keeper","title":"notes.txt"}]' > "$FAKE/windows"
+rc=0; out=$(takumi power restart 2>&1) || rc=$?
+check "an app that stays open (unsaved work) stops the restart" '[[ $rc == 3 ]] && ! grep -q "systemctl reboot" "$FAKE/calls"'
+check "it is brought to the front and named in the Core ($out)" 'grep -q "focus-window --id 7" "$FAKE/calls" && grep -q "^power|Text Editor still open|Save or close it, then restart again|" "$FAKE/notices"'
+: > "$FAKE/calls"
+echo '[]' > "$FAKE/windows"
+rc=0; takumi power logout >/dev/null 2>&1 || rc=$?
+check "nothing open: logging out goes straight on" '[[ $rc == 0 ]] && grep -q "action quit --skip-confirmation" "$FAKE/calls" && ! grep -q close-window "$FAKE/calls"'
+cp "$t/niri.plain" "$t/bin/niri"; unset TAKUMI_CLOSE_WAIT
+
+# An update holds sleep off while it runs, with a lock that ends with it (power_hold_awake).
+: > "$FAKE/calls"
+bash -c '. "$1/lib/power.sh"; power_hold_awake "Preparing an update"; sleep 0.3' _ "$repo"; sleep 0.3
+check "an update holds sleep and idle off for as long as it runs" 'grep -q "^systemd-inhibit --what=sleep:idle --who=Takumi --why=Preparing an update --mode=block tail --pid=[0-9]* -f /dev/null$" "$FAKE/calls"'
+check "the update and its preparing both hold it" 'grep -q "power_hold_awake \"Preparing an update\"" commands/update/main && grep -q "power_hold_awake \"Preparing an update\"" commands/update/prepare'
+
+echo "   $(grep -c '^check ' "$0") power checks against a fake laptop"
+exit $status

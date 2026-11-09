@@ -1,0 +1,11 @@
+[Unit]
+Description=Takumi: say in the Core when one of your apps quits unexpectedly
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# Follows systemd-coredump's records in the journal (MESSAGE_ID=fc2e22bc6ee647b6b90729ab34a250b1) and sends
+# a notice for each crash of yours, with "See why" and "Copy details" (docs/notifications.md).
+ExecStart=/usr/bin/takumi debug crash --follow
+Restart=on-failure
+RestartSec=5

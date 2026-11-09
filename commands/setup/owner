@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Give a computer set up for someone else, or erased, to its owner at its first start (as root)
+usage: prepare | apply
+risk: 2
+sudo: yes
+hidden: yes
+ABOUT
+#
+# The first start (docs/setup.md). /var/lib/takumi/first-start marks a computer nobody owns yet: the setup disc
+# leaves it when it installs for someone else, takumi settings erase when it erases. It holds the disk's
+# password for now, root's alone. takumi-first-start.service runs, before the login screen:
+#
+#   prepare   as root: finishes an erase (/var/lib/takumi/erase: every person's account and home, saved
+#             Wi-Fi, Bluetooth pairings, fingerprints, the older rooms, the logs), then lets the greeter user,
+#             who draws the setup screen, run "apply" and turn the computer off or restart it, without a
+#             password, while the mark is there.
+#   apply     as root, through sudo from the setup screen: reads one JSON line of answers, then the owner's
+#             password, on stdin, never from the command line:
+#               {"name":"Ana López","user":"ana","host":"ana-takumi","layout":"fr","variant":"",
+#                "zone":"Europe/Paris","locale":"fr_FR.UTF-8"}
+#             makes the account, names the computer, sets its keyboard, place and language, puts the owner's
+#             password on the disk in place of the one for now with a new recovery code, and removes the mark.
+#             Answers like takumi setup install: "step <words>", "progress <0-100>", "recovery <code>",
+#             "done", or "fail <words>"; the rest goes to /run/takumi-setup/install.log, never a secret.
+set -Eeuo pipefail
+export LC_ALL=C.UTF-8
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do
+  [[ -f "$l/setup.sh" ]] && { . "$l/setup.sh"; . "$l/disk.sh"; . "$l/rooms.sh"; . "$l/security.sh"; break; }
+done
+declare -F setup_people >/dev/null && declare -F disk_change_password >/dev/null && declare -F rooms_delete >/dev/null \
+  || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+[[ "$(id -u)" == 0 ]] || { echo "takumi setup owner runs as root" >&2; exit 1; }
+etc=${TAKUMI_SETUP_ETC:-/etc}
+nm=${TAKUMI_NM_CONNECTIONS:-/etc/NetworkManager/system-connections}
+bt=${TAKUMI_BLUETOOTH_DIR:-/var/lib/bluetooth}
+look=${TAKUMI_GREETER_LOOK:-/var/lib/takumi/greeter}
+homes=${TAKUMI_HOMES:-/home}
+
+# --- prepare ---
+
+# What an erase leaves for this start: nobody is logged in yet, so nothing of theirs is in use.
+erase_now() {
+  local u d dev cur r
+  for u in $(setup_people "$etc/passwd"); do
+    userdel -r "$u" >/dev/null 2>&1 || true                    # /etc/passwd, /etc/shadow, /etc/group, /etc/gshadow, /home/<user>, /var/spool/mail/<user>
+    grep -q "^$u:" "$etc/passwd" && userdel -f "$u"            # the same, when userdel -r stopped at the home
+    rm -rf "${homes:?}/$u" "/var/spool/cron/$u" "/var/lib/AccountsService/users/$u" "/var/lib/AccountsService/icons/$u"
+    echo "erase: the account $u and its home are gone"
+  done
+  rm -rf "${nm:?}"/*                                           # /etc/NetworkManager/system-connections: saved networks
+  for d in "$bt"/*/; do
+    [[ -d "$d" ]] || continue
+    for dev in "$d"??:??:??:??:??:??; do [[ -e "$dev" ]] && rm -rf "$dev"; done   # /var/lib/bluetooth/<adapter>/<device>: pairings
+    rm -rf "${d}cache"                                         # /var/lib/bluetooth/<adapter>/cache: devices seen
+  done
+  rm -rf "${security_fprint_dir:?}"/*                          # /var/lib/fprint: fingerprints
+  security_finger_pam off || true                              # /etc/pam.d/sudo, /etc/pam.d/polkit-1: the finger's lines
+  rm -rf "${look:?}"/*                                         # /var/lib/takumi/greeter: the login screen's copy of a look
+  disk_write "$etc/hostname" takumi                            # /etc/hostname: the owner names it
+  rm -f /var/log/takumi-setup.log                              # /var/log/takumi-setup.log: names the first account
+  # Older rooms hold the old accounts in their own /etc: only the running one stays, and it is the default.
+  cur=$(rooms_current 2>/dev/null || true)
+  if [[ -n "$cur" ]] && rooms_mount_top 2>/dev/null; then
+    for r in $(rooms_names); do
+      [[ "$r" == "$cur" ]] && continue
+      rooms_delete "$r" && echo "erase: the room $r is gone"     # @rooms/<room>, its kernel and entry on the ESP, its state
+    done
+    bootctl set-default "takumi-$cur.conf" >/dev/null 2>&1 || true   # the ESP's loader settings (LoaderEntryDefault)
+    bootctl set-oneshot "" >/dev/null 2>&1 || true
+  fi
+  journalctl --rotate >/dev/null 2>&1 || true
+  journalctl --vacuum-time=1s >/dev/null 2>&1 || true          # /var/log/journal: what happened before, names included
+  rm -f "$TAKUMI_ERASE_MARK"
+  echo "erase: done; the first start asks who the computer is for"
+}
+
+if [[ "${1:-}" == prepare ]]; then
+  [[ -e "$TAKUMI_FIRST_START" ]] || exit 0
+  [[ -e "$TAKUMI_ERASE_MARK" ]] && erase_now
+  # Only while the computer has no owner: apply removes this again.
+  printf '%s\n' "# Takumi's first start (takumi setup owner): the setup screen runs as the greeter user and has nobody" \
+    "# to ask for a password yet. Removed once the computer has its owner." \
+    "greeter ALL=(root) NOPASSWD: /usr/lib/takumi/commands/setup/owner apply, /usr/bin/systemctl reboot, /usr/bin/systemctl poweroff" \
+    > "$TAKUMI_FIRST_SUDOERS.new"
+  chmod 440 "$TAKUMI_FIRST_SUDOERS.new"
+  if command -v visudo >/dev/null && ! visudo -cqf "$TAKUMI_FIRST_SUDOERS.new"; then rm -f "$TAKUMI_FIRST_SUDOERS.new"; exit 1; fi
+  mv -f "$TAKUMI_FIRST_SUDOERS.new" "$TAKUMI_FIRST_SUDOERS"   # /etc/sudoers.d/takumi-first-start
+  exit 0
+fi
+[[ "${1:-}" == apply ]] || { echo "usage: takumi setup owner prepare | apply" >&2; exit 2; }
+
+# --- apply ---
+
+log=${TAKUMI_SETUP_LOG:-/run/takumi-setup/install.log}
+mkdir -p "$(dirname "$log")"; : > "$log"; chmod 644 "$log"   # the setup screen shows its end when it fails
+exec 3>&1 >>"$log" 2>&1
+now="Getting ready"
+step() { now=$1; printf 'step %s\n' "$1" >&3; printf '\n== %s (%s)\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; }
+at()   { printf 'progress %s\n' "$1" >&3; }
+# Trying again starts over: an account this run made goes again. The disk keeps whichever password it
+# took last, and the mark says which, so the next try changes it from there.
+made=no
+fail() {
+  printf 'fail %s\n' "$1" >&3; printf 'FAILED: %s\n' "$1"; trap - ERR
+  if [[ $made == yes ]]; then userdel -r "$user" >/dev/null 2>&1 || true; fi       # /etc/passwd, /etc/shadow, /etc/group, /home/<user>
+  exit 1
+}
+trap 'fail "$now"' ERR
+
+[[ -e "$TAKUMI_FIRST_START" ]] || fail "This computer already has its owner"
+IFS= read -r answers || fail "Setup sent no answers"
+IFS= read -r password || true
+[[ ${#password} -ge 6 ]] || fail "Setup sent no password"
+get() { jq -r --arg k "$1" '.[$k] // "" | tostring' <<< "$answers"; }
+name=$(get name) user=$(get user) host=$(get host) layout=$(get layout) variant=$(get variant) zone=$(get zone) locale=$(get locale)
+name=$(printf '%s' "$name" | tr -d ':,\000-\037'); name=${name:0:64}
+[[ "$user" =~ ^[a-z][a-z0-9-]{0,30}$ ]] || fail "That account name cannot be used"
+grep -q "^$user:" "$etc/passwd" && fail "That account name is taken by the system"
+[[ "$host" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || fail "That computer name cannot be used"
+[[ "$zone" != *..* && -f "$TAKUMI_ZONEINFO/$zone" ]] || fail "That time zone is unknown"
+[[ "$layout" =~ ^[a-z]{2,8}$ && "$variant" =~ ^[A-Za-z0-9_-]*$ ]] || fail "That keyboard is unknown"
+setup_locale_ok "$locale" || fail "That language is unknown"
+temp=$(head -n 1 "$TAKUMI_FIRST_START")
+
+step "Making your account"; at 5
+useradd -m -G wheel -s /bin/bash -c "$name" "$user"                             # /etc/passwd, /etc/shadow, /etc/group, /home/<user>
+made=yes
+printf '%s:%s\n' "$user" "$password" | chpasswd                                   # /etc/shadow
+at 20
+
+step "Setting up the computer"
+disk_write "$etc/hostname" "$host"                                                # /etc/hostname
+if command -v hostnamectl >/dev/null; then hostnamectl hostname "$host" || true; fi   # the running name, before the desktop starts
+disk_write "$etc/hosts" "$(printf '127.0.0.1 localhost\n::1 localhost\n127.0.1.1 %s.localdomain %s' "$host" "$host")"   # /etc/hosts
+ln -sf "/usr/share/zoneinfo/$zone" "$etc/localtime"                                # /etc/localtime
+before=$(sed -n 's/^KEYMAP=//p' "$etc/vconsole.conf" 2>/dev/null || true)
+keymap=$(setup_console_keymap "$layout" "$variant")
+disk_write "$etc/vconsole.conf" "$(printf 'KEYMAP=%s\nXKBLAYOUT=%s\nXKBMODEL=pc105\nXKBVARIANT=%s' "$keymap" "$layout" "$variant")"   # /etc/vconsole.conf
+gen=$etc/locale.gen
+grep -q "^#\{0,1\}[[:space:]]*$locale UTF-8" "$gen" 2>/dev/null || echo "#$locale UTF-8" >> "$gen"
+sed -i "s/^#[[:space:]]*\($locale UTF-8\)/\1/" "$gen"                               # /etc/locale.gen
+locale-gen                                                                         # /usr/lib/locale/locale-archive
+disk_write "$etc/locale.conf" "LANG=$locale"                                       # /etc/locale.conf
+at 40
+
+code=""
+if rooms_encrypted; then
+  dev=$(disk_luks_device)
+  [[ -n "$dev" ]] || fail "The encrypted disk cannot be found"
+  if [[ "$keymap" != "$before" ]]; then
+    step "Teaching the disk's password prompt your keyboard"
+    mkinitcpio -P                                                                  # /boot/initramfs-*.img
+    if [[ -n "$(rooms_current)" ]]; then takumi room kernel-sync; fi               # this room's kernel and entry on the ESP
+  fi
+  at 50
+  step "Locking the disk with your password"
+  old=$(disk_recovery_tokens "$dev")
+  disk_change_password "$dev" "$temp" "$password" || fail "The disk did not take your password"   # the disk's LUKS2 header, key slot 0
+  ( umask 077; printf '%s\n' "$password" > "$TAKUMI_FIRST_START" )                 # /var/lib/takumi/first-start: what opens it now
+  at 60
+  # A new recovery code, the owner's alone: whatever opened the disk before them no longer does.
+  code=$(disk_recovery_code)
+  disk_add_code "$dev" "$password" "$code"                                         # the disk's LUKS2 header
+  while read -r id slots; do
+    [[ -n "$id" ]] || continue
+    for s in $slots; do
+      [[ "$s" == 0 ]] && continue   # never the password's own slot
+      cryptsetup luksKillSlot --batch-mode --key-file=<(printf '%s' "$password") "$dev" "$s"
+    done
+    cryptsetup token remove --token-id "$id" "$dev"
+  done <<< "$old"
+  at 80
+  # The disk asked for the password a moment ago: the first session opens without a second one.
+  disk_autologin on "$user"                                                         # /usr/share/takumi/greetd/config.toml
+fi
+at 95
+
+step "Finishing"
+rm -f "$TAKUMI_FIRST_SUDOERS" "$TAKUMI_FIRST_START"                                # /etc/sudoers.d/takumi-first-start, /var/lib/takumi/first-start
+temp="" password=""
+sync
+at 100
+[[ -z "$code" ]] || printf 'recovery %s\n' "$code" >&3
+printf 'done\n' >&3

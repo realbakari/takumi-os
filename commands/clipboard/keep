@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Keep what was just copied in the clipboard history (run by wl-paste --watch)
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# wl-clipboard tells a watcher what kind of copy it is: a password manager's copy is "sensitive" and is
+# never written down (docs/palette.md).
+case "${CLIPBOARD_STATE:-data}" in
+  sensitive) cat >/dev/null; exit 0 ;;
+esac
+command -v cliphist >/dev/null || { cat >/dev/null; exit 0; }
+exec cliphist -max-items 200 store

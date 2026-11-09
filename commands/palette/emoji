@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for emoji and symbols as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# "emoji" or ":" before words lists them (":heart", "emoji party"); any other search of three letters or
+# more brings the three best by name at the bottom ("fire" finds 🔥 under Firefox). Enter types the emoji
+# into the app you were in and copies it (docs/palette.md).
+command -v jq >/dev/null || exit 0
+here=$(dirname "$(readlink -f "$0")")
+data=""; for d in /usr/share/takumi/default/palette "$here/../../default/palette"; do [[ -f "$d/emoji.tsv" ]] && { data="$d/emoji.tsv"; break; }; done
+[[ -n "$data" ]] || exit 0
+q=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'); mode=casual
+case "$q" in
+  :*) mode=topic; q=${q#:} ;;
+  emoji|emojis|emoticon*|symbols) mode=topic; q="" ;;
+  "emoji "*) mode=topic; q=${q#emoji } ;;
+esac
+q=$(printf '%s' "$q" | sed 's/^ *//; s/ *$//')
+if [[ $mode == casual ]]; then (( ${#q} >= 3 )) || exit 0; limit=3; score=0.45; else limit=36; score=0.96; fi
+grep -v '^#' "$data" | awk -F '\t' -v q="$q" '
+  BEGIN { n = split(q, w, / +/) }
+  { hay = tolower($2 " " $3); ok = 1; for (i = 1; i <= n; i++) if (w[i] != "" && index(hay, w[i]) == 0) { ok = 0; break } if (ok) print }' |
+  head -n "$limit" |
+  jq -R -c --argjson s "$score" '
+    split("\t") as [$ch, $name, $more]
+    | {id: ("emoji:" + $ch), title: $name, subtitle: "Enter types " + $ch + " where you were, and copies it", char: $ch, kind: "Emoji",
+       keywords: ("emoji " + ($more // "")), run: ["takumi", "clipboard", "type", $ch], score: $s}'

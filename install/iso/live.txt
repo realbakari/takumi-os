@@ -1,0 +1,30 @@
+# What Takumi's setup disc runs: the setup screen and the tools that install. One package per line; a
+# bracketed architecture after a name keeps it to that one. Read by install/iso/build.sh (docs/iso.md).
+base
+linux            [x86_64]
+linux-aarch64    [aarch64]
+linux-firmware   [x86_64]
+mkinitcpio
+plymouth
+greetd
+niri
+quickshell
+mesa
+xkeyboard-config
+kbd
+tzdata
+inter-font
+noto-fonts
+noto-fonts-cjk
+ttf-jetbrains-mono
+# Installing: partitions, the encrypted disk, Btrfs, pacstrap.
+arch-install-scripts
+btrfs-progs
+dosfstools
+cryptsetup
+efibootmgr
+jq
+rsync
+sudo
+qrencode
+networkmanager

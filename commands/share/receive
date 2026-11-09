@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Keep LocalSend running for phones and computers nearby, and say in the Core what arrives, with Open
+usage: [--hidden] [file...]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# Started by takumi share, never from a row: it opens LocalSend (in the background with --hidden; on its Send page with
+# files) or hands the files to the LocalSend already open, then follows LocalSend's list of what it received for as
+# long as LocalSend runs: "Received beach.jpg · from Mira's iPhone", pressed to open it. One follower at a time;
+# a second run only hands over its files. See docs/sharing.md.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/share.sh" ]] && { . "$l/share.sh"; break; }; done
+declare -F share_launch >/dev/null || { echo "takumi: the sharing library is missing" >&2; exit 1; }
+command -v jq >/dev/null || { echo "Sharing needs jq" >&2; exit 1; }
+share_localsend >/dev/null || { echo "LocalSend is not installed. Get it with: takumi share" >&2; exit 1; }
+mkdir -p "$share_run" "$share_state"
+
+if share_running; then
+  if [[ "${1:-}" != --hidden ]]; then share_launch "$@" </dev/null >/dev/null 2>&1 || true; fi   # its window, with the files
+else
+  share_launch "$@" </dev/null >/dev/null 2>&1 &
+fi
+
+pidfile="$share_run/share-receive.pid"
+other=$(cat "$pidfile" 2>/dev/null || true)
+if [[ -n "$other" && "$other" != "$$" ]] && kill -0 "$other" 2>/dev/null; then exit 0; fi
+echo $$ > "$pidfile"
+trap 'rm -f "$pidfile"' EXIT
+trap 'exit 143' TERM INT
+
+seen="$share_state/seen"
+share_received | cut -f1 > "$seen"            # what arrived before now is not news
+for _ in $(seq 1 30); do share_running && break; sleep 1; done
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+last=$(mtime "$(share_prefs)")
+while share_running; do
+  sleep "${TAKUMI_SHARE_POLL:-2}"
+  now=$(mtime "$(share_prefs)")
+  [[ "$now" != "$last" ]] || continue
+  last=$now
+  new=$(share_received | awk -F'\t' -v seen="$seen" 'BEGIN { while ((getline l < seen) > 0) s[l] = 1 } !($1 in s)')
+  [[ -n "$new" ]] || continue
+  cut -f1 <<< "$new" >> "$seen"
+  # One notice per sender: a message says what it says; one file opens itself, several open their folder.
+  while IFS= read -r who; do
+    [[ -n "$who" ]] || continue
+    mine=$(awk -F'\t' -v w="$who" '$3 == w' <<< "$new")
+    while IFS=$'\t' read -r _ what _ text _; do
+      [[ $what == message ]] && takumi notice down "Message from $who" "$(printf '%s' "$text" | cut -c 1-90)" -1 8 >/dev/null 2>&1 || true
+    done <<< "$mine"
+    paths=$(awk -F'\t' '$2 == "file" && $5 != "" { print $5 }' <<< "$mine")
+    n=$(grep -c . <<< "$paths" || true)
+    if (( n == 1 )); then
+      takumi notice --open "$paths" down "Received $(basename "$paths")" "from $who" -1 8 >/dev/null 2>&1 || true
+    elif (( n > 1 )); then
+      takumi notice --open "$(dirname "$(head -n 1 <<< "$paths")")" down "Received $n files" "from $who" -1 8 >/dev/null 2>&1 || true
+    fi
+  done <<< "$(cut -f3 <<< "$new" | awk '!s[$0]++')"
+done

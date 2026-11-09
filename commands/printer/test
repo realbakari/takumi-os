@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print a test page, to see that a printer works
+usage: <name>
+example: takumi printer test "HP LaserJet M110w"
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/printer.sh" ]] && { . "$l/printer.sh"; break; }; done
+declare -F printer_queues >/dev/null || { echo "takumi: the printer library is missing" >&2; exit 1; }
+
+# CUPS's own test page when it is installed, else a page of plain words. The Core says when it has printed
+# (takumi printer watch). Exit status: 0 sent · 5 no such printer · 1 anything else.
+name=${1:-}
+[[ -n "$name" ]] || { echo "usage: takumi printer test <name>" >&2; exit 2; }
+command -v lp >/dev/null || { echo "Printing needs CUPS (the cups package)"; exit 1; }
+q=$(printer_find "$name")
+[[ -n "$q" ]] || { echo "No printer called $name"; exit 5; }
+IFS="$printer_sep" read -r _ desc state alerts _ _ msg <<< "$(printer_queues | awk -F "$printer_sep" -v q="$q" '$1 == q { print; exit }')"
+label=$(printer_label "$q" "$desc")
+if [[ -r "$printer_testpage" ]]; then out=$(LC_ALL=C lp -d "$q" -t "Test page" "$printer_testpage" 2>&1)
+else out=$(printf 'Test page\n\nThis page comes from Takumi. If you can read it, %s prints.\n' "$label" | LC_ALL=C lp -d "$q" -t "Test page" 2>&1)
+fi || { takumi notice warn "Could not send a test page" "$label" -1 >/dev/null 2>&1 || true; echo "Could not send a test page to $label: $(printer_said "$out")"; exit 1; }
+words=$(printer_status "$q" "$state" "$alerts" "$msg")
+detail="the Core says when it has printed"
+case "$words" in Ready*|Printing*) ;; *) detail="$label says: $(printf '%s' "$words" | tr '[:upper:]' '[:lower:]')" ;; esac
+takumi notice printer "Test page sent to $label" "$detail" -1 >/dev/null 2>&1 || true
+echo "Test page sent to $label"

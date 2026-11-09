@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: In a VM on a Mac, draw a dense screen sharp at twice the scale
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# QEMU on a Mac gives the VM its window in the Mac's pixels, twice its size in points on a Retina screen.
+# Drawn at scale 1 everything was half as big as on the Mac; drawn at half the pixels and stretched, it
+# was blurred. So, running inside cage (the login screen, and the session in a VM), this draws every
+# pixel at twice the scale, as the Mac does, and keeps it so as the window changes (full screen, resized).
+# The mode is never changed: QEMU fits a window to the VM's pixels. --once looks once. Only in a VM
+# (docs/vm.md).
+drm=${TAKUMI_DRM:-/sys/class/drm}
+
+# vm_display_plan: "<output> <scale>" for each screen: 2 when it is denser than 192 dpi (its EDID's width in
+# millimetres), else 1.
+vm_display_plan() {
+  local c mode w b mm
+  for c in "$drm"/card*-*; do
+    [[ "$(cat "$c/status" 2>/dev/null)" == connected ]] || continue
+    read -r mode < "$c/modes" 2>/dev/null || continue
+    w=${mode%%x*}
+    b=$(od -An -tu1 -j66 -N3 "$c/edid" 2>/dev/null || true)
+    # shellcheck disable=SC2086
+    set -- $b
+    mm=0; (( $# == 3 )) && mm=$(( $1 + ($3 >> 4) * 256 ))
+    if (( mm > 0 )) && (( w * 254 / (mm * 10) >= 192 )); then printf '%s 2\n' "${c##*/card[0-9]-}"
+    else printf '%s 1\n' "${c##*/card[0-9]-}"; fi
+  done
+}
+[[ "${1:-}" == --plan ]] && { vm_display_plan; exit 0; }   # for test/display
+[[ -f /etc/takumi/vm ]] || exit 0
+command -v wlr-randr >/dev/null || exit 0
+
+# The scale cage shows an output at now.
+now() { wlr-randr 2>/dev/null | awk -v o="$1" '$1 == o { on = 1; next } /^[^ ]/ { on = 0 } on && /^ *Scale:/ { print $2 + 0; exit }'; }
+apply() {
+  local out scale
+  while read -r out scale; do
+    [[ "$(now "$out")" == "$scale" ]] || wlr-randr --output "$out" --scale "$scale" >/dev/null 2>&1 || true
+  done < <(vm_display_plan)
+}
+apply
+[[ "${1:-}" == --once ]] && exit 0
+while sleep 1.5; do
+  wlr-randr >/dev/null 2>&1 || exit 0   # cage has gone
+  apply
+done

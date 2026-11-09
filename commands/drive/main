@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: The USB drives and memory cards plugged in: how big, how full, and where each one is open
+usage: [--json]
+example: takumi drive
+risk: 0
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/drive.sh" ]] && { . "$l/drive.sh"; break; }; done
+declare -F drive_volumes >/dev/null || { echo "takumi: the drive library is missing" >&2; exit 1; }
+
+# --json prints one object per volume: name, short, device, drive (the whole drive's device), label, type,
+# state (open, closed, locked, blank), mount, size and free (bytes; free only when open).
+json=no
+for a in "$@"; do case "$a" in --json) json=yes ;; *) echo "usage: takumi drive [--json]" >&2; exit 2 ;; esac; done
+command -v udisksctl >/dev/null || { echo "Drives need udisks (the udisks2 package)" >&2; exit 1; }
+vols=$(drive_volumes | awk -F "$drive_sep" '$12 == "yes" && $6 != "unlocked"')
+if [[ -z "$vols" ]]; then [[ $json == yes ]] || echo "No USB drive or memory card is plugged in"; exit 0; fi
+while IFS= read -r v; do
+  [[ -n "$v" ]] || continue
+  drive_read "$v"
+  free=""; [[ $d_state == open ]] && free=$(drive_free "$d_mount")
+  if [[ $json == yes ]]; then
+    N=$d_name H=$d_short D=$d_dev W=$d_whole L=$d_label T=$d_type S=$d_state M=$d_mount Z=$d_size F=$free jq -cn \
+      '{name: env.N, short: env.H, device: env.D, drive: env.W, label: env.L, type: env.T, state: env.S, mount: env.M,
+        size: (env.Z | tonumber? // 0), free: (if env.F == "" then null else (env.F | tonumber) end)}'
+    continue
+  fi
+  case "$d_state" in
+    open) how="open"; [[ -z "$free" ]] || how="$(drive_human "$free") free"; where=$d_mount ;;
+    closed) how="not open"; where="takumi drive open $d_dev" ;;
+    locked) how="locked"; where="takumi drive open $d_dev asks for its password" ;;
+    *) how="nothing Takumi can read"; where="takumi drive format $d_dev exfat erases it for use" ;;
+  esac
+  printf '%-28s %-24s %s\n' "$d_name" "$how" "$where"
+done <<< "$vols"
+exit 0

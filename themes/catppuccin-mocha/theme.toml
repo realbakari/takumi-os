@@ -1,0 +1,34 @@
+# Catppuccin Mocha: soothing pastels on a deep blue-grey
+# Colours after Catppuccin (https://catppuccin.com); phases by Takumi.
+
+[meta]
+name = "catppuccin-mocha"
+mode = "dark"
+title = "Catppuccin Mocha"
+about = "soothing pastels on a deep blue-grey"
+credit = "Catppuccin (https://catppuccin.com)"
+
+[palette]
+accent     = "#cba6f7"
+background = "#1e1e2e"
+surface    = "#262637"
+foreground = "#cdd6f4"
+muted      = "#6c7086"
+red        = "#f38ba8"
+yellow     = "#f9e2af"
+green      = "#a6e3a1"
+cyan       = "#94e2d5"
+blue       = "#89b4fa"
+magenta    = "#f5c2e7"
+
+[phase.dawn]
+accent     = "#fab387"
+
+[phase.dusk]
+accent     = "#eba0ac"
+
+[phase.night]
+accent     = "#99a1d9"
+background = "#14141e"
+surface    = "#1b1b26"
+foreground = "#b8c0dc"

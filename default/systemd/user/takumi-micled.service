@@ -1,0 +1,13 @@
+[Unit]
+Description=Takumi: the microphone light on the keyboard follows the microphone's mute (docs/laptop-keys.md)
+PartOf=graphical-session.target
+After=graphical-session.target pipewire-pulse.service wireplumber.service
+# Only where there is such a light.
+ConditionPathExistsGlob=/sys/class/leds/*::micmute
+
+[Service]
+ExecStart=/usr/bin/takumi power micled
+# The follower alone is told to stop, so it gives the light back to the kernel before the rest goes.
+KillMode=mixed
+Restart=always
+RestartSec=2

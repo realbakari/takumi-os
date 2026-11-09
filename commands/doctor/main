@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Check Wi-Fi, sound, space, updates, services, the clock and the battery; fix what is safe and say what was done
+risk: 0
+title: Check this computer
+words: doctor something wrong fix broken diagnose check slow help problem
+glyph: pulse
+ABOUT
+set -euo pipefail
+# A conversation in the Core (or plain lines at a terminal): one note per check, then one sentence. Safe
+# fixes happen by themselves (Wi-Fi switched back on, the sound service restarted, the clock set to
+# follow the network, the package cache trimmed when space is short); anything else is said in words,
+# with where to go next. The report is kept in ~/.local/state/takumi/doctor.txt (docs/doctor.md).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; . "$l/power.sh"; break; }; done
+declare -F core_note >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+report="$HOME/.local/state/takumi/doctor.txt"; mkdir -p "${report%/*}"
+fixed=() needs=() lines=()
+ok()   { lines+=("ok    $1"); core_note "$1"; }
+fix()  { fixed+=("$1"); lines+=("fixed $1"); core_note "$1"; }
+need() { needs+=("$1"); lines+=("needs $1"); core_note "$1"; }
+
+# The internet.
+if command -v nmcli >/dev/null; then
+  conn=$(LC_ALL=C nmcli -t -f CONNECTIVITY general 2>/dev/null || echo unknown)
+  if [[ "$conn" != full && "$(LC_ALL=C nmcli radio wifi 2>/dev/null || true)" == disabled ]]; then
+    nmcli radio wifi on >/dev/null 2>&1 || true; sleep "${TAKUMI_DOCTOR_WAIT:-4}"
+    conn=$(LC_ALL=C nmcli -t -f CONNECTIVITY general 2>/dev/null || echo unknown)
+    fix "Wi-Fi was off; it is on again"
+  fi
+  case "$conn" in
+    full) ok "Online" ;;
+    portal) need "A sign-in page is in the way: Wi-Fi in Quick settings opens it" ;;
+    limited|none) need "Connected, but the internet does not answer: try another network, or restart the router" ;;
+    *) need "Not connected to a network: choose one in Quick settings, Wi-Fi" ;;
+  esac
+fi
+
+# Sound: an output to play on.
+if command -v wpctl >/dev/null; then
+  if ! wpctl inspect @DEFAULT_AUDIO_SINK@ >/dev/null 2>&1; then
+    systemctl --user restart wireplumber pipewire pipewire-pulse >/dev/null 2>&1 || true; sleep "${TAKUMI_DOCTOR_WAIT:-2}"
+    if wpctl inspect @DEFAULT_AUDIO_SINK@ >/dev/null 2>&1; then fix "Sound had stopped; it is running again"
+    else need "No sound output: plug in speakers or headphones, or choose one with \"sound\""; fi
+  elif [[ "$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null || true)" == *MUTED* ]]; then
+    need "Sound works but is muted: the speaker mark in the Core, right button"
+  else ok "Sound works"; fi
+fi
+
+# Space on the disk.
+free_gib() { df -Pk "$1" 2>/dev/null | awk 'NR == 2 { printf "%d", $4 / 1048576 }'; }
+free=$(free_gib /); free=${free:-0}
+if (( free < 5 )); then
+  if core_sudo "Making room on the disk needs your password" pacman -Sc --noconfirm >/dev/null 2>&1; then
+    after=$(free_gib /); fix "Space was short; old downloaded packages were removed (${after:-$free} GB free now)"
+    free=${after:-$free}
+  fi
+  if (( free < 5 )); then
+    need "Only $free GB free: \"Free up space\" removes old downloads, older systems and old logs, and empties the Trash if you say so"
+  fi
+else ok "$free GB free"; fi
+
+# The last update.
+log=${TAKUMI_PACMAN_LOG:-/var/log/pacman.log}
+if [[ -r "$log" ]]; then
+  last=$(grep -E 'starting full system upgrade' "$log" | tail -n 1 | sed -E 's/^\[([0-9-]+)T?.*/\1/' || true)
+  if [[ -n "$last" ]]; then
+    # Calendar days, midnight to midnight: "yesterday" is yesterday whatever the hour.
+    then_s=$(date -d "$last 00:00:00" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S" "$last 00:00:00" +%s 2>/dev/null || echo 0)
+    today=$(date +%Y-%m-%d)
+    now_s=$(date -d "$today 00:00:00" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S" "$today 00:00:00" +%s)
+    days=$(( (now_s - then_s + 43200) / 86400 ))
+    if (( then_s > 0 && days > 30 )); then need "Last updated $days days ago: \"update\" brings it up to date, in a new room"
+    elif (( then_s > 0 && days == 0 )); then ok "Updated today"
+    elif (( then_s > 0 && days == 1 )); then ok "Updated yesterday"
+    elif (( then_s > 0 )); then ok "Updated $days days ago"; fi
+  fi
+fi
+
+# Services that failed.
+failed=$( { systemctl --failed --plain --no-legend 2>/dev/null; systemctl --user --failed --plain --no-legend 2>/dev/null; } | awk '{print $1}' | sed 's/\.service$//' | sort -u | paste -sd ' ' - || true)
+if [[ -n "$failed" ]]; then
+  need "These stopped working: $failed (journalctl -u <name> says why)"
+else ok "Every service is running"; fi
+
+# The clock.
+if command -v timedatectl >/dev/null; then
+  if [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo yes)" != yes ]]; then
+    if core_sudo "Setting the clock from the network needs your password" timedatectl set-ntp true >/dev/null 2>&1; then fix "The clock now follows the network"
+    else need "The clock is not set from the network"; fi
+  else ok "The clock is right"; fi
+fi
+
+# The battery's health.
+for b in "${TAKUMI_POWER_SUPPLY:-/sys/class/power_supply}"/BAT*; do
+  [[ -r "$b/energy_full" && -r "$b/energy_full_design" ]] || [[ -r "$b/charge_full" && -r "$b/charge_full_design" ]] || continue
+  full=$(cat "$b/energy_full" 2>/dev/null || cat "$b/charge_full"); design=$(cat "$b/energy_full_design" 2>/dev/null || cat "$b/charge_full_design")
+  (( design > 0 )) || continue
+  health=$(( full * 100 / design ))
+  if (( health < 70 )); then need "The battery holds $health% of what it did when new: it lasts less, and can be replaced"
+  else ok "The battery holds $health% of what it did when new"; fi
+  break
+done
+
+# This computer's fixes, and firmware the kernel looked for and did not find (docs/hardware.md).
+if [[ -f "$l/hardware.sh" ]] && . "$l/hardware.sh" && declare -F hw_doctor >/dev/null; then
+  while IFS=$'\t' read -r kind text; do case "$kind" in ok) ok "$text" ;; needs) need "$text" ;; esac; done < <(hw_doctor 2>/dev/null || true)
+fi
+
+{ printf 'takumi doctor, %s\n' "$(date '+%Y-%m-%d %H:%M')"; printf '%s\n' "${lines[@]}"; } > "$report"
+summary="All fine"
+(( ${#fixed[@]} )) && summary="Fixed ${#fixed[@]}"
+if (( ${#needs[@]} )); then
+  first=${needs[0]}
+  if (( ${#fixed[@]} )); then summary="$summary; ${#needs[@]} need you: $first"; else summary="${#needs[@]} need you: $first"; fi
+elif (( ${#fixed[@]} )); then summary="$summary; the rest is fine"
+else summary="All fine: online, sound, space, updates, services and the clock"; fi
+core_done "$summary"
+exit 0

@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+# Contract checks for apps (lib/apps.sh, commands/app/*, commands/install/windows and gaming, the Palette's
+# defaults rows and the Shelf's rows) against fake xdg-mime, gio, flatpak, pacman, podman, FreeRDP and curl:
+# which apps can be which default and what choosing one writes, web apps (the Exec line, the icon, the
+# name, the browser), the Shelf's rows, removing each kind of app, Windows set up and opened, Steam with the
+# drivers for each graphics chip, and that the Windows password reaches no command's arguments.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+command -v jq >/dev/null || { echo "   (jq not installed; app checks skipped)"; exit 0; }
+repo=$PWD; status=0
+t=$(mktemp -d "${TMPDIR:-/tmp}/takumi-apps.XXXXXX"); trap 'rm -rf "${t:?}"' EXIT
+unset XDG_DATA_HOME XDG_CONFIG_HOME XDG_DATA_DIRS TAKUMI_CORE
+export FAKE=$t/state BIN=$t/bin HOME=$t/home XDG_RUNTIME_DIR=$t/run SHELL=/bin/bash
+export SYS=$t/sys FLAT=$t/flatpak/exports/share/applications
+mkdir -p "$BIN" "$FAKE/web" "$FAKE/avail" "$FAKE/flathub" "$HOME" "$XDG_RUNTIME_DIR" "$SYS" "$FLAT"
+export TAKUMI_APPS_DIRS="$HOME/.local/share/applications:$FLAT:$SYS"
+# Only the fakes and these basic tools: a real podman, curl, flatpak or gio on this machine is never reached.
+mkdir -p "$t/tools"
+for x in bash cat awk sed grep tr cut sort paste head tail cksum mktemp readlink dirname basename id cp mv rm mkdir chmod touch ls seq jq tee wc date env; do
+  p=$(command -v "$x" 2>/dev/null || true); [[ -z "$p" ]] || ln -s "$p" "$t/tools/$x"
+done
+export PATH="$BIN:$repo/bin:$t/tools"
+export TAKUMI_COMMANDS="$t/commands:$repo/commands"; mkdir -p "$t/commands/notice"   # fake takumi commands go in front of the real ones
+
+fake() { cat > "$BIN/$1"; chmod +x "$BIN/$1"; }
+fake xdg-mime <<'FAKE'
+#!/bin/sh
+# Keeps ~/.config/mimeapps.list the way xdg-mime does for a desktop it does not know.
+printf 'xdg-mime %s\n' "$*" >> "$FAKE/calls"
+f="$HOME/.config/mimeapps.list"
+case "$1" in
+  query) awk -F= -v t="$3" '/^\[/ { g = ($0 == "[Default Applications]"); next } g && $1 == t { print $2; exit }' "$f" 2>/dev/null ;;
+  default) app=$2; shift 2; mkdir -p "$HOME/.config"; [ -f "$f" ] || printf '[Default Applications]\n' > "$f"
+    for ty in "$@"; do grep -v "^$ty=" "$f" > "$f.new"; mv "$f.new" "$f"; printf '%s=%s\n' "$ty" "$app" >> "$f"; done ;;
+esac
+FAKE
+printf '#!/bin/sh\nprintf "xdg-settings %%s\\n" "$*" >> "$FAKE/calls"\n' | fake xdg-settings
+for b in gio xdg-open xdg-terminal-exec foot usermod chattr; do printf '#!/bin/sh\nprintf "%s %%s\\n" "$*" >> "$FAKE/calls"\n' "$b" | fake "$b"; done
+printf '#!/bin/sh\n:\n' | fake sleep
+printf '#!/bin/sh\n[ "$1" = -m ] && cat "$FAKE/arch" || echo Linux\n' | fake uname
+printf '#!/bin/sh\nprintf "              total\\nMem:  %%s  100  100\\n" "$(cat "$FAKE/mem")"\n' | fake free
+printf '#!/bin/sh\ncat "$FAKE/cpus"\n' | fake nproc
+printf '#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/x 999999999 1 %%s 1%%%% /home\\n" "$(cat "$FAKE/space")"\n' | fake df
+printf '#!/bin/sh\n[ -f "$FAKE/subids" ] && echo "0: $1 100000 65536"\n' | fake getsubids
+printf '#!/bin/sh\ncat "$FAKE/lspci"\n' | fake lspci
+printf '#!/bin/sh\ncat "$FAKE/repos"\n' | fake pacman-conf
+printf '#!/bin/sh\n[ "$1 $2" = "group gamemode" ] && [ -f "$FAKE/gamemode" ] && echo "gamemode:x:960:"\n' | fake getent
+fake sudo <<'FAKE'
+#!/bin/sh
+printf 'sudo %s\n' "$*" >> "$FAKE/calls"
+[ "$1" = -A ] && shift
+case "$1" in pacman | usermod) exec "$@" ;; tee) cat > /dev/null ;; esac
+exit 0
+FAKE
+fake pacman <<'FAKE'
+#!/bin/sh
+# Installed packages in $FAKE/installed, those asked for in $FAKE/explicit, owners in $FAKE/owners. -S puts
+# a package's programs from $FAKE/avail/<package>/ into PATH.
+printf 'pacman %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  -Q) shift; for p in "$@"; do grep -qx "$p" "$FAKE/installed" 2>/dev/null || exit 1; done ;;
+  -Qqe) cat "$FAKE/explicit" ;;
+  -Qo) shift; for f in "$@"; do p=$(awk -v b="${f##*/}" '$1 == b { print $2 }' "$FAKE/owners")
+         if [ -n "$p" ]; then echo "$f is owned by $p 1.0-1"; else echo "error: No package owns $f" >&2; fi; done ;;
+  -Qqo) awk -v b="${2##*/}" '$1 == b { print $2 }' "$FAKE/owners" ;;
+  -S | -Syu) shift; for p in "$@"; do case "$p" in -*) ;; *) echo "$p" >> "$FAKE/installed"; [ -d "$FAKE/avail/$p" ] && cp "$FAKE/avail/$p"/* "$BIN/" ;; esac; done ;;
+  -Rs) if [ -f "$FAKE/rs-fails" ]; then echo "error: failed to prepare transaction (could not satisfy dependencies)"; echo ":: removing $3 breaks dependency '$3' required by $3-extras"; exit 1; fi ;;
+esac
+exit 0
+FAKE
+fake flatpak <<'FAKE'
+#!/bin/sh
+printf 'flatpak %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  list) cat "$FAKE/flatpaks" 2>/dev/null ;;
+  install) for a in "$@"; do id=$a; done
+    [ -f "$FAKE/flathub/$id.desktop" ] && cp "$FAKE/flathub/$id.desktop" "$FLAT/"; printf '%s\t%s\tuser\n' "$id" "$id" >> "$FAKE/flatpaks" ;;
+esac
+exit 0
+FAKE
+fake curl <<'FAKE'
+#!/bin/sh
+# Serves $FAKE/web/<the address, every character but letters and digits an underscore>; <that>.redirect is
+# where the address ends up.
+out="" fmt="" url=""
+while [ $# -gt 0 ]; do
+  case "$1" in -o) out=$2; shift 2 ;; -w) fmt=$2; shift 2 ;; --max-time | --max-filesize) shift 2 ;; -*) shift ;; *) url=$1; shift ;; esac
+done
+printf 'curl %s\n' "$url" >> "$FAKE/calls"
+f="$FAKE/web/$(printf '%s' "$url" | tr -c 'A-Za-z0-9' '_')"
+[ -f "$f" ] || exit 22
+final=$url; [ -f "$f.redirect" ] && final=$(cat "$f.redirect")
+if [ -n "$out" ]; then cat "$f" > "$out"; else cat "$f"; fi
+[ -z "$fmt" ] || printf '%s' "$final"
+FAKE
+mkdir -p "$FAKE/avail/podman" "$FAKE/avail/freerdp"
+cat > "$FAKE/avail/podman/podman" <<'FAKE'
+#!/bin/sh
+printf 'podman %s\n' "$*" >> "$FAKE/calls"
+case "$1" in
+  container) case "$2" in exists) [ -f "$FAKE/exists" ]; exit ;; inspect) if [ -f "$FAKE/running" ]; then echo true; else echo false; fi ;; esac ;;
+  create) touch "$FAKE/exists" ;;
+  start) touch "$FAKE/running" ;;
+  stop) rm -f "$FAKE/running" ;;
+  rm) rm -f "$FAKE/exists" "$FAKE/running" ;;
+  unshare) shift; exec "$@" ;;
+  logs) n=$(( $(cat "$FAKE/logs-n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$FAKE/logs-n"
+        if [ "$n" -le 2 ]; then printf '\342\235\257 Downloading Windows 11...\n  4096K ........ 42.5%% 21M 3m\n'; else printf '\342\235\257 Booting Windows using QEMU v9\n'; fi ;;
+esac
+exit 0
+FAKE
+cat > "$FAKE/avail/freerdp/xfreerdp3" <<'FAKE'
+#!/bin/sh
+# Arguments to $FAKE/calls, what came on stdin to $FAKE/rdp-in; +auth-only succeeds from the call
+# numbered in $FAKE/rdp-ok (1 when missing), never when it holds 0.
+printf 'xfreerdp3 %s\n' "$*" >> "$FAKE/calls"
+in=$(cat); printf '%s\n' "$in" >> "$FAKE/rdp-in"
+case "$in" in
+  *+auth-only*) n=$(( $(cat "$FAKE/rdp-n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$FAKE/rdp-n"
+    ok=$(cat "$FAKE/rdp-ok" 2>/dev/null || echo 1); [ "$ok" -ne 0 ] && [ "$n" -ge "$ok" ] ;;
+  *) echo session >> "$FAKE/sessions" ;;
+esac
+FAKE
+chmod +x "$FAKE/avail"/*/*
+printf '#!/bin/sh\nprintf "%%s|" "$@" >> "$FAKE/notices"; echo >> "$FAKE/notices"\n' > "$t/commands/notice/main"; chmod +x "$t/commands/notice/main"
+
+entry() {  # <dir> <file> <key=value...>: a desktop entry
+  local d=$1 f=$2; shift 2
+  printf '%s\n' "[Desktop Entry]" "Type=Application" "$@" > "$d/$f"
+}
+entry "$SYS" firefox.desktop Name=Firefox "Exec=/usr/lib/firefox/firefox %u" "Categories=Network;WebBrowser;" \
+  "MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;application/pdf;"
+printf '%s\n' "[Desktop Action new-window]" "Name=New Window" "Exec=/usr/lib/firefox/firefox --new-window %u" >> "$SYS/firefox.desktop"
+entry "$SYS" chromium.desktop Name=Chromium "Exec=/usr/bin/chromium %U" "Categories=Network;WebBrowser;" \
+  "MimeType=application/pdf;image/png;image/jpeg;text/html;x-scheme-handler/http;x-scheme-handler/https;"
+entry "$SYS" org.gnome.Nautilus.desktop Name=Files "Exec=nautilus --new-window %U" "Categories=GNOME;GTK;Utility;Core;FileManager;" "MimeType=inode/directory;"
+entry "$SYS" foot.desktop Name=Foot Exec=foot "Categories=System;TerminalEmulator;"
+entry "$SYS" foot-server.desktop Name="Foot Server" "Exec=foot --server" NoDisplay=true "Categories=System;TerminalEmulator;"
+entry "$SYS" kitty.desktop Name=kitty Exec=kitty "Categories=System;TerminalEmulator;"
+entry "$SYS" org.gnome.TextEditor.desktop "Name=Text Editor" "Exec=gnome-text-editor %U" "Categories=GNOME;GTK;Utility;TextEditor;" "MimeType=text/plain;"
+entry "$SYS" code.desktop "Name=Visual Studio Code" "Exec=code %F" "Categories=TextEditor;Development;IDE;" "MimeType=text/plain;inode/directory;application/json;"
+entry "$SYS" org.gnome.Papers.desktop Name=Papers "Exec=papers %U" "Categories=GNOME;GTK;Graphics;Viewer;" "MimeType=application/pdf;"
+entry "$SYS" org.gnome.Loupe.desktop "Name=Image Viewer" "Exec=loupe %U" "Categories=GNOME;GTK;Graphics;Viewer;" "MimeType=image/png;image/jpeg;image/webp;image/heic;"
+entry "$SYS" io.github.celluloid_player.Celluloid.desktop Name=Celluloid "Exec=celluloid %U" "Categories=GTK;AudioVideo;Video;Player;" "MimeType=video/mp4;video/webm;audio/mpeg;audio/flac;"
+entry "$SYS" gimp.desktop "Name=GNU Image Manipulation Program" "Exec=gimp %U" "Categories=Graphics;2DGraphics;RasterGraphics;GTK;" "MimeType=image/png;image/jpeg;application/pdf;"
+entry "$SYS" libreoffice-draw.desktop "Name=LibreOffice Draw" "Exec=libreoffice --draw %U" "Categories=Office;FlowChart;Graphics;2DGraphics;VectorGraphics;" "MimeType=application/pdf;"
+entry "$SYS" org.kde.kdenlive.desktop Name=Kdenlive "Exec=kdenlive %F" "Categories=Qt;KDE;AudioVideo;AudioVideoEditing;"
+entry "$SYS" avahi-discover.desktop "Name=Avahi Zeroconf Browser" Exec=avahi-discover "Categories=System;"
+entry "$FLAT" com.spotify.Client.desktop Name=Spotify "Exec=/usr/bin/flatpak run --branch=stable --command=spotify com.spotify.Client @@u %U @@" "Categories=Audio;Music;"
+entry "$FAKE/flathub" org.chromium.Chromium.desktop Name=Chromium "Exec=/usr/bin/flatpak run org.chromium.Chromium @@u %U @@" "Categories=Network;WebBrowser;" \
+  "MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;"
+printf '%s\n' "firefox.desktop firefox" "chromium.desktop chromium" "gimp.desktop gimp" "org.kde.kdenlive.desktop kdenlive" "avahi-discover.desktop avahi" \
+  "org.gnome.Nautilus.desktop nautilus" "foot.desktop foot" > "$FAKE/owners"
+
+reset() {
+  rm -rf "${FAKE:?}"/calls "$HOME"/.local "$FAKE"/notices "$FAKE"/exists "$FAKE"/running "$FAKE"/logs-n "$FAKE"/rdp-* "$FAKE"/sessions "$FAKE"/rs-fails "$FAKE"/gamemode "$HOME"/.config
+  mkdir -p "$HOME/.config"; cp config/mimeapps.list "$HOME/.config/mimeapps.list"   # Takumi's own defaults, as a new home has them
+  printf '%s\n' firefox chromium gimp kdenlive avahi nautilus foot > "$FAKE/installed"
+  printf '%s\n' firefox gimp kdenlive nautilus foot > "$FAKE/explicit"
+  printf 'com.spotify.Client\tSpotify\tuser\n' > "$FAKE/flatpaks"
+  echo x86_64 > "$FAKE/arch"; echo 15870 > "$FAKE/mem"; echo 8 > "$FAKE/cpus"; echo 200000000 > "$FAKE/space"; touch "$FAKE/subids"
+  printf 'core\nextra\n' > "$FAKE/repos"; : > "$FAKE/lspci"
+  rm -f "$BIN/podman" "$BIN/xfreerdp3"
+  : > "$FAKE/calls"; : > "$FAKE/notices"
+}
+check() { if eval "$2"; then :; else echo "apps: $1"; status=1; fi; }
+lib() { bash -c '. lib/apps.sh; "$@"' _ "$@"; }
+names() { cut -f2 | tr '\n' '|'; }
+last() { local out rc=0; out=$("$@" 2>&1) || rc=$?; printf '%s|%s' "$rc" "$(tail -n 1 <<< "$out")"; }
+talk() { local answers=$1; shift; printf '%b' "$answers" | TAKUMI_CORE=1 "$@" 2>&1; echo "rc=$?"; }
+
+reset
+# Which apps can be which default.
+check "browsers: the web browsers, by name" '[[ "$(lib apps_candidates browser | names)" == "Chromium|Firefox|" ]]'
+check "terminals: the terminal emulators a person can see" '[[ "$(lib apps_candidates terminal | names)" == "Foot|kitty|" ]]'
+check "PDFs: viewers and browsers, not a drawing app" '[[ "$(lib apps_candidates pdf | names)" == "Chromium|Firefox|Papers|" ]]'
+check "images: image apps, not a browser" '[[ "$(lib apps_candidates images | names)" == "GNU Image Manipulation Program|Image Viewer|" ]]'
+check "editors and files" '[[ "$(lib apps_candidates editor | names)" == "Text Editor|Visual Studio Code|" && "$(lib apps_candidates files | names)" == "Files|" ]]'
+check "a name comes from the main entry, not an action" '[[ "$(lib apps_name firefox.desktop)" == Firefox && "$(lib apps_name firefox)" == Firefox ]]'
+list=$(commands/app/default)
+check "the defaults a new home has (config/mimeapps.list)" '[[ "$(tr -s " " <<< "$list" | tr "\n" "|")" == "Browser Firefox (firefox.desktop)|Mail none chosen|Terminal Foot (foot.desktop)|Editor Text Editor (org.gnome.TextEditor.desktop)|PDFs Papers (org.gnome.Papers.desktop)|Images Image Viewer (org.gnome.Loupe.desktop)|Video Celluloid (io.github.celluloid_player.Celluloid.desktop)|Music Celluloid (io.github.celluloid_player.Celluloid.desktop)|Files Files (org.gnome.Nautilus.desktop)|" ]]'
+check "the defaults as JSON" '[[ "$(commands/app/default --json | jq -sc "map(.kind + \"=\" + .id) | .[0:2]")" == "[\"browser=firefox.desktop\",\"mail=\"]" ]]'
+check "a kind lists its apps, the one in use marked" '[[ "$(commands/app/default browser | tr -s " " | tr "\n" "|")" == " Chromium chromium.desktop| * Firefox firefox.desktop|" ]]'
+res=$(last commands/app/default browser chromium)
+check "choosing a browser by name ($res)" '[[ "$res" == "0|Browser: Chromium" ]]'
+check "the browser goes through xdg-settings and xdg-mime, for every web type it opens" 'grep -qx "xdg-settings set default-web-browser chromium.desktop" "$FAKE/calls" && grep -qx "xdg-mime default chromium.desktop x-scheme-handler/https x-scheme-handler/http text/html" "$FAKE/calls"'
+check "the notice says it" 'grep -q "^globe|Browser: Chromium|web links and pages open there now|" "$FAKE/notices"'
+check "the choice is what the Core shows next" '[[ "$(commands/app/default browser | grep "^ \*")" == *Chromium* ]]'
+res=$(last commands/app/default images "image viewer")
+check "pictures: only the types the app opens ($res)" '[[ "$res" == "0|Images: Image Viewer" ]] && grep -qx "xdg-mime default org.gnome.Loupe.desktop image/png image/jpeg image/webp image/heic" "$FAKE/calls"'
+res=$(last commands/app/default editor e)
+check "two apps match: 4, and their names ($res)" '[[ "$res" == "4|More than one app matches e: Text Editor, Visual Studio Code. Say which." ]]'
+res=$(last commands/app/default browser opera)
+check "no such app: 4 ($res)" '[[ "$res" == "4|No app called opera can open web links and pages" ]]'
+res=$(last commands/app/default spreadsheets calc)
+check "not a kind: 2" '[[ "${res%%|*}" == 2 ]]'
+: > "$FAKE/calls"; commands/app/open browser
+check "Super+B opens the browser chosen" 'grep -qx "gio launch $SYS/chromium.desktop" "$FAKE/calls"'
+commands/app/open files
+check "Super+E opens the file manager" 'grep -qx "gio launch $SYS/org.gnome.Nautilus.desktop" "$FAKE/calls"'
+: > "$FAKE/calls"; commands/app/open terminal
+check "Super+Return: Takumi's terminal while none is chosen" 'grep -qx "foot " "$FAKE/calls"'
+res=$(last commands/app/default terminal kitty)
+check "choosing a terminal writes xdg-terminals.list ($res)" '[[ "$res" == "0|Terminal: kitty" && "$(grep -v "^#" "$HOME/.config/xdg-terminals.list")" == kitty.desktop ]]'
+: > "$FAKE/calls"; commands/app/open terminal btop
+check "then the terminal comes from xdg-terminal-exec, with the command" 'grep -qx "xdg-terminal-exec btop" "$FAKE/calls"'
+res=$(last commands/app/open mail)
+check "no mail app: 3, and how to choose one ($res)" '[[ "$res" == "3|No app opens email links. Type default in the Core to choose one." ]]'
+
+# The defaults rows.
+reset
+d() { commands/palette/defaults "$1"; }
+r=$(d default)
+check "default: one row a kind, in order" '[[ "$(jq -r .title <<< "$r" | tr "\n" "|")" == "Browser: Firefox|Mail: none chosen|Terminal: Foot|Editor: Text Editor|PDFs: Papers|Images: Image Viewer|Video: Celluloid|Music: Celluloid|Files: Files|" ]]'
+check "a kind row says Enter chooses, and searches for its apps" '[[ "$(jq -c "select(.id == \"default:browser\") | [.subtitle, .run[-1], .kind]" <<< "$r")" == "[\"Web links and pages · Enter to choose\",\"default browser\",\"Defaults\"]" ]]'
+r=$(d browser)
+check "browser: the one in use, then the others, then more" '[[ "$(jq -r ".title + \" · \" + .subtitle" <<< "$r" | tr "\n" "|")" == "Browser: Firefox · In use for web links and pages|Browser: Chromium · Enter to use it for web links and pages|Get another browser · Apps you can get by name|" ]]'
+check "Enter on another browser chooses it" '[[ "$(jq -c "select(.title == \"Browser: Chromium\") | .run" <<< "$r")" == "[\"takumi\",\"app\",\"default\",\"browser\",\"chromium.desktop\"]" ]]'
+check "the rows keep their order whatever the history" '[[ "$(jq -r .steady <<< "$r" | sort -u)" == true ]]'
+check "pdf: Papers in use, the browsers offered" '[[ "$(d pdf | jq -r .title | tr "\n" "|")" == "PDFs: Papers|PDFs: Chromium|PDFs: Firefox|" ]]'
+check "mail: none chosen, and a way to get one" '[[ "$(d mail | jq -r ".title + \" · \" + .subtitle" | tr "\n" "|")" == "Mail: none chosen · Nothing opens email links yet|Get a mail app · Apps you can get by name|" ]]'
+check "an app's name beside default finds it for every kind it can be" '[[ "$(d "make chromium default" | jq -r .title | tr "\n" "|")" == "Browser: Chromium|PDFs: Chromium|" ]]'
+check "change, set and open with" '[[ -n "$(d "change terminal")" && "$(d "open with" | jq -s length)" -eq 9 ]]'
+check "other words: nothing" '[[ -z "$(d zebra)" && -z "$(d fire)" && -z "$(d de)" ]]'
+
+# Web apps.
+reset
+web() { printf '%s' "$2" > "$FAKE/web/$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_')"; }
+redirect() { printf '%s' "$2" > "$FAKE/web/$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_').redirect"; }
+png=$(printf '\211PNG\r\n\032\nfake')
+web https://web.whatsapp.com/ '<html><head><title>WhatsApp</title><LINK REL="apple-touch-icon" sizes="120x120" href="/img/120.png"><link rel="apple-touch-icon" sizes="180x180" href="https://static.whatsapp.net/img/180.png"></head></html>'
+web https://static.whatsapp.net/img/180.png "$png"
+res=$(last commands/app/web https://web.whatsapp.com/ WhatsApp)
+f=$HOME/.local/share/applications/takumi-web-whatsapp.desktop
+check "a web app is made ($res)" '[[ "$res" == "0|WhatsApp is ready: find it in the Core" && -f "$f" ]]'
+check "its browser runs the site as an app, with a class of its own" '[[ "$(sed -n "s/^Exec=//p" "$f")" == "/usr/bin/chromium --app=https://web.whatsapp.com/ --class=takumi-web-whatsapp" ]]'
+check "its window is matched by the app_id Chromium gives it on Wayland" '[[ "$(sed -n "s/^StartupWMClass=//p" "$f")" == "chrome-web.whatsapp.com__-Default" ]]'
+check "its icon is the biggest apple-touch-icon, in the icon theme" '[[ "$(sed -n "s/^Icon=//p" "$f")" == takumi-web-whatsapp && -f "$HOME/.local/share/icons/hicolor/256x256/apps/takumi-web-whatsapp.png" ]] && [[ "$(grep -m1 "^curl https://static" "$FAKE/calls")" == "curl https://static.whatsapp.net/img/180.png" ]]'
+web "https://cal.example.com/r?view=week&tz=%2B1" '<link rel="manifest" href="app.webmanifest"><link rel="icon" href="/favicon.ico">'
+web https://cal.example.com/app.webmanifest '{"icons":[{"src":"/i/192.png","sizes":"192x192","type":"image/png"},{"src":"/i/512.png","sizes":"512x512","type":"image/png"}]}'
+web https://cal.example.com/i/512.png "$png"
+commands/app/web "https://cal.example.com/r?view=week&tz=%2B1" Calendar >/dev/null
+f=$HOME/.local/share/applications/takumi-web-calendar.desktop
+check "an address with ? & and % is quoted and its % doubled" '[[ "$(sed -n "s/^Exec=//p" "$f")" == "/usr/bin/chromium \"--app=https://cal.example.com/r?view=week&tz=%%2B1\" --class=takumi-web-calendar" ]]'
+check "the manifest's biggest icon when there is no apple-touch-icon" 'grep -qx "curl https://cal.example.com/i/512.png" "$FAKE/calls" && ! grep -q "favicon.ico" "$FAKE/calls"'
+check "the path counts in the app_id, not the query" '[[ "$(sed -n "s/^StartupWMClass=//p" "$f")" == "chrome-cal.example.com__r-Default" ]]'
+web https://mail.example.org/ '<html><head><title>Sign in</title><link rel="apple-touch-icon" href="https://login.example.net/logo.png"></head></html>'
+redirect https://mail.example.org/ https://login.example.net/signin
+: > "$FAKE/calls"
+commands/app/web https://mail.example.org/ "Mail Box" >/dev/null
+check "a sign-in page on another site gives no icon: a letter drawn here" '! grep -q "logo.png" "$FAKE/calls" && grep -qx "curl https://mail.example.org/apple-touch-icon.png" "$FAKE/calls" && grep -q ">M</text>" "$HOME/.local/share/icons/hicolor/scalable/apps/takumi-web-mail-box.svg"'
+web https://notes.example.com '<meta property="og:site_name" content="Notely &amp; Co"><title>Your notes - Notely</title>'
+res=$(last commands/app/web notes.example.com)
+check "no name: the site's own, https added ($res)" '[[ "$res" == "0|Notely & Co is ready: find it in the Core" && -f "$HOME/.local/share/applications/takumi-web-notely-co.desktop" ]]'
+web https://board.example.com/ '<title>Plan Board | Sign in</title>'
+commands/app/web https://board.example.com/ >/dev/null
+check "else its title, cut at the bar" '[[ "$(sed -n "s/^Name=//p" "$HOME/.local/share/applications/takumi-web-plan-board.desktop")" == "Plan Board" ]]'
+check "else a name from its address" '[[ "$(lib apps_host_name web.example.com)" == Example ]]'
+res=$(last commands/app/web "not an address")
+check "not a web address: 2 ($res)" '[[ "${res%%|*}" == 2 ]]'
+r=$(commands/app/shelf "")
+check "a web app made leaves the Shelf" '[[ "$r" != *"get:web:whatsapp"* && "$r" == *"get:web:gmail"* ]]'
+res=$(last commands/app/web-remove "Plan Board")
+check "removing a web app by its name ($res)" '[[ "$res" == "0|Removed Plan Board" && ! -e "$HOME/.local/share/applications/takumi-web-plan-board.desktop" ]] && ! ls "$HOME"/.local/share/icons/hicolor/*/apps/takumi-web-plan-board.* >/dev/null 2>&1'
+web https://chat.example.com/ '<title>Chat</title>'
+res=$(commands/app/get https://chat.example.com/ Chat </dev/null || echo failed)
+check "a Shelf row that cannot answer still makes it, and says so" '[[ -f "$HOME/.local/share/applications/takumi-web-chat.desktop" ]] && grep -q "^globe|Chat is ready|" "$FAKE/notices"'
+
+# Only Firefox: Chromium or GNOME Web are offered, in plain words.
+mv "$SYS/chromium.desktop" "$t/chromium.desktop.away"
+said=$(talk 'no\nno\n' commands/app/web https://web.whatsapp.com/ WhatsApp)
+check "Firefox has no app mode: Chromium, then GNOME Web, then nothing ($said)" '[[ "$said" == "confirm Firefox has no app mode, so web apps open in Chromium. Get Chromium from Flathub, just for you?"*"confirm Open WhatsApp in GNOME Web instead? Its menu installs a site as an app."*"Nothing changed"*"rc=3" ]]'
+said=$(talk 'yes\n' commands/app/web https://web.whatsapp.com/ WhatsApp)
+check "yes: Chromium from Flathub, just for you, then the web app ($said)" '[[ "$said" == *"done WhatsApp is ready: find it in the Core"*"rc=0" ]] && grep -q "flatpak install --user --noninteractive -y flathub org.chromium.Chromium" "$FAKE/calls"'
+check "a Flatpak browser runs through flatpak" '[[ "$(sed -n "s/^Exec=//p" "$HOME/.local/share/applications/takumi-web-whatsapp.desktop")" == "flatpak run org.chromium.Chromium --app=https://web.whatsapp.com/ --class=takumi-web-whatsapp" ]]'
+mv "$t/chromium.desktop.away" "$SYS/chromium.desktop"; rm -f "$FLAT/org.chromium.Chromium.desktop"
+
+# The Shelf.
+reset
+r=$(commands/app/shelf "")
+check "every line of install/shelf.tsv is a name, a source, words and a line" '! awk -F "\t" "!/^#/ && NF != 4" install/shelf.tsv | grep -q .'
+bad=$(awk -F '\t' '!/^#/ { print $2 }' install/shelf.tsv | while IFS= read -r s; do if [[ "$s" == http* ]]; then lib apps_url_ok "$s" || echo "$s"; elif [[ ! "$s" =~ ^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){2,}$ ]]; then echo "$s"; fi; done)
+check "every source is a Flathub ID or an address Takumi takes ($bad)" '[[ -z "$bad" ]]'
+check "every app you do not have gets a row" '[[ "$(jq -s length <<< "$r")" -eq $(( $(grep -vc "^#" install/shelf.tsv) - 1 )) && "$r" != *"Get Spotify"* ]]'
+check "a Flathub row installs from Flathub, asking first" '[[ "$(jq -c "select(.title == \"Get Zoom\") | [.subtitle, .risk, .run]" <<< "$r")" == "[\"Video meetings · from Flathub, just for you\",1,[\"takumi\",\"app\",\"get\",\"us.zoom.Zoom\",\"Zoom\"]]" ]]'
+check "a web row makes a web app, in the Core" '[[ "$(jq -c "select(.title == \"Get Outlook\") | [.subtitle, .converse, .run]" <<< "$r")" == "[\"Microsoft 365 email and calendar · a web app in its own window\",true,[\"takumi\",\"app\",\"web\",\"https://outlook.office.com/mail/\",\"Outlook\"]]" ]]'
+check "office: the five Microsoft 365 web apps" '[[ "$(commands/app/shelf office | jq -r .title | tr "\n" "|")" == "Get Outlook|Get Word|Get Excel|Get PowerPoint|Get Teams|" ]]'
+check "games: the launchers, the cloud and the streamers" '[[ "$(commands/app/shelf games | jq -r .title | sort | tr "\n" "|")" == "Get GeForce NOW|Get Heroic|Get Lutris|Get Moonlight|Get Prism Launcher|Get RetroArch|Get Sunshine|Get Xbox Cloud Gaming|" ]]'
+check "apps asked for by name: Edge, 1Password, Dropbox and Minecraft from Flathub" '[[ "$(for q in edge 1password dropbox minecraft sunshine; do commands/app/shelf "$q" | jq -r "select(.kind == \"Get\") | .run[3]" | grep -v moonlight; done | tr "\n" "|")" == "com.microsoft.Edge|com.onepassword.OnePassword|com.dropbox.Client|org.prismlauncher.PrismLauncher|dev.lizardbyte.app.Sunshine|" ]]'
+check "ChatGPT, Claude, GeForce NOW and Xbox Cloud Gaming as web apps" '[[ "$(for q in chatgpt claude geforce xbox; do commands/app/shelf "$q" | jq -r "select(.converse) | .run[3]"; done | tr "\n" "|")" == "https://chatgpt.com/|https://claude.ai/|https://play.geforcenow.com/|https://www.xbox.com/play|" ]]'
+commands/app/web https://chat.example.com/ Chat >/dev/null
+r=$(commands/app/shelf remove)
+check "remove: web apps, Flathub apps and apps installed apart from Takumi" '[[ "$(jq -r .title <<< "$r" | tr "\n" "|")" == "Remove Chat|Remove Spotify|Remove GNU Image Manipulation Program|Remove Kdenlive|" ]]'
+check "Takumi's own apps and what nobody asked for are never offered" '[[ "$r" != *Firefox* && "$r" != *Avahi* && "$r" != *Files* ]]'
+check "a remove row asks in the Core" '[[ "$(jq -c "select(.title == \"Remove Spotify\") | [.subtitle, .converse, .risk, .run]" <<< "$r")" == "[\"From Flathub, just for you\",true,1,[\"takumi\",\"app\",\"remove\",\"com.spotify.Client\"]]" ]]'
+check "remove spotify, uninstall gimp" '[[ "$(commands/app/shelf "remove spotify" | jq -r .title)" == "Remove Spotify" && "$(commands/app/shelf "uninstall gimp" | jq -r .title)" == "Remove GNU Image Manipulation Program" ]]'
+check "an app's name alone never shows a remove row" '[[ -z "$(commands/app/shelf spotify)" ]]'
+
+# Removing.
+res=$(printf 'yes\n' | last commands/app/remove com.spotify.Client)
+check "a Flathub app ($res)" '[[ "$res" == "0|Removed Spotify" ]] && grep -qx "flatpak uninstall --user --noninteractive -y com.spotify.Client" "$FAKE/calls" && grep -q "uninstall --user --unused" "$FAKE/calls"'
+: > "$FAKE/calls"; res=$(printf 'no\n' | last commands/app/remove Spotify)
+check "no: 3 and nothing removed ($res)" '[[ "$res" == "3|Nothing changed" ]] && ! grep -q uninstall "$FAKE/calls"'
+said=$(talk 'yes\n' commands/app/remove spotify)
+check "in the Core it asks first, by name ($said)" '[[ "$said" == "confirm Remove Spotify? Its settings stay in ~/.var/app/com.spotify.Client, for if you get it again."*"done Removed Spotify"*"rc=0" ]]'
+printf 'org.example.Shared\tShared\tsystem\n' >> "$FAKE/flatpaks"
+printf 'yes\n' | commands/app/remove org.example.Shared >/dev/null
+check "one installed for everyone goes through polkit, not sudo" 'grep -qx "flatpak uninstall --system --noninteractive -y org.example.Shared" "$FAKE/calls" && ! grep -q "^sudo flatpak" "$FAKE/calls"'
+res=$(printf 'yes\n' | last commands/app/remove chat)
+check "a web app ($res)" '[[ "$res" == "0|Removed Chat" && ! -e "$HOME/.local/share/applications/takumi-web-chat.desktop" ]]'
+res=$(printf 'yes\n' | last commands/app/remove kdenlive)
+check "an app installed apart from Takumi, with your password ($res)" '[[ "$res" == "0|Removed Kdenlive" ]] && grep -qx "sudo pacman -Rs --noconfirm kdenlive" "$FAKE/calls"'
+touch "$FAKE/rs-fails"; res=$(printf 'yes\n' | last commands/app/remove gimp); rm -f "$FAKE/rs-fails"
+check "one other apps need stays ($res)" '[[ "$res" == "1|Other apps need GNU Image Manipulation Program, so it stays" ]]'
+res=$(last commands/app/remove Firefox)
+check "Takumi's own: 6 ($res)" '[[ "$res" == "6|Firefox comes with Takumi, so it stays: every update would bring it back" ]]'
+res=$(last commands/app/remove nothing-here)
+check "nothing by that name: 4 ($res)" '[[ "$res" == "4|Nothing called nothing-here is installed" ]]'
+
+# Windows in a window.
+reset
+export TAKUMI_KVM=$t/kvm; touch "$TAKUMI_KVM"
+res=$(TAKUMI_KVM=$t/none last commands/install/windows)
+check "no virtualization: 5, in words ($res)" '[[ "$res" == "5|This computer cannot run Windows in a window: its processor'"'"'s virtualization is off or missing. It can be turned on in the firmware settings, where it is called Intel VT-x or AMD-V." ]]'
+echo 6000 > "$FAKE/mem"; res=$(last commands/install/windows); echo 15870 > "$FAKE/mem"
+check "too little memory: 5 ($res)" '[[ "$res" == "5|Windows needs 4 GB of memory of its own, and this computer has 6 GB in all" ]]'
+echo 30000000 > "$FAKE/space"; res=$(last commands/install/windows); echo 200000000 > "$FAKE/space"
+check "too little space: 5 ($res)" '[[ "$res" == "5|Windows needs about 40 GB free, and your home folder has 28 GB" ]]'
+res=$(printf 'no\n' | last commands/install/windows)
+check "no: 3, nothing installed ($res)" '[[ "$res" == "3|Nothing changed" ]] && ! grep -q "^sudo" "$FAKE/calls"'
+echo aarch64 > "$FAKE/arch"; said=$(talk 'no\n' commands/install/windows); echo x86_64 > "$FAKE/arch"
+check "on Arm: Windows 11 for Arm" '[[ "$said" == "confirm Set up Windows 11 for Arm with 8 GB of memory, 4 cores and a 64 GB disk?"* ]]'
+rm -f "$FAKE/subids"
+said=$(talk 'yes\n' commands/install/windows)
+check "sized to the computer, asked once ($said)" '[[ "$said" == "confirm Set up Windows 11 with 8 GB of memory, 4 cores and a 64 GB disk? It downloads about 7 GB from Microsoft, then installs itself, which takes 20 to 40 minutes."* ]]'
+check "Podman and FreeRDP installed with one password" 'grep -qx "sudo -A pacman -S --needed --noconfirm podman freerdp" "$FAKE/calls"'
+range=$(lib apps_subids_range)
+check "a range of user IDs for rootless containers" 'grep -qx "sudo -A usermod --add-subuids $range --add-subgids $range $(id -un)" "$FAKE/calls"'
+env=$HOME/.local/state/takumi/windows/env
+pass=$(sed -n 's/^PASSWORD=//p' "$env")
+check "the account in a file only you can read" '[[ "$(ls -l "$env" | cut -c1-10)" == "-rw-------" && ${#pass} -eq 20 && "$(grep -cE "^(USERNAME=$(id -un)|RAM_SIZE=8G|CPU_CORES=4|DISK_SIZE=64G)$" "$env")" -eq 4 ]]'
+check "the container: its env file, RDP and the viewer on 127.0.0.1 only, its disk, ~/Windows shared" 'grep -q "^podman create --name takumi-windows --env-file $env --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN -p 127.0.0.1:8006:8006 -p 127.0.0.1:3389:3389/tcp -p 127.0.0.1:3389:3389/udp -v $HOME/.local/share/takumi/windows:/storage -v $HOME/Windows:/shared --stop-timeout 120 docker.io/dockurr/windows$" "$FAKE/calls"'
+check "the password is in no command's arguments, and reaches FreeRDP on stdin" '! grep -q "$pass" "$FAKE/calls" && grep -qx "/p:$pass" "$FAKE/rdp-in"'
+check "the download's progress, then Windows installing itself, as notes" '[[ "$said" == *"note Downloading Windows 11 from Microsoft… 42.5%"*"note Windows 11 is installing itself, which takes 15 to 30 minutes. You can close this: the Core says when it is ready."* ]]'
+check "ready when Windows lets the account in; shut down until opened ($said)" '[[ "$said" == *"done Windows 11 is ready: type Windows in the Core to open it"*"rc=0" && -f "$HOME/.local/state/takumi/windows/ready" ]] && grep -qx "podman stop -t 120 takumi-windows" "$FAKE/calls"'
+check "the Windows app in the Core" '[[ "$(sed -n "s/^Exec=//p" "$HOME/.local/share/applications/takumi-windows.desktop")" == "takumi app windows" && -f "$HOME/.local/share/icons/hicolor/scalable/apps/takumi-windows.svg" ]]'
+res=$(last commands/install/windows)
+check "set up already: 0 ($res)" '[[ "$res" == "0|Windows is already set up: type Windows in the Core to open it" ]]'
+: > "$FAKE/calls"; rm -f "$FAKE/rdp-n"
+res=$(last commands/app/windows)
+check "opening it: started, full screen, sound and clipboard ($res)" '[[ "${res%%|*}" == 0 ]] && grep -qx "podman start takumi-windows" "$FAKE/calls" && grep -qx "/f" "$FAKE/rdp-in" && grep -qx "/sound:sys:pulse" "$FAKE/rdp-in" && grep -qx "+clipboard" "$FAKE/rdp-in" && grep -qx "/wm-class:takumi-windows" "$FAKE/rdp-in"'
+check "closing it shuts Windows down" '[[ "$(tail -n 1 "$FAKE/calls")" == "podman stop -t 120 takumi-windows" ]] && grep -q "^display|Windows is shutting down|" "$FAKE/notices"'
+check "FreeRDP takes everything on stdin" '[[ "$(grep "^xfreerdp3" "$FAKE/calls" | sort -u)" == "xfreerdp3 /args-from:stdin" ]]'
+rm -f "$HOME/.local/state/takumi/windows/ready"; echo 0 > "$FAKE/rdp-ok"; : > "$FAKE/calls"
+res=$(last commands/app/windows)
+check "still installing: its screen in the browser ($res)" 'grep -qx "gio open http://127.0.0.1:8006/" "$FAKE/calls" && grep -q "^display|Windows is still installing|" "$FAKE/notices"'
+rm -f "$FAKE/rdp-ok"
+res=$(printf 'yes\n' | last commands/app/remove windows)
+check "removing Windows deletes its disk and keeps ~/Windows ($res)" '[[ "$res" == "0|Removed Windows. ~/Windows is still there" && ! -e "$HOME/.local/share/takumi/windows" && -d "$HOME/Windows" && ! -e "$HOME/.local/share/applications/takumi-windows.desktop" ]] && grep -qx "podman rm -f takumi-windows" "$FAKE/calls"'
+res=$(last commands/app/windows)
+check "not set up: 3 ($res)" '[[ "${res%%|*}" == 3 ]]'
+
+# Steam.
+reset
+echo aarch64 > "$FAKE/arch"; res=$(last commands/install/gaming)
+check "on Arm: 5, and why, in plain words ($res)" '[[ "$res" == "5|Steam runs only on Intel and AMD computers (x86_64), and this one is aarch64. RetroArch and Moonlight run here: type their names in the Core." ]]'
+echo x86_64 > "$FAKE/arch"; echo "03:00.0 0300: 1002:73bf (rev c1)" > "$FAKE/lspci"; touch "$FAKE/gamemode"
+said=$(talk 'yes\n' commands/install/gaming)
+check "AMD: asked once, naming the drivers ($said)" '[[ "$said" == "confirm Get Steam, with the AMD graphics drivers for 32-bit games, game mode and the performance overlay? It needs your password and brings the system'"'"'s packages up to date first."* ]]'
+check "multilib turned on in /etc/pacman.conf" 'grep -qE "^sudo -A (sed -i .*multilib.* /etc/pacman.conf|tee -a /etc/pacman.conf)$" "$FAKE/calls"'
+check "Steam, game mode, the overlay and the AMD drivers, the system brought up to date" 'grep -qx "sudo -A pacman -Syu --needed --noconfirm steam gamemode lib32-gamemode mangohud lib32-mangohud vulkan-radeon lib32-vulkan-radeon lib32-mesa" "$FAKE/calls"'
+check "you join the gamemode group ($said)" 'grep -qx "sudo -A usermod -aG gamemode $(id -un)" "$FAKE/calls" && [[ "$said" == *"done Steam is ready: find it in the Core. Game mode works fully after you next log in."*"rc=0" ]]'
+reset; printf '00:02.0 0300: 8086:9a49\n01:00.0 0302: 10de:2520\n' > "$FAKE/lspci"; echo nvidia-utils >> "$FAKE/installed"; printf 'core\nextra\nmultilib\n' > "$FAKE/repos"
+said=$(talk 'yes\n' commands/install/gaming)
+check "Intel and NVIDIA's own driver: both 32-bit halves, multilib left alone" '[[ "$said" == *"the NVIDIA and Intel graphics drivers"* ]] && grep -qx "sudo -A pacman -Syu --needed --noconfirm steam gamemode lib32-gamemode mangohud lib32-mangohud lib32-nvidia-utils vulkan-intel lib32-vulkan-intel lib32-mesa" "$FAKE/calls" && ! grep -q "pacman.conf" "$FAKE/calls"'
+reset; echo "01:00.0 0300: 10de:2484" > "$FAKE/lspci"
+talk 'yes\n' commands/install/gaming >/dev/null
+check "NVIDIA on the open driver: Mesa's NVK" 'grep -q "lib32-vulkan-nouveau" "$FAKE/calls" && ! grep -q "lib32-nvidia-utils" "$FAKE/calls"'
+reset; echo "00:01.0 0300: 1234:1111" > "$FAKE/lspci"
+said=$(talk 'no\n' commands/install/gaming)
+check "a virtual machine: drawing on the processor; no: 3 ($said)" '[[ "$said" == *"drivers that draw on the processor"*"rc=3" ]] && ! grep -q "pacman -Syu" "$FAKE/calls"'
+
+echo "   $(grep -c '^check ' "$0") app checks against fake xdg-mime, flatpak, pacman, podman and FreeRDP"
+exit $status

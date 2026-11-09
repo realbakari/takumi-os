@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Disconnect a Bluetooth device
+usage: <address>
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/bluetooth.sh" ]] && { . "$l/bluetooth.sh"; break; }; done
+declare -F bt_valid >/dev/null || { echo "takumi: the Bluetooth library is missing" >&2; exit 1; }
+mac=${1:-}; bt_valid "$mac" || { echo "usage: takumi bluetooth disconnect <address>" >&2; exit 2; }
+name=$(bt_field "$mac" Name); name=${name:-$mac}
+bluetoothctl disconnect "$mac" >/dev/null 2>&1 || true
+takumi notice bt "Disconnected $name" "" -1
+echo "Disconnected $name"

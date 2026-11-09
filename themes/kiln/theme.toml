@@ -1,0 +1,28 @@
+[meta]
+name = "kiln"
+title = "Kiln"
+about = "paper and clay in daylight"
+mode = "light"
+
+[palette]
+accent     = "#c0552f"
+background = "#f6f1ea"
+surface    = "#ebe4da"
+foreground = "#2a2420"
+muted      = "#8d8278"
+red        = "#c0392b"
+yellow     = "#b7791f"
+green      = "#3f8f4a"
+cyan       = "#2a8d95"
+blue       = "#2f6fb3"
+magenta    = "#8e4fb0"
+
+[phase.dawn]
+background = "#f8f2e9"
+accent     = "#d46a3c"
+
+[phase.night]
+background = "#ece6dd"
+surface    = "#e0d9ce"
+foreground = "#3a332e"
+accent     = "#a84a2a"

@@ -1,0 +1,8 @@
+# Takumi's setup disc: greetd starts the setup at once, as the live user, on the first console. If it ever
+# stops, greetd starts it again. See docs/iso.md.
+[terminal]
+vt = 1
+
+[default_session]
+command = "takumi setup start"
+user = "live"

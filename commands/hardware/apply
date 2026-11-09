@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set up what this computer's hardware needs in a system (drivers, firmware, kernel options, early modules) and record it
+usage: [--root <dir>] [--data <dir>]
+example: sudo takumi hardware apply
+risk: 2
+sudo: yes
+hidden: yes
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/hardware.sh" ]] && { . "$l/hardware.sh"; break; }; done
+declare -F hw_facts >/dev/null || { echo "takumi: the hardware library is missing" >&2; exit 1; }
+# Applies the fixes that match this computer (default/hardware/*.toml) to a system root: the room an update is
+# building (commands/room/upgrade), the disk the setup disc is installing (commands/setup/install), or / (the
+# system in use, changed the way pacman changes it). A fix is set up whole or not at all; only its 32-bit
+# libraries may be left out, when the root has no multilib repository. Packages come from the repositories
+# the root uses (TAKUMI_PACMAN_CONF names another pacman.conf inside it, TAKUMI_OFFLINE=1 says they are the
+# setup disc's, so a missing one waits for the first update). AUR packages are only ever named.
+# What it did goes to /var/lib/takumi/hardware.json under the root's room. The kernel options and services it
+# added there are what the next apply takes away when their fix no longer applies. Exit: 0 done, 1 a step
+# failed or there is no data, 2 usage. See docs/hardware.md.
+usage() { echo "usage: takumi hardware apply [--root <dir>] [--data <dir>]" >&2; exit 2; }
+root=/ data=""
+while (( $# )); do
+  case "$1" in
+    --root) [[ -n "${2:-}" ]] || usage; root=$2; shift 2 ;;
+    --data) [[ -n "${2:-}" ]] || usage; data=$2; shift 2 ;;
+    *) usage ;;
+  esac
+done
+say() { printf 'hardware: %s\n' "$*"; }
+[[ "$(id -u)" == 0 ]] || { echo "takumi hardware apply changes a system: run it with sudo" >&2; exit 1; }
+root=${root%/}; [[ -n "$root" ]] || root=/
+[[ -d "$root/etc" ]] || { say "$root is not a system"; exit 1; }
+dir=$(hw_data_dir "$data") || { say "no hardware data${data:+ in $data}; nothing set up"; exit 1; }
+at() { if [[ "$root" == / ]]; then printf '%s' "$1"; else printf '%s%s' "$root" "$1"; fi; }
+inroot() { if [[ "$root" == / ]]; then "$@"; else arch-chroot "$root" "$@"; fi; }
+pc=(); [[ -n "${TAKUMI_PACMAN_CONF:-}" ]] && pc=(--config "$TAKUMI_PACMAN_CONF")
+sysroot=(); [[ "$root" == / ]] || sysroot=(--root="$root")
+offline=no; [[ "${TAKUMI_OFFLINE:-}" == 1 ]] && offline=yes
+failed=no
+
+# What applies: the fixes that match, and the kept ones the root already had. What the root already has from
+# Takumi is its own entry when it was set up before, else its parent's: a room being built is a copy of the
+# running one.
+fixes=$(hw_fixes "$dir")
+jq -r 'select(.error) | "skipped \(.file): \(.error)"' <<< "$fixes" | while IFS= read -r line; do say "$line"; done
+if hw_needs_log "$fixes"; then facts=$(hw_facts log); else facts=$(hw_facts); fi
+matches=$(hw_match "$facts" "$fixes")
+room=$(hw_room_of "$root"); room=${room:-system}
+record=$(hw_record_for "$root")
+case "$root" in */@rooms/*) parent=$(hw_room_of /) ;; *) parent="" ;; esac
+prev='{}'
+[[ -f "$record" ]] && prev=$(jq -c --arg r "$room" --arg p "$parent" '.rooms[$r] // (if $p != "" then .rooms[$p] else null end) // {}' "$record" 2>/dev/null || echo '{}')
+wanted=$( { printf '%s\n' "$prev"; printf '%s\n' "${matches:-}" | jq -sc .; printf '%s\n' "$fixes" | jq -sc .; } |
+  jq -nc "$hw_jq_common"' input as $P | input as $M | input as $X | hw_with_kept($M; $X; $P)[] | select(hw_acts)')
+
+# Packages: every fix's own ones must be in the root's repositories; its 32-bit libraries need multilib in the
+# root's own pacman.conf too, or an update would find them in no repository.
+multilib=no
+grep -q '^\[multilib\]' "$(at /etc/pacman.conf)" 2>/dev/null && multilib=yes
+avail=$(inroot pacman ${pc[@]+"${pc[@]}"} -Slq 2>/dev/null || true)
+have=$(inroot pacman -Qq 2>/dev/null || true)
+plan=$( { printf '%s\n' "$avail" | jq -Rsc 'split("\n") | map(select(length > 0) | {(.): true}) | add // {}'
+          printf '%s\n' "$have" | jq -Rsc 'split("\n") | map(select(length > 0) | {(.): true}) | add // {}'
+          printf '%s\n' "${wanted:-}" | jq -sc .; } |
+  jq -nc --arg ml "$multilib" --arg off "$offline" '
+    input as $A | input as $H | input as $W | $W[]
+    | [(.apply.packages // [])[] | select(startswith("lib32-") | not)] as $req
+    | [(.apply.packages // [])[] | select(startswith("lib32-"))] as $extra
+    | [$req[] | select($A[.] | not)] as $missing
+    | {id, title, aur: (.apply.aur // []), cmdline: (.apply.cmdline // []), modprobe: (.apply.modprobe // []),
+       initramfs_modules: (.apply.initramfs_modules // []), udev: (.apply.udev // []), services: (.apply.services // [])}
+      + if ($missing | length) > 0 then
+          {status: (if $off == "yes" then "waiting" else "unavailable" end), packages: [], new: [],
+           skipped: [$missing[] | {package: ., why: (if $off == "yes" then "not on the setup disc" else "not in the repositories" end)}]}
+        else
+          ($req + [$extra[] | select($ml == "yes" and $A[.])]) as $inst
+          | {status: "applied", packages: $inst, new: [$inst[] | select($H[.] | not)],
+             skipped: [$extra[] | select($ml != "yes" or ($A[.] | not))
+                       | {package: ., why: (if $ml != "yes" then "multilib is off" else "not in the repositories" end)}]}
+        end')
+inst=$(jq -r 'select(.status == "applied") | .new[]' <<< "$plan" | awk '!seen[$0]++')
+if [[ -n "$inst" ]]; then
+  # shellcheck disable=SC2086 # one word per package
+  if inroot pacman ${pc[@]+"${pc[@]}"} -S --needed --noconfirm $inst; then say "installed $(printf '%s' "$inst" | tr '\n' ' ')"
+  else
+    say "pacman could not install $(printf '%s' "$inst" | tr '\n' ' '); the fixes that need them wait for the next update"
+    plan=$(jq -c 'if .status == "applied" and (.new | length) > 0 then .status = "failed" else . end' <<< "$plan"); failed=yes
+  fi
+fi
+jq -r 'select(.status != "applied") | "\(.title): not set up, \([.skipped[] | "\(.package) is \(.why)"] | join(", "))"' <<< "$plan" |
+  while IFS= read -r line; do say "$line"; done
+ok=$(jq -c 'select(.status == "applied")' <<< "$plan")
+
+# Files Takumi owns, written whole from the fixes in use, and removed when none needs them.
+changed=""
+put() {  # <path in the root> <header> <body>
+  local f old="" new=""; f=$(at "$1")
+  [[ -f "$f" ]] && old=$(cat "$f")
+  if [[ -z "$3" ]]; then
+    if [[ -f "$f" ]]; then rm -f "$f"; changed+=" $1"; say "removed $1"; fi
+    return 0
+  fi
+  new=$(printf '%s\n%s\n' "$2" "$3")
+  [[ "$old" == "$new" ]] && return 0
+  mkdir -p "$(dirname "$f")"
+  printf '%s\n' "$new" > "$f.takumi-new" && mv "$f.takumi-new" "$f"
+  changed+=" $1"; say "wrote $1"
+}
+put /etc/modprobe.d/takumi-hardware.conf \
+  "# Takumi: module options this computer's hardware fixes need. Written whole by takumi hardware apply (docs/hardware.md)." \
+  "$(jq -r 'select((.modprobe | length) > 0) | "# \(.title) (\(.id).toml)", .modprobe[]' <<< "$ok")"   # /etc/modprobe.d/takumi-hardware.conf
+put /etc/udev/rules.d/90-takumi-hardware.rules \
+  "# Takumi: udev rules this computer's hardware fixes need. Written whole by takumi hardware apply (docs/hardware.md)." \
+  "$(jq -r 'select((.udev | length) > 0) | "# \(.title) (\(.id).toml)", .udev[]' <<< "$ok")"   # /etc/udev/rules.d/90-takumi-hardware.rules
+mods=$(jq -r '.initramfs_modules[]' <<< "$ok" | awk '!seen[$0]++' | sed 's/$/?/' | tr '\n' ' ' | sed 's/ $//')
+put /etc/mkinitcpio.conf.d/takumi-hardware.conf \
+  "# Takumi: drivers this computer's hardware fixes need early in the start, at the disk's password or for the
+# splash. Written whole by takumi hardware apply (docs/hardware.md); \"?\" skips one the kernel does not have." \
+  "$(jq -r 'select((.initramfs_modules | length) > 0) | "# \(.title) (\(.id).toml)"' <<< "$ok")${mods:+$'\n'MODULES+=($mods)}"   # /etc/mkinitcpio.conf.d/takumi-hardware.conf
+
+# Kernel options in the root's /etc/kernel/cmdline (each room's boot entry reads its own): first the ones a
+# fix added before, then the ones the fixes in use want. Options someone else put there are never touched.
+cmdfile=$(at /etc/kernel/cmdline)
+want=$(jq -r '.cmdline[]' <<< "$ok" | awk '!seen[$0]++')
+before=$(jq -r '.cmdline_added // [] | .[]' <<< "$prev")
+added=""
+if [[ -f "$cmdfile" ]]; then
+  read -r -a words < "$cmdfile" || true
+  line=""
+  for w in ${words[@]+"${words[@]}"}; do grep -qxF -- "$w" <<< "$before" || line+="${line:+ }$w"; done
+  while IFS= read -r w; do
+    [[ -n "$w" ]] || continue
+    case " $line " in *" $w "*) ;; *) line+="${line:+ }$w"; added+="${added:+$'\n'}$w" ;; esac
+  done <<< "$want"
+  if [[ "$line" != "${words[*]-}" ]]; then
+    printf '%s\n' "$line" > "$cmdfile"   # /etc/kernel/cmdline
+    changed+=" /etc/kernel/cmdline"; say "kernel options are now: $line"
+  fi
+elif [[ -n "$want" ]]; then
+  say "this system has no /etc/kernel/cmdline; kernel options not set: $(printf '%s' "$want" | tr '\n' ' ')"
+fi
+
+# Services: on for the fixes in use, off again for those a fix turned on before and no fix wants now.
+want=$(jq -r '.services[]' <<< "$ok" | awk '!seen[$0]++')
+before=$(jq -r '.services_enabled // [] | .[]' <<< "$prev")
+enabled=""
+while IFS= read -r u; do
+  [[ -n "$u" ]] || continue
+  if [[ -f "$(at "/usr/lib/systemd/system/$u")" || -f "$(at "/etc/systemd/system/$u")" ]]; then
+    if systemctl ${sysroot[@]+"${sysroot[@]}"} enable "$u" >/dev/null 2>&1; then enabled+="${enabled:+$'\n'}$u"   # /etc/systemd/system/*.wants/$u
+    else say "could not turn on $u"; failed=yes; fi
+  else say "$u is not in this system; not turned on"; fi
+done <<< "$want"
+while IFS= read -r u; do
+  [[ -n "$u" ]] || continue
+  grep -qxF -- "$u" <<< "$enabled" && continue
+  systemctl ${sysroot[@]+"${sysroot[@]}"} disable "$u" >/dev/null 2>&1 || true   # /etc/systemd/system/*.wants/$u
+  say "turned off $u: no fix needs it now"
+done <<< "$before"
+[[ -n "$enabled" ]] && say "on at every start: $(printf '%s' "$enabled" | tr '\n' ' ')"
+
+# The initramfs carries the module options and the early drivers, so it is made again when they changed, and
+# whenever there are early drivers at all: an update may just have brought new versions of them.
+initramfs=unchanged
+case "$changed" in *modprobe.d*|*mkinitcpio.conf.d*) initramfs=needed ;; esac
+[[ -n "$mods" ]] && initramfs=needed
+if [[ $initramfs == needed ]]; then
+  if [[ -x "$(at /usr/bin/mkinitcpio)" ]]; then
+    if inroot mkinitcpio -P >/dev/null 2>&1; then initramfs=rebuilt; say "made the initramfs again"   # <root>/boot/initramfs-*.img
+    else initramfs=failed; failed=yes; say "the initramfs could not be made again"; fi
+  else initramfs=unchanged; fi
+fi
+# The system in use: its boot entry takes the new initramfs and options now; a room being built gets them when
+# it is staged, the setup disc's target when its installer runs.
+if [[ "$root" == / && ( $initramfs == rebuilt || "$changed" == *cmdline* ) ]] && takumi room enabled 2>/dev/null; then
+  takumi room kernel-sync || { say "the boot entry could not take the change"; failed=yes; }
+fi
+
+# The record, under this root's room; the newest twelve rooms are kept.
+entry=$( { printf '%s\n' "$plan" | jq -sc .; printf '%s\n' "$added" | jq -Rsc 'split("\n") | map(select(length > 0))'
+           printf '%s\n' "$enabled" | jq -Rsc 'split("\n") | map(select(length > 0))'; } |
+  jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg root "$root" --arg ini "$initramfs" \
+    'input as $f | input as $c | input as $s | {at: $at, root: $root, fixes: ($f | map(del(.new))), cmdline_added: $c, services_enabled: $s, initramfs: $ini}')
+mkdir -p "$(dirname "$record")"
+{ cat "$record" 2>/dev/null || true; } | jq -s --arg r "$room" --argjson e "$entry" '
+  (.[0] // {} | if type == "object" then . else {} end) | .rooms = ((.rooms // {}) + {($r): $e})
+  | .rooms |= (to_entries | sort_by(.value.at) | .[-12:] | from_entries)' > "$record.takumi-new" 2>/dev/null ||
+  jq -n --arg r "$room" --argjson e "$entry" '{rooms: {($r): $e}}' > "$record.takumi-new"
+chmod 644 "$record.takumi-new" && mv "$record.takumi-new" "$record"   # /var/lib/takumi/hardware.json
+n=$(jq -s 'map(select(.status == "applied")) | length' <<< "$plan")
+if [[ -z "$wanted" ]]; then say "nothing to set up for this computer; recorded for $room"
+else say "$n of $(jq -s length <<< "$plan") fixes set up; recorded for $room in $record"; fi
+[[ $failed == no ]]

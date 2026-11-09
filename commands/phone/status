@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Your paired phones: connected or not, and their battery
+usage: [--json]
+risk: 0
+words: phone status battery connected iphone android mobile
+ABOUT
+set -euo pipefail
+# One line per paired phone: "Pixel 8 · connected · battery 82%". --json: one object per phone, {id, name, connected,
+# charge, charging, type}, as the Palette's phone rows read them. See docs/sharing.md.
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/share.sh" ]] && { . "$l/share.sh"; break; }; done
+declare -F phone_devices >/dev/null || { echo "takumi: the sharing library is missing" >&2; exit 1; }
+command -v jq >/dev/null || { echo "Your phone needs jq" >&2; exit 1; }
+json=no
+case "${1:-}" in --json) json=yes ;; "") ;; *) echo "usage: takumi phone status [--json]" >&2; exit 2 ;; esac
+rows=""
+if phone_have && phone_up; then
+  while IFS=$'\t' read -r id name paired near _ type; do
+    [[ -n "$id" && $paired == 1 ]] || continue
+    charge=""; charging=""
+    if [[ $near == 1 ]]; then charge=$(phone_prop "$id" charge battery); charging=$(phone_prop "$id" isCharging battery); fi
+    rows+=$(jq -cn --arg id "$id" --arg n "$name" --arg c "$charge" --arg g "$charging" --arg t "$type" --argjson near "$near" \
+      '{id: $id, name: $n, connected: ($near == 1), charge: (if $c == "" or $c == "-1" then null else ($c | tonumber) end), charging: ($g == "true"), type: $t}')$'\n'
+  done <<< "$(phone_devices)"
+fi
+if [[ $json == yes ]]; then printf '%s' "$rows"; exit 0; fi
+[[ -n "$rows" ]] || { echo "No phone is paired. Type phone in the Core to connect one."; exit 0; }
+printf '%s' "$rows" | jq -r '.name + " · " + (if .connected then "connected" else "not connected" end)
+  + (if .charge != null then " · battery " + (.charge | tostring) + "%" + (if .charging then ", charging" else "" end) else "" end)'

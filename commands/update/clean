@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Free up space: old downloaded packages, older systems, packages nothing uses, old logs, and the Trash if you say so
+risk: 2
+sudo: yes
+converse: yes
+title: Free up space
+words: clean cleanup disk space storage full tidy cache trash junk purge orphans make room
+glyph: drive
+ABOUT
+set -euo pipefail
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/update.sh" ]] && { . "$l/rooms.sh"; . "$l/core.sh"; . "$l/update.sh"; break; }; done
+declare -F update_why >/dev/null && declare -F rooms_current >/dev/null && declare -F core_done >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+# A conversation in the Core (docs/updates.md, "Free up space"). One question for the system's part, which runs
+# as root in one go (`takumi update clean --system`, below), one more for the Trash, then one sentence: how much
+# came back ("4.2 GB freed").
+#
+# With rooms, packages nothing uses are removed in the next room an update builds (takumi room upgrade), where
+# starting the room before it undoes that; here only what no system needs goes: old downloads, rooms past the
+# newest three good ones (takumi room prune) and old logs. Without rooms, they are removed here, in place.
+# Packages Takumi's lists name are never removed, whatever pacman says of them.
+journal_keep=${TAKUMI_JOURNAL_KEEP:-200M}
+
+# --system [--orphans]: as root, from the conversation's one password.
+system() {
+  local out deleted orphans
+  [[ $EUID -eq 0 ]] || { echo "takumi update clean --system runs as root" >&2; exit 1; }
+  if [[ -n "$(rooms_current)" ]]; then
+    # Deletes old room subvolumes under @rooms, their kernels and entries on the boot partition and their state in
+    # /var/lib/takumi/state, as takumi room prune --auto chooses them.
+    out=$(takumi room prune --auto 2>/dev/null) || echo "Older systems could not be deleted"
+    deleted=$(grep -c '^deleted room' <<< "$out" || true)
+    if (( deleted )); then
+      # Btrfs gives a deleted room's space back in the background: wait for it, so what came back can be counted.
+      timeout 300 btrfs subvolume sync / >/dev/null 2>&1 || true
+      if (( deleted == 1 )); then echo "Deleted 1 older system"; else echo "Deleted $deleted older systems"; fi
+    fi
+  fi
+  if [[ "${1:-}" == --orphans ]]; then
+    orphans=$(pacman -Qdtq 2>/dev/null | update_unlisted || true)
+    if [[ -n "$orphans" ]]; then
+      # Removes those packages from the running system (its files, and pacman's database in /var/lib/pacman).
+      # shellcheck disable=SC2086 # one word per package
+      if LC_ALL=C pacman -Rns --noconfirm $orphans >/dev/null; then echo "Removed $(wc -w <<< "$orphans" | tr -d ' ') packages nothing used"
+      else echo "Packages nothing uses could not be removed"; fi
+    fi
+  fi
+  # paccache is pacman-contrib's, which Takumi's lists name; installed here when it is missing (/usr/bin/paccache).
+  command -v paccache >/dev/null || pacman -S --needed --noconfirm pacman-contrib >/dev/null 2>&1 || true
+  if command -v paccache >/dev/null; then
+    # Deletes package files in /var/cache/pacman/pkg: all but the two newest versions of each package, and every
+    # version of a package no longer installed.
+    paccache -rq -k 2 >/dev/null 2>&1 || true
+    paccache -rq -u -k 0 >/dev/null 2>&1 || true
+    echo "Removed old downloaded packages"
+  fi
+  # Deletes the oldest journal files in /var/log/journal until $journal_keep is left.
+  if journalctl --vacuum-size="$journal_keep" >/dev/null 2>&1; then echo "Trimmed the system's logs"; fi
+  return 0
+}
+if [[ "${1:-}" == --system ]]; then shift; system "$@"; exit 0; fi
+
+# Free space on every filesystem / and the home are on, in KiB.
+free_kib() { df -Pk / "$HOME" 2>/dev/null | awk 'NR > 1 && !seen[$1]++ { s += $4 } END { print s + 0 }'; }
+# yes_or_no <question>: the Core asks with Enter for yes; a terminal defaults to no.
+yes_or_no() {
+  if core_in_core; then core_confirm "$1"; return; fi
+  local a; read -r -p "$1 [y/N] " a || return 1; [[ "$a" == [yY] ]]
+}
+
+# Not while an update is being prepared: it is using the same packages. takumi update passes its lock on when
+# it offers this after running out of space.
+if [[ -z "${TAKUMI_UPDATE_LOCK_HELD:-}" ]]; then
+  exec 9> "${XDG_RUNTIME_DIR:-/tmp}/takumi-update.lock"
+  flock -n 9 || core_fail 1 "An update is being prepared; free up space once it is done."
+fi
+
+before=$(free_kib)
+rooms=no; [[ -n "$(rooms_current)" ]] && rooms=yes
+orphans=$(pacman -Qdtq 2>/dev/null | update_unlisted || true)
+count=0; [[ -n "$orphans" ]] && count=$(wc -w <<< "$orphans" | tr -d ' ')
+unused="$count packages nothing uses"; (( count == 1 )) && unused="1 package nothing uses"
+if [[ $rooms == yes ]]; then
+  core_note "Old downloaded packages, systems older than the newest three good ones, and old logs can go."
+  if (( count )); then core_note "Also $unused: they leave with the next update, where going back undoes it."; fi
+else
+  if (( count )); then core_note "Old downloaded packages, $unused, and old logs can go."
+  else core_note "Old downloaded packages and old logs can go."; fi
+fi
+yes_or_no "Free up space? Your files are not touched." || core_fail 1 "Nothing changed."
+args=(--system); if [[ $rooms == no ]] && (( count )); then args+=(--orphans); fi
+# The root part: files in /var/cache/pacman/pkg, /var/log/journal, old rooms (@rooms, the boot partition's
+# /takumi and loader entries, /var/lib/takumi/state) and, without rooms, packages nothing uses.
+if ! out=$(core_sudo "Freeing up space needs your password" takumi update clean "${args[@]}"); then
+  core_fail 1 "Space could not be freed: the password was not given, or a step failed."
+fi
+while IFS= read -r line; do if [[ -n "$line" ]]; then core_note "$line"; fi; done <<< "$out"
+
+# The Trash, after asking: what is in it cannot be brought back.
+trash="${XDG_DATA_HOME:-$HOME/.local/share}/Trash"
+if [[ -n "$(ls -A "$trash/files" 2>/dev/null || true)" ]]; then
+  size=$(du -sk "$trash" 2>/dev/null | awk '{ print $1 }')
+  if yes_or_no "Empty the Trash too? $(update_human "${size:-0}") in it cannot be brought back afterwards."; then
+    gio trash --empty 2>/dev/null || core_note "The Trash could not be emptied"
+  fi
+fi
+
+after=$(free_kib)
+freed=$(( after - before ))
+if (( freed >= 10240 )); then core_done "$(update_human "$freed") freed"
+else core_done "The disk was already tidy: nothing more to free"; fi
+exit 0

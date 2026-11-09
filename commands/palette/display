@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for screens, text size and the night light as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# Screens, text size, the night light and brightness (docs/display.md). A change to a screen is a
+# conversation that goes back by itself unless you keep it; text and the night light apply at once.
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/display.sh" ]] && { . "$l/display.sh"; . "$l/palette.sh"; break; }; done
+declare -F display_screens >/dev/null || exit 0
+q=${1:-}
+palette_short "$q" && exit 0
+command -v jq >/dev/null || exit 0
+words="display screen monitor"
+{
+  screens=$(display_screens 2>/dev/null || true)
+  n=$(grep -c . <<< "$screens" || true)
+  while IFS=$'\t' read -r name label pct transform _; do
+    [[ -n "$name" ]] || continue
+    big=$(display_next "$display_scales" "$pct" bigger); small=$(display_next "$display_scales" "$pct" smaller)
+    on=""; (( n > 1 )) && on=" on $label"
+    N=$name L=$label P=$pct B=$big S=$small O=$on W="$words" jq -cn '
+      (if env.B != "" then {id: ("display:bigger:" + env.N), title: ("Make everything bigger (" + env.B + "%)" + env.O),
+        subtitle: ("From " + env.P + "% · it goes back in 10 seconds unless you keep it"), glyph: "display", kind: "Display",
+        keywords: (env.W + " bigger larger zoom scale size"), converse: true, run: ["takumi", "display", "scale", "bigger", env.N], score: 0.9} else empty end),
+      (if env.S != "" then {id: ("display:smaller:" + env.N), title: ("Make everything smaller (" + env.S + "%)" + env.O),
+        subtitle: ("From " + env.P + "% · it goes back in 10 seconds unless you keep it"), glyph: "display", kind: "Display",
+        keywords: (env.W + " smaller zoom scale size"), converse: true, run: ["takumi", "display", "scale", "smaller", env.N], score: 0.88} else empty end),
+      {id: ("display:rotate:" + env.N), title: ("Turn the screen" + env.O), subtitle: "A quarter turn · it goes back unless you keep it",
+       glyph: "restart", kind: "Display", keywords: (env.W + " rotate turn portrait landscape"), converse: true, run: ["takumi", "display", "rotate", env.N], score: 0.7}'
+    # Resolution and refresh rate: the faster rate and the screen's own size when it is not on them; asking
+    # for a resolution or a refresh rate lists what the screen can show.
+    modes=$(display_modes "$name" 2>/dev/null || true)
+    [[ -n "$modes" ]] || continue
+    cur=$(awk -F '\t' '$4 == 1 { print $1 "\t" $2; exit }' <<< "$modes")
+    fast=$(display_pick_mode smoother <<< "$modes"); own=$(display_pick_mode native <<< "$modes")
+    if [[ -n "$fast" ]]; then
+      N=$name O=$on H=$(display_hz "${fast#*$'\t'}") F=$(display_hz "${cur#*$'\t'}") W="$words" jq -cn '{id: ("display:smoother:" + env.N),
+        title: ("Smoother motion: " + env.H + env.O), subtitle: ("From " + env.F + " · it goes back in 10 seconds unless you keep it"),
+        glyph: "display", kind: "Display", keywords: (env.W + " refresh rate hz smoother smooth motion fps"), converse: true,
+        run: ["takumi", "display", "mode", "smoother", env.N], score: 0.74}'
+    fi
+    if [[ -n "$own" && "${own%$'\t'*}" != "${cur%$'\t'*}" ]]; then
+      N=$name O=$on Z=${own%$'\t'*} W="$words" jq -cn '{id: ("display:native:" + env.N),
+        title: ("Back to its full resolution (" + (env.Z | sub("x"; " × ")) + ")" + env.O), subtitle: "Its sharpest picture · it goes back unless you keep it",
+        glyph: "display", kind: "Display", keywords: (env.W + " resolution native sharp full size"), converse: true,
+        run: ["takumi", "display", "mode", "native", env.N], score: 0.73}'
+    fi
+    if [[ "$q" == *resol* || "$q" == *refresh* || "$q" == *hz* ]]; then
+      awk -F '\t' -v cs="${cur%$'\t'*}" '!seen[$1]++ && $1 != cs { print $1 "\t" $2 }' <<< "$modes" | head -n 6 |
+      while IFS=$'\t' read -r size hz; do
+        N=$name O=$on Z=$size H=$(display_hz "$hz") W="$words" jq -cn '{id: ("display:resolution:" + env.N + ":" + env.Z),
+          title: ("Resolution " + (env.Z | sub("x"; " × ")) + env.O), subtitle: ("At " + env.H + " · it goes back unless you keep it"),
+          glyph: "display", kind: "Display", keywords: (env.W + " resolution size pixels"), converse: true,
+          run: ["takumi", "display", "mode", env.Z, env.N], score: 0.6}'
+      done
+      awk -F '\t' -v cs="${cur%$'\t'*}" -v ch="${cur#*$'\t'}" '$1 == cs && $2 != ch { print $1 "\t" $2 }' <<< "$modes" |
+      while IFS=$'\t' read -r size hz; do
+        N=$name O=$on M="$(display_mode_arg "$size" "$hz")" H=$(display_hz "$hz") W="$words" jq -cn '{id: ("display:rate:" + env.N + ":" + env.M),
+          title: ("Refresh rate " + env.H + env.O), subtitle: "How often the picture is drawn · it goes back unless you keep it",
+          glyph: "display", kind: "Display", keywords: (env.W + " refresh rate hz"), converse: true,
+          run: ["takumi", "display", "mode", env.M, env.N], score: 0.62}'
+      done
+    fi
+  done <<< "$screens"
+  if (( n > 1 )); then
+    second=$(sed -n 2p <<< "$screens" | cut -f2)
+    for side in right left above below; do
+      S=$second D=$side W="$words" jq -cn '{id: ("display:arrange:" + env.D),
+        title: (env.S + (if env.D == "right" or env.D == "left" then " on the " + env.D else " " + env.D end)),
+        subtitle: "Where the second screen sits · it goes back unless you keep it", glyph: "display", kind: "Display",
+        keywords: (env.W + " second external arrange extend move position" + (if env.D == "above" or env.D == "below" then " top bottom over under stacked" else "" end)),
+        converse: true, run: ["takumi", "display", "arrange", env.D], score: (if env.D == "right" or env.D == "left" then 0.75 else 0.72 end)}'
+    done
+    # Mirroring, for a talk or a film (takumi display mirror): the built-in screen on the others too.
+    mirror=$(takumi display mirror status 2>/dev/null || echo off)
+    M=${mirror%% *} W="$words" jq -cn '{id: "display:mirror", kind: "Display", glyph: "display",
+      title: (if env.M == "on" then "Stop showing this screen on the projector" else "Show this screen on the projector" end),
+      subtitle: (if env.M == "on" then "Each screen shows its own again" else "The other screen shows the same, for a talk or a film" end),
+      keywords: (env.W + " mirror mirroring projector presentation present duplicate same tv beamer"),
+      run: ["takumi", "display", "mirror", (if env.M == "on" then "off" else "on" end)], score: 0.85}'
+  fi
+  # The laptop's own screen off by hand, for a laptop on a stand with a monitor (takumi display builtin): offered
+  # while another screen is on, and "again" while it is off and the lid is open.
+  builtin=$(display_builtin 2>/dev/null || true)
+  if [[ -n "$builtin" ]]; then
+    bstate=${builtin#*$'\t'}
+    if [[ $bstate == on ]] && (( n > 1 )); then
+      W="$words" jq -cn '{id: "display:builtin:off", title: "Use only the external screen", glyph: "laptop", kind: "Display",
+        subtitle: "The laptop screen turns off · it goes back unless you keep it",
+        keywords: (env.W + " laptop built-in internal screen off turn off external only clamshell close lid one"),
+        converse: true, run: ["takumi", "display", "builtin", "off"], score: 0.8}'
+    elif [[ $bstate == off ]] && ! display_lid_closed; then
+      W="$words" jq -cn '{id: "display:builtin:on", title: "Use the laptop screen again", glyph: "laptop", kind: "Display",
+        subtitle: "It turns on next to the external screen · it goes back unless you keep it",
+        keywords: (env.W + " laptop built-in internal screen on turn on back again"),
+        converse: true, run: ["takumi", "display", "builtin", "on"], score: 0.82}'
+    fi
+  fi
+  size=$(display_text_size)
+  for dir in bigger smaller; do
+    to=$(display_next "$display_text_sizes" "$size" "$dir")
+    [[ -n "$to" ]] || continue
+    T=$to Z=$size D=$dir jq -cn '{id: ("display:text:" + env.D), title: ("Text " + env.D + " (" + env.T + ")"), subtitle: ("From " + env.Z + ", in the Core and your apps"),
+      glyph: "edit", kind: "Display", keywords: "text font size bigger smaller read", run: ["takumi", "display", "text", env.D], score: 0.8}'
+  done
+  mode=$(display_nightlight_mode)
+  for m in on schedule off; do
+    [[ "$m" == "$mode" ]] && continue
+    M=$m NOW=$mode DUSK=$(display_clock dusk) DAWN=$(display_clock dawn) jq -cn '
+      {id: ("display:night:" + env.M), glyph: "moon", kind: "Display", keywords: "night light warm evening blue sleep screen",
+       title: (if env.M == "on" then "Night light on" elif env.M == "off" then "Night light off" else "Night light from " + env.DUSK + " to " + env.DAWN end),
+       subtitle: ("Now " + (if env.NOW == "on" then "on" elif env.NOW == "off" then "off" else "on the clock" end) + (if env.M == "schedule" then " · it follows the sky" else "" end)),
+       run: ["takumi", "display", "nightlight", env.M], score: 0.78}'
+  done
+  if compgen -G "${TAKUMI_BACKLIGHT:-/sys/class/backlight}/*" >/dev/null || [[ -n "$(display_ddc_displays --cached)" ]]; then
+    for v in 25 50 75 100; do
+      V=$v jq -cn '{id: ("display:bright:" + env.V), title: ("Brightness " + env.V + "%"), glyph: "sun", kind: "Display", steady: true,
+        keywords: "display screen brightness bright dim dark light", run: ["takumi", "display", "brightness", env.V], score: (0.6 - (env.V | tonumber) / 10000)}'
+    done
+    # One point at a time, for a dark room (Alt with the brightness keys does the same).
+    for d in up down; do
+      D=$d jq -cn '{id: ("display:bright:fine:" + env.D), title: (if env.D == "up" then "A little brighter" else "A little dimmer" end),
+        subtitle: "One percent · Alt with the brightness keys does the same", glyph: "sun", kind: "Display", steady: true,
+        keywords: "display screen brightness bright dim dark light fine little bit step precise", run: ["takumi", "display", "brightness", env.D, "--fine"], score: 0.55}'
+    done
+  fi
+} | palette_filter "$q"

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Update the firmware of this computer and its devices (BIOS, dock, touchpad) through fwupd, on power only
+risk: 1
+sudo: yes
+converse: yes
+title: Update firmware
+words: firmware bios uefi fwupd device update
+glyph: chip
+ABOUT
+set -euo pipefail
+# A conversation in the Core (lib/core.sh). Firmware only on the charger, never while an update is being
+# prepared (the same lock as takumi update), one question with every device named, and the password
+# asked by fwupd through the Core's approval. A device that needs a restart to finish is said so
+# (docs/firmware.md).
+for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/core.sh" ]] && { . "$l/core.sh"; . "$l/power.sh"; break; }; done
+declare -F core_note >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+command -v fwupdmgr >/dev/null || core_fail 1 "Firmware updates need fwupd, which comes with Takumi's desktop packages."
+command -v jq >/dev/null || core_fail 1 "Firmware updates need jq."
+[[ "$(power_source)" == power ]] || core_fail 1 "Plug in the charger first: firmware must never run out of battery halfway."
+exec 9> "${XDG_RUNTIME_DIR:-/tmp}/takumi-update.lock"
+flock -n 9 || core_fail 1 "An update is being prepared; firmware waits until it is done."
+core_note "Looking for firmware updates…"
+fwupdmgr refresh >/dev/null 2>&1 || true
+json=$(fwupdmgr get-updates --json 2>/dev/null || true)
+names=$(jq -r '[.Devices[]? | select((.Releases // []) | length > 0) | .Name] | join(", ")' <<< "${json:-{\}}" 2>/dev/null || true)
+[[ -n "$names" ]] || { core_done "The firmware is up to date."; exit 0; }
+core_confirm "Update the firmware of $names? Keep the computer on and plugged in until it is done." || core_fail 1 "Nothing changed."
+core_note "Updating firmware. Keep the computer on and plugged in…"
+log="$HOME/.local/state/takumi/firmware.log"; mkdir -p "${log%/*}"
+if fwupdmgr update --assume-yes --no-reboot-check > "$log" 2>&1; then
+  if grep -qiE 'restart|reboot' "$log"; then core_done "Firmware updated. Restart when it suits you to finish."
+  else core_done "Firmware updated: $names."; fi
+  exit 0
+fi
+core_fail 1 "The firmware update did not finish; the devices keep the firmware they had. Details: $log"

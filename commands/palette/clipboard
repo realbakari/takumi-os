@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Print Palette rows for the clipboard history as JSON lines
+usage: [query]
+risk: 0
+hidden: yes
+ABOUT
+set -euo pipefail
+# Only when asked for, so what you copied never turns up while you search for something else: "clipboard",
+# "paste", "copied" or "history" (or the first letters of one), then words to narrow it. Enter puts the copy
+# back and pastes it into the app you were in (docs/palette.md).
+q=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'); rest=""; topic=no
+for w in clipboard paste copied history; do
+  if [[ "$q" == "$w "* ]]; then topic=yes; rest=${q#"$w "}; break; fi
+  if [[ ${#q} -ge 3 && "$w" == "$q"* ]]; then topic=yes; break; fi
+done
+[[ $topic == yes ]] || exit 0
+command -v cliphist >/dev/null && command -v jq >/dev/null || exit 0
+cliphist list 2>/dev/null | awk -F '\t' -v rest="$rest" 'rest == "" || index(tolower($2), rest) > 0' | head -n 40 |
+  jq -R -c '
+    split("\t") as [$id, $text]
+    | ($text | test("^\\[\\[ binary data")) as $pic
+    | {id: ("clip:" + $id),
+       title: (if $pic then "A picture" else ($text | gsub("\\s+"; " ") | .[0:90]) end),
+       subtitle: (if $pic then ($text | capture("binary data (?<s>.*) \\]\\]").s // "copied earlier") + " · Enter pastes it" else "Copied earlier · Enter pastes it" end),
+       glyph: (if $pic then "shot" else "edit" end), kind: "Clipboard", steady: true,
+       keywords: "clipboard paste copied history", run: ["takumi", "clipboard", "paste", $id], score: (0.97 - input_line_number * 0.0005)}'
+jq -cn '{id: "clip:clear", title: "Clear the clipboard history", subtitle: "Everything copied so far is forgotten", glyph: "cross", kind: "Clipboard",
+  keywords: "clipboard paste copied history clear", run: ["takumi", "clipboard", "clear"], risk: 1, score: 0.2}'

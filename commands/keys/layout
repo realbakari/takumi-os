@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: The keyboards you type with: list them, add or remove one, or switch to the next
+usage: [add [<layout> [variant]] | remove <layout> [variant] | next] [--json]
+example: takumi keys layout add de
+example: takumi keys layout add fr azerty
+example: takumi keys layout remove de
+example: takumi keys layout next
+risk: 1
+sudo: yes
+converse: yes
+ABOUT
+set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/keys.sh" ]] && { . "$l/core.sh"; . "$l/setup.sh"; . "$l/rooms.sh"; . "$l/keys.sh"; break; }; done
+declare -F keys_load >/dev/null && declare -F core_ask >/dev/null || { echo "takumi: the Takumi libraries are missing" >&2; exit 1; }
+
+# The list is the system's, so the login screen, the disk's password prompt and every account type with it
+# (docs/harmony-keys.md). A conversation (lib/core.sh): adding without a name asks which, and a change to the
+# keyboard a password is typed with asks first. Exit status: 0 done, or nothing to do · 2 usage · 3 an answer
+# or the password was needed and none came · 4 it would leave no keyboard, or make a fifth · 5 not a keyboard
+# this computer knows, or not one of yours · 1 anything else. The last line says it in words.
+usage() { echo "usage: takumi keys layout [add [<layout> [variant]] | remove <layout> [variant] | next] [--json]" >&2; exit 2; }
+log="$HOME/.local/state/takumi/keyboard.log"
+tab=$'\t'
+
+list() {
+  local json=$1 pairs cur i=0 l v name mark
+  keys_load || { echo "The keyboard settings are not answering (systemd-localed)" >&2; exit 1; }
+  keys_all >/dev/null
+  pairs=$(keys_pairs "$KEYS_LAYOUTS" "$KEYS_VARIANTS")
+  cur=$(niri msg --json keyboard-layouts 2>/dev/null | jq -r '.current_idx // empty' 2>/dev/null || true)
+  while IFS="$tab" read -r l v; do
+    name=$(keys_name "$l" "$v")
+    if [[ $json == yes ]]; then
+      L=$l V=$v N=$name I=$i C=${cur:--1} jq -cn '{layout: env.L, variant: env.V, name: env.N, first: (env.I == "0"), current: (env.I == env.C)}'
+    else
+      mark=" "; [[ "$i" == "${cur:-}" ]] && mark="*"
+      printf '%s %-30s %s\n' "$mark" "$name" "$l${v:+ ($v)}"
+    fi
+    i=$((i + 1))
+  done <<< "$pairs"
+}
+
+# change <old pairs> <new pairs> <what to say>: the new list for the whole computer.
+change() {
+  local L V M O old_pw new_pw keymap out
+  L=$(keys_join 1 <<< "$2"); V=$(keys_join 2 <<< "$2"); M=${KEYS_MODEL:-pc105}; O=$KEYS_OPTIONS
+  old_pw=$(keys_password "$1"); new_pw=$(keys_password "$2")
+  # A new first keyboard is the one a password is typed with at the start and at the login screen: the person
+  # says so first, and the console keymap follows it by setup's rule (US English for one without Latin letters).
+  if [[ "$new_pw" != "$old_pw" ]]; then
+    keymap=$(setup_console_keymap "${new_pw%%"$tab"*}" "${new_pw#*"$tab"}")
+    core_confirm "From now on, type your password with $(keys_name "${new_pw%%"$tab"*}" "${new_pw#*"$tab"}") when the computer starts and at the login screen. Go on?" \
+      || core_fail 3 "Nothing changed"
+  fi
+  if [[ "$new_pw" == "$old_pw" ]]; then
+    # Through polkit: the Core asks for the password (docs/approvals.md); at a terminal, localectl asks there.
+    core_note "Changing the keyboards…"
+    if ! out=$(LC_ALL=C localectl set-x11-keymap --no-convert "$L" "$M" "$V" "$O" 2>&1); then
+      case "$out" in *"Access denied"*|*uthenticat*) core_fail 3 "Nothing changed: the password was not given" ;; esac
+      core_fail 1 "The keyboards did not change: $(printf '%s' "$out" | sed 's/^Failed to [^:]*: //' | head -n 1)"
+    fi
+  else
+    # The console keymap too, and with an encrypted disk the initramfs whose prompt opens it: one password for
+    # all of it, through sudo, asked in the Core.
+    admin() { core_sudo "Changing the keyboard needs your password" "$@"; }
+    admin -v 2>/dev/null || core_fail 3 "Nothing changed: the password was not given"
+    mkdir -p "${log%/*}"
+    core_note "Changing the keyboards…"
+    admin localectl set-x11-keymap --no-convert "$L" "$M" "$V" "$O" >> "$log" 2>&1 \
+      || core_fail 1 "The keyboards did not change: $log"            # /etc/vconsole.conf, /etc/X11/xorg.conf.d/00-keyboard.conf
+    admin localectl set-keymap --no-convert "$keymap" >> "$log" 2>&1 \
+      || core_fail 1 "The text console kept its old keyboard: $log"  # /etc/vconsole.conf
+    if rooms_encrypted; then
+      core_note "Teaching the disk's password prompt the new keyboard…"
+      admin mkinitcpio -P >> "$log" 2>&1 \
+        || core_fail 1 "The disk's password prompt still types with the old keyboard: $log"   # /boot/initramfs-*.img
+      if [[ -n "$(rooms_current)" ]]; then
+        admin takumi room kernel-sync >> "$log" 2>&1 \
+          || core_fail 1 "The disk's password prompt still types with the old keyboard: $log" # this room's kernel and entry on /efi
+      fi
+    fi
+  fi
+  core_done "$3"
+  exit 0
+}
+
+action=${1:-}
+case "$action" in
+  ""|--json) list "$([[ "$action" == --json ]] && echo yes || echo no)"; exit 0 ;;
+  next)
+    niri msg action switch-layout next >/dev/null 2>&1 || core_fail 1 "Switching keyboards works inside the desktop"
+    now=$(niri msg --json keyboard-layouts 2>/dev/null | jq -r '.names[.current_idx] // empty' 2>/dev/null || true)
+    core_done "${now:-The next keyboard}"
+    exit 0 ;;
+  add|remove) ;;
+  *) usage ;;
+esac
+
+want_l=${2:-}; want_v=${3:-}
+# Adding without a name: ask, until the answer names one keyboard. "swiss" narrows with what comes next.
+if [[ $action == add && -z "$want_l" ]]; then
+  keys_all >/dev/null
+  words=""
+  while :; do
+    core_ask answer "Which keyboard? A language or a country, like French" || core_fail 3 "Nothing changed"
+    answer=$(printf '%s' "$answer" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
+    [[ -n "$answer" ]] || continue
+    pick=$(keys_pick "$words $answer")
+    case "$pick" in
+      one"$tab"*)
+        rest=${pick#one"$tab"}; want_l=${rest%%"$tab"*}; rest=${rest#*"$tab"}; want_v=${rest%%"$tab"*}
+        break ;;
+      several"$tab"*) words="$words $answer"; core_wrong "Several keyboards match: ${pick#several"$tab"}. Type more of its name" ;;
+      *) words=""; core_wrong "No keyboard is called $answer" ;;
+    esac
+  done
+fi
+[[ -n "$want_l" ]] || usage
+[[ "$want_l" =~ ^[a-z]{2,8}$ && "$want_v" =~ ^[A-Za-z0-9_-]*$ ]] || core_fail 2 "Not a keyboard layout: $want_l $want_v"
+keys_load || core_fail 1 "The keyboard settings are not answering (systemd-localed)"
+keys_all >/dev/null
+name=$(keys_name "$want_l" "$want_v")
+old=$(keys_pairs "$KEYS_LAYOUTS" "$KEYS_VARIANTS")
+count=$(grep -c . <<< "$old" || true)
+
+if [[ $action == add ]]; then
+  keys_known "$want_l" "$want_v" || core_fail 5 "This computer knows no keyboard called $want_l${want_v:+ ($want_v)}"
+  if grep -qxF "$want_l$tab$want_v" <<< "$old"; then core_done "$name is already one of your keyboards"; exit 0; fi
+  (( count < 4 )) || core_fail 4 "Four keyboards is the most one computer switches between: remove one first"
+  change "$old" "$(printf '%s\n%s\t%s' "$old" "$want_l" "$want_v")" "Added $name. The keyboard mark in the Core switches between your keyboards."
+fi
+
+grep -qxF "$want_l$tab$want_v" <<< "$old" || core_fail 5 "$name is not one of your keyboards"
+(( count > 1 )) || core_fail 4 "$name is your only keyboard: add another before removing it"
+new=$(grep -vxF "$want_l$tab$want_v" <<< "$old")
+if (( count == 2 )); then said="Removed $name. You type with $(keys_names <<< "$new")."
+else said="Removed $name. Your keyboards: $(keys_names <<< "$new")."; fi
+change "$old" "$new" "$said"
