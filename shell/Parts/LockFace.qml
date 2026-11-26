@@ -136,8 +136,9 @@ Item {
             opacity: face.reveal
             transform: Translate { y: (1 - face.reveal) * Style.space(12) }
             Item {
+                // Centre the digits themselves on the vertical axis; AM/PM hangs optically to the right.
                 anchors.horizontalCenter: parent.horizontalCenter
-                width: bigTime.implicitWidth + (ampm.visible ? ampm.implicitWidth + Style.space(8) : 0)
+                width: bigTime.implicitWidth
                 height: bigTime.implicitHeight
                 Label {
                     id: bigTime
