@@ -47,7 +47,7 @@ layout {
     default-column-width { proportion 0.5; }
     focus-ring { width 2; }
     border { off; }
-    shadow { on; softness 24; spread 4; offset x=0 y=6; }
+    shadow { on; softness 30; spread 2; offset x=0 y=8; }
 }
 
 prefer-no-csd
@@ -114,7 +114,7 @@ window-rule {
     default-column-width { proportion 0.66667; }
 }
 window-rule {
-    geometry-corner-radius 12
+    geometry-corner-radius 14
     clip-to-geometry true
 }
 // Picture in picture: a video kept small in the bottom-right corner, above the strip, without taking the

@@ -28,7 +28,14 @@ Rectangle {
     implicitHeight: Style.levelHeight
     radius: height / 2
     color: Theme.tint(0.07)
-    Bevel { radius: parent.radius; z: 1 }
+    Bevel {
+        radius: parent.radius; z: 1
+        down: level.dragging
+        lit: level.dragging
+        tracking: area.containsMouse || level.dragging
+        focusX: level.dragging ? Math.max(0, Math.min(1, level.shown / 100))
+              : (level.width > 0 ? Math.max(0, Math.min(1, area.mouseX / level.width)) : 0.5)
+    }
     activeFocusOnTab: true
 
     Keys.onPressed: event => {

@@ -108,15 +108,18 @@ PY
     exit 0 ;;
   stop) mon "system_powerdown" >/dev/null || true; exit 0 ;;
   sync)
-    COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$repo" --exclude .git --exclude preview -czf - . | "$0" ssh 'set -e
-      d=~/.local/share/takumi; rm -rf "$d"; mkdir -p "$d"; tar xzf - -C "$d" 2>/dev/null
-      for s in 20-system 40-session; do TAKUMI_ONLY=$s bash "$d/install/run.sh" >/dev/null; done
-      mkdir -p ~/.config/niri/takumi; cp "$d"/config/niri/config.kdl ~/.config/niri/; cp "$d"/config/niri/takumi/defaults.kdl ~/.config/niri/takumi/
-      for f in overrides.kdl outputs.kdl; do [ -e ~/.config/niri/takumi/$f ] || cp "$d"/config/niri/takumi/$f ~/.config/niri/takumi/; done
+    host_tz=$(readlink /etc/localtime 2>/dev/null | sed -n 's|.*/zoneinfo/||p' || true)
+    COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$repo" --exclude .git --exclude preview -czf - . | "$0" ssh "set -e
+      d=~/.local/share/takumi; rm -rf \"\$d\"; mkdir -p \"\$d\"; tar xzf - -C \"\$d\" 2>/dev/null
+      for s in 20-system 40-session; do TAKUMI_ONLY=\$s bash \"\$d/install/run.sh\" >/dev/null; done
+      mkdir -p ~/.config/niri/takumi; cp \"\$d\"/config/niri/config.kdl ~/.config/niri/; cp \"\$d\"/config/niri/takumi/defaults.kdl ~/.config/niri/takumi/
+      for f in overrides.kdl outputs.kdl; do [ -e ~/.config/niri/takumi/\$f ] || cp \"\$d\"/config/niri/takumi/\$f ~/.config/niri/takumi/; done
+      if [ -n '$host_tz' ] && [ -f '/usr/share/zoneinfo/$host_tz' ]; then sudo ln -sf '/usr/share/zoneinfo/$host_tz' /etc/localtime; fi
+      sudo systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || true
       takumi phase tick --force >/dev/null
       # Quickshell reloads changed QML in place, which strands a login screen in the middle of a login.
-      [ -n "$(loginctl list-sessions --no-legend | awk "\$4 == \"seat0\" && \$3 != \"greeter\"")" ] || sudo systemctl restart greetd
-      echo synced'
+      [ -n \"\$(loginctl list-sessions --no-legend | awk '\\\$4 == \"seat0\" && \\\$3 != \"greeter\"')\" ] || sudo systemctl restart greetd
+      echo synced"
     exit $? ;;
   wifi)
     "$0" ssh "bash -s -- ${1:-}" < "$repo/install/vm/wifi-rig.sh"; exit $? ;;

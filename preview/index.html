@@ -12,8 +12,9 @@
     --accent:#5ad7ff; --background:#0b0f14; --surface:#111821; --foreground:#d9e2ec;
     --fg:217 226 236; --ac:90 215 255; --bg:11 15 20; --sf:17 24 33;
     --red:#ff6b81; --yellow:#ffd166; --green:#7ee787; --cyan:#5ad7ff; --blue:#6ea8fe; --magenta:#c792ea; --muted:#5c6b7a;
-    --gap:10px; --r-window:12px; --r-core:18px; --core-h:38px; --row:44px;
-    --enter:160ms; --exit:110ms; --quick:120ms; --retint:1500ms; --morph:300ms;
+    --gap:10px; --r-window:14px; --r-core:23px; --core-h:46px; --row:44px;
+    --sun-x:50%; --glass-rest:.72; --glass-open:.84; --ao-edge:.42;
+    --enter:167ms; --exit:110ms; --quick:83ms; --retint:1500ms; --morph:333ms;
     --ease:cubic-bezier(.2,.8,.2,1); --spring:cubic-bezier(.3,1.25,.4,1);
   }
   * { box-sizing:border-box; }
@@ -24,8 +25,8 @@
   .micro { font-size:10.5px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:rgb(var(--fg) / .45); }
   svg.ico { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; flex:none; }
 
-  /* ---- Sky: drawn by the shell. A flat poster, recomputed from the palette and the clock. ---- */
-  #sky { position:fixed; inset:0; z-index:0; width:100%; height:100%; display:block; }
+  /* ---- Sky: drawn by the shell. Shifts subtly with Strip-coupled depth parallax. ---- */
+  #sky { position:fixed; inset:-2.5%; z-index:0; width:105%; height:105%; display:block; transition:transform 380ms var(--ease); }
 
   /* ---- The Strip ---- */
   #strip-viewport { position:fixed; inset:0; z-index:1; overflow:hidden; transition: opacity 400ms var(--ease), scale 400ms var(--ease); }
@@ -35,9 +36,16 @@
   #strip.max { bottom:var(--gap); }
   #strip-viewport.overview #strip { scale:.55; transform-origin:left center; }
   .col { height:100%; flex:none; overflow:hidden; position:relative; border-radius:var(--r-window); background:var(--background); color:var(--foreground);
-    box-shadow:0 0 0 1px rgb(var(--fg) / .10), 0 14px 36px rgb(0 0 0 / .35);
-    transition: background var(--retint), color var(--retint), box-shadow var(--quick), width 280ms var(--ease); }
-  .col.focused { box-shadow:0 0 0 2px var(--accent), 0 14px 36px rgb(0 0 0 / .35); }
+    box-shadow:0 0 0 1px rgb(var(--fg) / .09), 0 12px 32px rgb(0 0 0 / .30);
+    filter:brightness(.93) saturate(.90);
+    transition: background var(--retint), color var(--retint), box-shadow var(--quick), filter var(--enter) var(--ease), width 280ms var(--ease); }
+  /* Directional optical light catch on focused column (matches niri-theme.kdl active-gradient) */
+  .col::after { content:""; position:absolute; inset:0; border-radius:inherit; padding:2px; pointer-events:none; z-index:5; opacity:0;
+    background:linear-gradient(135deg, rgb(var(--ac) / .82), rgb(var(--ac) / .26));
+    -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude;
+    transition:opacity var(--quick); }
+  .col.focused { filter:none; box-shadow:0 20px 48px rgb(0 0 0 / .44); }
+  .col.focused::after { opacity:1; }
   .dim { color:rgb(var(--fg) / .62); } .faint { color:rgb(var(--fg) / .40); }
 
   /* App mocks. Apps draw their own chrome (niri has no title bars) and take the theme's palette. */
@@ -98,31 +106,119 @@
   .bt { height:100%; padding:10px 12px; font-size:11.5px; line-height:1.5; white-space:pre; overflow:hidden; }
   .bt .box { color:rgb(var(--fg) / .3); } .bt .t { color:var(--accent); } .bt .g1 { color:var(--green); } .bt .g2 { color:var(--yellow); } .bt .g3 { color:var(--red); } .bt .m { color:rgb(var(--fg) / .45); }
 
-  /* ---- The Core: the only shell object. Rest: status. Notice: it widens. Open: it grows into the Palette. ---- */
-  #scrim { position:fixed; inset:0; z-index:8; background:rgb(var(--bg) / .30); opacity:0; pointer-events:none; transition:opacity var(--exit); }
+  /* ---- The Core: the only shell object. Adaptive optical glass + solar-coupled dual-stroke rim. ---- */
+  #scrim { position:fixed; inset:0; z-index:8;
+    background:linear-gradient(180deg, rgb(var(--bg) / .16), rgb(var(--bg) / .28) 55%, rgb(var(--bg) / .38));
+    opacity:0; pointer-events:none; transition:opacity var(--exit); }
   #scrim.open { opacity:1; pointer-events:auto; transition:opacity var(--enter); }
   #core { position:fixed; left:50%; bottom:var(--gap); translate:-50% 0; z-index:10; height:var(--core-h); width:var(--w, 420px); border-radius:var(--r-core);
     overflow:hidden; display:grid; grid-template-rows:100%; grid-template-columns:100%;
-    background:rgb(var(--sf) / .94); box-shadow:0 0 0 1px rgb(var(--fg) / .11), inset 0 1px 0 rgb(var(--fg) / .07), 0 18px 48px rgb(0 0 0 / .45);
+    background:rgb(var(--sf) / var(--glass-rest));
+    backdrop-filter:blur(28px) saturate(1.25); -webkit-backdrop-filter:blur(28px) saturate(1.25);
+    background-image:linear-gradient(to bottom, rgb(var(--ac) / .06), transparent 160px), linear-gradient(to bottom, rgb(var(--fg) / .05), transparent 120px);
+    box-shadow:0 0 0 1px rgb(0 0 0 / var(--ao-edge)), 0 18px 48px rgb(0 0 0 / .45);
     transition: width var(--morph) var(--spring), height var(--morph) var(--spring), border-radius var(--morph) var(--ease), bottom 360ms var(--ease), background var(--retint); }
   #core.hidden, body.locked #core { bottom:calc(-1 * var(--core-h) - var(--gap) * 3); }
-  /* Light (shell/Core/Core.qml): a sheen down the top, a rim brightest at the top and the accent while lit, an aura. */
-  #core { background-image:linear-gradient(to bottom, rgb(var(--fg) / .05), transparent 120px); box-shadow:0 18px 48px rgb(0 0 0 / .45); }
+  /* Dual-stroke optical rim (shell/Core/Core.qml): upper specular catch tracks the Sky's solar azimuth (--sun-x). */
   #core::before { content:""; position:absolute; inset:0; border-radius:inherit; padding:1px; pointer-events:none; z-index:3;
-    background:linear-gradient(to bottom, rgb(var(--fg) / .24), rgb(var(--fg) / .09) 28px, rgb(var(--fg) / .05));
+    background:radial-gradient(68% 100% at var(--sun-x) 0%, rgb(var(--fg) / .26), rgb(var(--fg) / .09) 52%, rgb(var(--fg) / .05));
     -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude; transition:background var(--enter); }
-  #core.open::before, #core.notice::before { background:linear-gradient(to bottom, rgb(var(--ac) / .6), rgb(var(--fg) / .09) 28px, rgb(var(--fg) / .05)); }
-  #core.open, #core.notice { box-shadow:0 18px 48px rgb(0 0 0 / .45), 0 0 56px rgb(var(--ac) / .26); }
-  /* One selection that glides from row to row, and rows that come in one after another as the Core opens. */
+  #core.open::before, #core.notice::before {
+    background:radial-gradient(72% 100% at var(--sun-x) 0%, rgb(var(--ac) / .62), rgb(var(--ac) / .22) 55%, rgb(var(--fg) / .06)); }
+  #core.open, #core.notice {
+    background:rgb(var(--sf) / var(--glass-open));
+    box-shadow:0 0 0 1px rgb(0 0 0 / var(--ao-edge)), 0 24px 60px rgb(0 0 0 / .48), 0 0 56px rgb(var(--ac) / .22); }
+  /* Concentric inner radii: coreOpenRadius 24 -> field 14, rows 12 */
   #rows { position:relative; }
-  #hl { position:absolute; left:10px; right:10px; height:var(--row); border-radius:11px; background:rgb(var(--ac) / .11); pointer-events:none;
+  #hl { position:absolute; left:10px; right:10px; height:var(--row); border-radius:12px; background:rgb(var(--ac) / .11); pointer-events:none;
     transition:top 150ms var(--ease); z-index:0; }
   #hl::before { content:""; position:absolute; left:0; top:12px; bottom:12px; width:2px; border-radius:1px; background:var(--accent); }
   .row { z-index:1; }
   #core.opening .row { animation:rowin var(--enter) var(--ease) both; }
   @keyframes rowin { from { opacity:0; translate:0 8px; } }
-  #core.open { height:min(var(--open-h, 440px), calc(100vh - 40px)); width:min(640px, calc(100vw - 20px)); border-radius:22px; }
+  #core.open { height:min(var(--open-h, 440px), calc(100vh - 40px)); width:min(var(--open-w, 640px), calc(100vw - 20px)); border-radius:24px; }
   #core > * { grid-area:1/1; min-height:0; min-width:0; }
+  #open, #quick, #today { opacity:0; pointer-events:none; transition:opacity var(--exit); }
+  #core.open.v-palette #open, #core.open.v-quick #quick, #core.open.v-today #today { opacity:1; pointer-events:auto; transition:opacity var(--enter) 90ms; }
+  #clock, #status { cursor:pointer; padding:4px 8px; border-radius:999px; transition:background var(--quick); }
+  #clock:hover, #status:hover { background:rgb(var(--fg) / .07); }
+
+  /* Quick settings & Today decks (concentric 14 px tiles + transient optical sliders) */
+  #quick, #today { display:flex; flex-direction:column; padding:16px; gap:12px; height:100%; overflow:hidden; }
+  .deck-head { display:flex; align-items:center; justify-content:space-between; }
+  .deck-head h3 { margin:0; font-size:18px; font-weight:600; letter-spacing:-.015em; }
+  .qgrid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .qtile { position:relative; height:56px; border-radius:14px; padding:0 12px; display:flex; align-items:center; gap:10px; cursor:pointer;
+    background:rgb(var(--fg) / .055); border:1px solid rgb(var(--fg) / .08); overflow:hidden;
+    transition:background var(--quick), border-color var(--quick), transform var(--quick); }
+  .qtile::before { content:""; position:absolute; top:0; left:10px; right:10px; height:1px; pointer-events:none; opacity:0;
+    background:radial-gradient(56px circle at var(--mx, 50%) 0%, rgb(var(--fg) / .38), transparent 72%); transition:opacity var(--quick); }
+  .qtile:hover::before { opacity:1; }
+  .qtile:hover { background:rgb(var(--fg) / .09); }
+  .qtile:active { transform:scale(.975); }
+  .qtile.on { background:rgb(var(--ac) / .17); border-color:rgb(var(--ac) / .34); }
+  .qtile.on::before { background:radial-gradient(60px circle at var(--mx, 50%) 0%, rgb(var(--ac) / .9), transparent 72%); }
+  .qtile .qi { color:rgb(var(--fg) / .82); flex:none; }
+  .qtile.on .qi { color:var(--accent); }
+  .qtile .qt { min-width:0; } .qtile .ql { font-size:13px; font-weight:600; line-height:1.2; }
+  .qtile .qd { font-size:11.5px; color:rgb(var(--fg) / .6); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .qlevel { position:relative; height:34px; border-radius:999px; background:rgb(var(--fg) / .07); border:1px solid rgb(var(--fg) / .09);
+    overflow:hidden; cursor:ew-resize; transition:border-color var(--quick), box-shadow var(--quick); }
+  .qlevel:hover, .qlevel.drag { border-color:rgb(var(--ac) / .48); box-shadow:inset 0 1px 0 rgb(var(--ac) / .55); }
+  .qlevel .qbar { position:absolute; inset:0 auto 0 0; min-width:34px; border-radius:999px; background:rgb(var(--ac) / .9); pointer-events:none; }
+  .qlevel .qlbl { position:relative; z-index:2; height:100%; display:flex; align-items:center; justify-content:space-between; padding:0 12px; font-size:12px; pointer-events:none; }
+  .qlevel .qlbl > span:first-child { color:var(--background); }
+  .qlevel .qlbl .qval.inv { color:var(--background); font-weight:550; }
+  .qhead-act { display:flex; align-items:center; gap:6px; }
+  .qicon-btn { width:28px; height:28px; border-radius:999px; border:1px solid rgb(var(--fg) / .09); background:rgb(var(--fg) / .05);
+    color:rgb(var(--fg) / .8); display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background var(--quick), border-color var(--quick); }
+  .qicon-btn:hover { background:rgb(var(--fg) / .11); border-color:rgb(var(--ac) / .35); color:var(--foreground); }
+  .qicon-btn svg.ico { width:14px; height:14px; }
+  .qnp { position:relative; border-radius:14px; padding:10px 12px; background:rgb(var(--fg) / .05); border:1px solid rgb(var(--fg) / .09);
+    display:flex; flex-direction:column; gap:9px; overflow:hidden; }
+  .qnp-ambient { position:absolute; inset:0; pointer-events:none; opacity:.22; }
+  .qnp-top { position:relative; z-index:2; display:flex; align-items:center; gap:11px; }
+  .qnp-art { width:48px; height:48px; border-radius:9px; flex:none; overflow:hidden; border:1px solid rgb(var(--fg) / .14); box-shadow:0 6px 16px rgb(0 0 0 / .35); }
+  .qnp-meta { flex:1; min-width:0; }
+  .qnp-ctrls { display:flex; align-items:center; gap:3px; flex:none; }
+  .qnp-btn { width:30px; height:30px; border-radius:999px; border:0; background:transparent; color:rgb(var(--fg) / .84);
+    display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background var(--quick), transform var(--quick); }
+  .qnp-btn:hover { background:rgb(var(--fg) / .10); color:var(--foreground); }
+  .qnp-btn:active { transform:scale(.94); }
+  .qnp-btn.pri { width:34px; height:34px; background:var(--accent); color:var(--background); }
+  .qnp-btn.pri:hover { filter:brightness(1.06); background:var(--accent); color:var(--background); }
+  .qnp-btn svg.ico { width:14px; height:14px; }
+  .qnp-seek { position:relative; z-index:2; display:flex; align-items:center; gap:8px; font-size:10.5px; color:rgb(var(--fg) / .52); }
+  .qnp-track { flex:1; height:14px; display:flex; align-items:center; cursor:ew-resize; }
+  .qnp-rail { width:100%; height:3px; border-radius:99px; background:rgb(var(--fg) / .14); overflow:hidden; transition:height var(--quick); }
+  .qnp-track:hover .qnp-rail, .qnp-track.drag .qnp-rail { height:5px; }
+  .qnp-fill { height:100%; background:var(--accent); border-radius:99px; }
+  .solar-card { padding:10px 12px; border-radius:14px; background:rgb(var(--fg) / .05); border:1px solid rgb(var(--fg) / .08); }
+  .solar-btns { display:flex; justify-content:space-between; margin-top:4px; }
+  .solar-btns button { border:0; background:none; padding:2px 6px; border-radius:999px; font:500 10.5px Inter, sans-serif;
+    color:rgb(var(--fg) / .52); cursor:pointer; transition:background var(--quick), color var(--quick); }
+  .solar-btns button:hover { background:rgb(var(--fg) / .08); color:var(--foreground); }
+  .solar-btns button.on { color:var(--accent); background:rgb(var(--ac) / .14); }
+  .cal-grid { display:grid; grid-template-columns:repeat(7, 1fr); gap:4px; text-align:center; font-size:12px; }
+  .cal-cell { height:30px; display:flex; align-items:center; justify-content:center; border-radius:999px; color:rgb(var(--fg) / .76); cursor:pointer; transition:background var(--quick); }
+  .cal-cell:hover:not(.dow):not(.today):not(:empty) { background:rgb(var(--fg) / .07); }
+  .cal-cell.dow { font-size:10.5px; font-weight:600; color:rgb(var(--fg) / .42); height:22px; cursor:default; }
+  .cal-cell.today { background:var(--accent); color:var(--background); font-weight:650; }
+  .cal-cell.sel { box-shadow:inset 0 0 0 1px rgb(var(--ac) / .7); color:var(--accent); font-weight:600; }
+  /* 3-column visual Theme Gallery inside Palette */
+  .tg-bar { display:flex; align-items:center; justify-content:space-between; padding:2px 6px 8px; gap:8px; }
+  .tg-pills { display:flex; gap:4px; }
+  .tg-pill { border:0; background:transparent; color:rgb(var(--fg) / .58); font:550 11px Inter, sans-serif;
+    padding:4px 9px; border-radius:999px; cursor:pointer; transition:background var(--quick), color var(--quick); }
+  .tg-pill:hover { background:rgb(var(--fg) / .07); color:var(--foreground); }
+  .tg-pill.on { background:rgb(var(--ac) / .17); color:var(--accent); }
+  .tgrid { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; padding:2px 4px 6px; }
+  .tcard { border-radius:14px; overflow:hidden; border:1px solid rgb(var(--fg) / .1); background:rgb(var(--fg) / .04); cursor:pointer;
+    transition:transform var(--quick), border-color var(--quick); }
+  .tcard:hover { transform:translateY(-1px); border-color:rgb(var(--ac) / .55); }
+  .tcard.cur { border-color:var(--accent); box-shadow:0 0 0 1px rgb(var(--ac) / .45); }
+  .tcard .tsw { height:56px; position:relative; }
+  .tcard .tmeta { padding:7px 9px; display:flex; align-items:center; justify-content:space-between; font-size:12px; font-weight:550; }
   .face { display:flex; align-items:center; gap:16px; padding:0 16px 0 12px; height:var(--core-h); align-self:end; white-space:nowrap; transition:opacity var(--exit); }
   #rest { opacity:1; } #core.open #rest, #core.notice #rest { opacity:0; pointer-events:none; transition:opacity 70ms; }
   #notice { opacity:0; pointer-events:none; } #core.notice #notice { opacity:1; transition:opacity var(--enter) 80ms; }
@@ -150,14 +246,13 @@
   #notice .meter i { display:block; height:100%; background:var(--accent); border-radius:2px; transition:width 160ms var(--ease); }
   #notice code { font-family:"JetBrains Mono", monospace; font-size:11.5px; color:var(--accent); }
 
-  #open { display:flex; flex-direction:column; height:100%; overflow:hidden; opacity:0; pointer-events:none; transition:opacity 90ms; }
-  #core.open #open { opacity:1; pointer-events:auto; transition:opacity var(--enter) 100ms; }
+  #open { display:flex; flex-direction:column; height:100%; overflow:hidden; }
   #rows { flex:1; min-height:0; overflow:auto; display:flex; flex-direction:column-reverse; padding:10px 10px 6px; gap:2px; scrollbar-width:none; }
   #plan { display:none; align-items:center; gap:6px; flex-wrap:wrap; padding:0 18px 10px; }
   #plan.show { display:flex; }
   #plan code { font:400 11px "JetBrains Mono", monospace; color:var(--foreground); padding:3px 8px; border-radius:6px; box-shadow:inset 0 0 0 1px rgb(var(--ac) / .45); }
   #plan .micro { margin-right:4px; color:var(--accent); }
-  #field { height:52px; margin:0 10px 10px; border-radius:13px; background:rgb(var(--fg) / .06); display:flex; align-items:center; padding:0 14px 0 12px; gap:12px; flex:none; }
+  #field { height:52px; margin:0 10px 10px; border-radius:14px; background:rgb(var(--fg) / .06); display:flex; align-items:center; padding:0 14px 0 12px; gap:12px; flex:none; }
   #field .em { width:18px; height:18px; }
   #q { flex:1; border:0; background:none; outline:none; color:var(--foreground); font:500 16.5px Inter, sans-serif; letter-spacing:-.012em; caret-color:var(--accent); }
   #q::placeholder { color:rgb(var(--fg) / .38); }
@@ -188,7 +283,7 @@
   .card .kicker { color:var(--accent); } .card .t { font-size:16.5px; font-weight:600; } .card .d { color:rgb(var(--fg) / .62); }
   .card .sec { font:400 14px "JetBrains Mono", monospace; margin-top:-2px; } .card .h { font-size:11.5px; color:rgb(var(--fg) / .40); }
   @media (prefers-reduced-motion: reduce) { #field.busy::after, .row.busy::before { animation:none; } }
-  .row { position:relative; display:flex; align-items:center; height:var(--row); flex:none; padding:0 12px 0 12px; border-radius:11px; cursor:pointer; gap:12px; transition:background var(--quick), scale var(--quick) var(--ease); }
+  .row { position:relative; display:flex; align-items:center; height:var(--row); flex:none; padding:0 12px 0 12px; border-radius:12px; cursor:pointer; gap:12px; transition:background var(--quick), scale var(--quick) var(--ease); }
   .row:hover:not(.cur) { background:rgb(var(--fg) / .05); } .row:active { scale:.975; }
   .row::before { content:""; position:absolute; left:0; top:12px; bottom:12px; width:2px; border-radius:1px; background:var(--accent); opacity:0; transition:opacity var(--quick); }
   .row.busy::before { opacity:1; }
@@ -211,7 +306,15 @@
   #lock .time { font-size:clamp(72px, 15vh, 150px); font-weight:300; letter-spacing:-.055em; line-height:.9; font-feature-settings:"tnum" 1, "ss01" 1; }
   #lock .date { margin-top:16px; }
   #lock .pw { margin-top:44px; display:flex; align-items:center; gap:10px; height:44px; padding:0 20px; border-radius:22px; width:240px;
-    background:rgb(var(--sf) / .55); box-shadow:0 0 0 1px rgb(var(--fg) / .24); transition:box-shadow var(--quick); }
+    background:rgb(var(--sf) / .58); backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px);
+    box-shadow:0 0 0 1px rgb(var(--fg) / .24); transition:box-shadow var(--quick); }
+  .lock-vf { position:absolute; width:26px; height:26px; border-color:rgb(var(--fg) / .28); border-style:solid; border-width:0; pointer-events:none; }
+  .lock-vf.tl { top:24px; left:24px; border-top-width:1.5px; border-left-width:1.5px; }
+  .lock-vf.tr { top:24px; right:24px; border-top-width:1.5px; border-right-width:1.5px; }
+  .lock-vf.bl { bottom:24px; left:24px; border-bottom-width:1.5px; border-left-width:1.5px; }
+  .lock-vf.br { bottom:24px; right:24px; border-bottom-width:1.5px; border-right-width:1.5px; }
+  .lock-ghost { position:absolute; font-family:'Noto Sans CJK JP','Hiragino Sans','PingFang SC',sans-serif; font-size:min(76vh,52vw);
+    font-weight:900; color:transparent; -webkit-text-stroke:1px rgb(var(--fg) / .065); pointer-events:none; line-height:1; }
   #lock .pw.typing { box-shadow:0 0 0 1px rgb(var(--ac) / .6), 0 0 36px rgb(var(--ac) / .26); }
   #lock .pw i.on { animation:pop var(--enter) cubic-bezier(.3, 1.6, .5, 1) both; }
   @keyframes pop { from { scale:.3; } }
@@ -248,9 +351,13 @@
     <div id="plan"></div>
     <div id="field"><span class="em-slot"></span><span class="ask-ico"></span><input id="q" placeholder="Open, find, switch, change, or just say it" autocomplete="off" spellcheck="false"><input id="secret" type="password" autocomplete="off" spellcheck="false"><kbd id="fk">ESC</kbd></div>
   </div>
+  <div id="quick"></div>
+  <div id="today"></div>
 </div>
 
 <div id="lock">
+  <div class="lock-vf tl"></div><div class="lock-vf tr"></div><div class="lock-vf bl"></div><div class="lock-vf br"></div>
+  <div class="lock-ghost" aria-hidden="true">匠</div>
   <span class="em-slot"></span>
   <div class="time" id="lock-time"></div>
   <div class="date micro" id="lock-date"></div>
@@ -264,15 +371,28 @@
     <div class="hint" id="live"></div>
     <label>Theme <select id="c-theme"></select></label>
     <label>Phase <select id="c-phase"><option value="auto">auto (clock)</option><option>dawn</option><option>day</option><option>dusk</option><option>night</option></select></label>
-    <div class="btns"><button id="c-open">Core</button><button id="c-lock">Lock</button><button id="c-vol">Notice</button></div>
-    <div class="hint">Wi-Fi: click its mark, or type <b>wifi</b>. The password for Attic: 5G is <b>starlight attic</b>; Hotel Lobby has a sign-in page.</div>
-    <div class="hint"><kbd>Ctrl</kbd>+<kbd>Space</kbd> Core · <kbd>L</kbd> lock · <kbd>V</kbd> volume<br><kbd>←</kbd><kbd>→</kbd> strip · <kbd>↑</kbd><kbd>↓</kbd> workspace · <kbd>R</kbd> width<br><kbd>M</kbd> maximize · <kbd>O</kbd> overview · <kbd>Q</kbd> close</div>
+    <label>Glass <select id="c-glass"><option value="adaptive">adaptive</option><option value="tinted">tinted</option><option value="clear">clear</option></select></label>
+    <div class="btns"><button id="c-open">Palette</button><button id="c-quick">Quick</button><button id="c-today">Today</button></div>
+    <div class="btns"><button id="c-lock">Lock</button><button id="c-vol">Notice</button></div>
+    <div class="hint">Click status marks for <b>Quick settings</b>, clock for <b>Today</b>, or type <b>theme</b> in Palette for the visual gallery.</div>
+    <div class="hint"><kbd>Space</kbd> Core · <kbd>I</kbd> Quick · <kbd>T</kbd> Today · <kbd>L</kbd> lock<br><kbd>←</kbd><kbd>→</kbd> strip · <kbd>↑</kbd><kbd>↓</kbd> workspace · <kbd>R</kbd> width<br><kbd>M</kbd> maximize · <kbd>O</kbd> overview · <kbd>Q</kbd> close</div>
   </div>
 </div>
 
 <script>
 const $ = s => document.querySelector(s);
-let DATA, theme = "ion", phase = "day", phaseMode = "auto", P = null;
+let DATA, theme = "ion", phase = "day", phaseMode = "auto", glassTint = "adaptive", coreView = "", themeModeFilter = "all", selDay = null, playing = true, trackIdx = 0, trackPct = 58, P = null;
+const TRACKS = [
+  { title:"Solitude", artist:"Ryuichi Sakamoto", app:"Spotify", len:264, c1:"#1c2d42", c2:"#68a8d8", c3:"#f0d9b5" },
+  { title:"Aruarian Dance", artist:"Nujabes", app:"Spotify", len:250, c1:"#2c1d18", c2:"#d98448", c3:"#f5d6a4" },
+  { title:"An Ending (Ascent)", artist:"Brian Eno", app:"Spotify", len:264, c1:"#181c28", c2:"#8a9ad4", c3:"#dce4f5" },
+];
+const fmtSec = s => `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}`;
+const albumArt = tr => `<svg viewBox="0 0 64 64" width="48" height="48"><defs>
+  <linearGradient id="alb-${trackIdx}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${tr.c1}"/><stop offset=".6" stop-color="${tr.c2}"/><stop offset="1" stop-color="${tr.c1}"/></linearGradient>
+  <radialGradient id="albs-${trackIdx}" cx="62%" cy="38%" r="48%"><stop offset="0" stop-color="${tr.c3}" stop-opacity=".95"/><stop offset=".5" stop-color="${tr.c2}" stop-opacity=".4"/><stop offset="1" stop-color="${tr.c1}" stop-opacity="0"/></radialGradient>
+</defs><rect width="64" height="64" fill="url(#alb-${trackIdx})"/><circle cx="38" cy="24" r="24" fill="url(#albs-${trackIdx})"/><path d="M0 44 Q18 36 34 42 T64 38 L64 64 L0 64 Z" fill="${tr.c1}" opacity=".78"/><line x1="0" y1="43" x2="64" y2="43" stroke="${tr.c3}" stroke-opacity=".35" stroke-width="1"/></svg>`;
+let bright = 74, swState = { wifi: true, bt: true, dnd: false, night: false, awake: false, mic: true, perf: false };
 const schedule = { dawn: 330, day: 480, dusk: 1050, night: 1230 };
 const nowMin = () => { const d = new Date(); return d.getHours()*60 + d.getMinutes(); };
 const clockPhase = () => { const m = nowMin(); return (m >= schedule.night || m < schedule.dawn) ? "night" : m >= schedule.dusk ? "dusk" : m >= schedule.day ? "day" : "dawn"; };
@@ -314,6 +434,14 @@ const I = {
   bt:'<path d="M7 7.5l10 9-5 4.5V3l5 4.5-10 9"/>',
   moon:'<path d="M19 14.5A7.5 7.5 0 0 1 9.5 5a7.5 7.5 0 1 0 9.5 9.5z"/>',
   mute:'<path d="M4 10v4h3.5L12 18V6L7.5 10H4zM16 10l4 4M20 10l-4 4"/>',
+  bell:'<path d="M6.5 16.5v-5a5.5 5.5 0 0 1 11 0v5l1.5 2h-14zM10 20.5a2 2 0 0 0 4 0"/>',
+  cup:'<path d="M5 9h11v5a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4zM16 10.5h1.5a2.5 2.5 0 0 1 0 5H16M8.5 4.5c0 1 1 1.4 1 2.5M12 4.5c0 1 1 1.4 1 2.5"/>',
+  mic:'<path d="M12 3.5a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0v-5a3 3 0 0 1 3-3zM6.5 11.5a5.5 5.5 0 0 0 11 0M12 17v3.5M9 20.5h6"/>',
+  bolt:'<path d="M13 3L5.5 13.5h6L11 21l7.5-10.5h-6z"/>',
+  play:'<path d="M8 5.8v12.4a.8.8 0 0 0 1.2.7l9.6-6.2a.8.8 0 0 0 0-1.4L9.2 5.1A.8.8 0 0 0 8 5.8z"/>',
+  pause:'<path d="M8.5 5.5v13M15.5 5.5v13"/>',
+  prev:'<path d="M6.5 6v12M18 6.5v11L9.5 12z"/>',
+  next:'<path d="M17.5 6v12M6 6.5v11l8.5-5.5z"/>',
 };
 const icon = (n, cls = "ico") => `<svg class="${cls}" viewBox="0 0 24 24">${I[n] ?? I.cmd}</svg>`;
 
@@ -336,15 +464,24 @@ function drawSky() {
   if (phaseMode !== "auto") t = { dawn:.12, day:.5, dusk:.86, night:.62 }[phase];
   else if (!night) t = Math.min(1, Math.max(0, (m - schedule.dawn) / (schedule.night - schedule.dawn)));
   else { const span = 1440 - schedule.night + schedule.dawn, into = (m - schedule.night + 1440) % 1440; t = into / span; }
-  const R = night ? 48 : 88, sx = 220 + t * 1160, sy = HZ - Math.sin(Math.PI * t) * (night ? 500 : 450) + (night ? 0 : 24);
-  const haloR = R * (night ? 3.1 : phase === "day" ? 2.5 : 3.5), haloA = light ? .22 : ({ dawn:.36, day:.19, dusk:.38, night:.25 }[phase] || .2);
+  const R = night ? 26 : 34, sx = 220 + t * 1160, sy = HZ - Math.sin(Math.PI * t) * (night ? 470 : 420) + (night ? 0 : 18);
+  const sunWarm = { dawn: "#ffdfa8", day: "#fff8eb", dusk: "#ffbe85", night: "#dde7f5" }[phase] || "#fff8eb";
+  const sunCore = night ? mix(sunWarm, "#ffffff", .55) : mix(sunWarm, "#ffffff", phase === "day" ? .88 : .72);
+  const sunLimb = night ? mix(sunWarm, p.accent, .22) : mix(sunWarm, p.accent, light ? .16 : .24);
+  const scatterCol = mix(sunLimb, p.accent, .42);
+  const outerR = R * (night ? 5.2 : phase === "day" ? 6.8 : 8.4), coronaR = R * (night ? 2.4 : phase === "day" ? 2.6 : 3.2);
+  const scatterA = light ? ({ dawn:.24, day:.16, dusk:.26, night:.12 }[phase] || .16) : ({ dawn:.32, day:.20, dusk:.34, night:.18 }[phase] || .20);
   const hzStop = (HZ / H).toFixed(4), midStop = ((HZ / H) * .52).toFixed(4);
   let s = `<defs>
-    <radialGradient id="g-halo" gradientUnits="userSpaceOnUse" cx="${sx}" cy="${sy}" r="${haloR}" fx="${sx}" fy="${sy}"><stop offset="${(R*.55/haloR).toFixed(3)}" stop-color="${p.accent}" stop-opacity="${haloA}"/><stop offset=".5" stop-color="${secondary}" stop-opacity="${(haloA*.35).toFixed(3)}"/><stop offset="1" stop-color="${p.accent}" stop-opacity="0"/></radialGradient>
+    <radialGradient id="g-scatter" gradientUnits="userSpaceOnUse" cx="${sx}" cy="${sy}" r="${outerR}"><stop offset="0" stop-color="${sunLimb}" stop-opacity="${scatterA}"/><stop offset=".28" stop-color="${scatterCol}" stop-opacity="${(scatterA*.48).toFixed(3)}"/><stop offset=".62" stop-color="${secondary}" stop-opacity="${(scatterA*.14).toFixed(3)}"/><stop offset="1" stop-color="${scatterCol}" stop-opacity="0"/></radialGradient>
+    <radialGradient id="g-corona" gradientUnits="userSpaceOnUse" cx="${sx}" cy="${sy}" r="${coronaR}"><stop offset="0" stop-color="${sunCore}" stop-opacity="${night ? .26 : (light ? .42 : .62)}"/><stop offset=".32" stop-color="${sunLimb}" stop-opacity="${night ? .12 : (light ? .20 : .30)}"/><stop offset=".68" stop-color="${scatterCol}" stop-opacity="${night ? .04 : .08}"/><stop offset="1" stop-color="${scatterCol}" stop-opacity="0"/></radialGradient>
+    <radialGradient id="g-sun" gradientUnits="userSpaceOnUse" cx="${sx}" cy="${sy}" r="${(R*1.18).toFixed(1)}"><stop offset="0" stop-color="#ffffff" stop-opacity="${light ? .96 : .98}"/><stop offset=".42" stop-color="${sunCore}" stop-opacity="${light ? .92 : .95}"/><stop offset=".76" stop-color="${sunLimb}" stop-opacity="${light ? .68 : .78}"/><stop offset=".92" stop-color="${sunLimb}" stop-opacity="${light ? .24 : .34}"/><stop offset="1" stop-color="${sunLimb}" stop-opacity="0"/></radialGradient>
+    <radialGradient id="g-moon" gradientUnits="userSpaceOnUse" cx="${(sx - R*.28).toFixed(1)}" cy="${(sy + R*.12).toFixed(1)}" r="${R}"><stop offset="0" stop-color="${sunCore}" stop-opacity=".96"/><stop offset=".72" stop-color="${sunLimb}" stop-opacity=".88"/><stop offset="1" stop-color="${sunLimb}" stop-opacity=".55"/></radialGradient>
+    <radialGradient id="g-flare" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="${sunCore}" stop-opacity="${light ? .10 : (phase === "day" ? .11 : .18)}"/><stop offset=".45" stop-color="${sunLimb}" stop-opacity="${light ? .04 : .07}"/><stop offset="1" stop-color="${sunLimb}" stop-opacity="0"/></radialGradient>
     <radialGradient id="g-vig" gradientUnits="userSpaceOnUse" cx="${W/2}" cy="${H*.45}" r="${W*.92}"><stop offset="${(.34/.92).toFixed(3)}" stop-color="${p.background}" stop-opacity="0"/><stop offset="1" stop-color="${p.background}" stop-opacity="${light ? .14 : .46}"/></radialGradient>
     <linearGradient id="g-sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${top}"/><stop offset="${midStop}" stop-color="${mid}"/><stop offset="${hzStop}" stop-color="${hz}"/><stop offset="${hzStop}" stop-color="${seaTop}"/><stop offset="1" stop-color="${seaBot}"/></linearGradient>
     <clipPath id="above"><rect x="0" y="0" width="${W}" height="${HZ}"/></clipPath>
-    <mask id="crescent"><rect width="${W}" height="${H}" fill="#fff"/><circle cx="${sx + R*.42}" cy="${sy - R*.22}" r="${R*.92}" fill="#000"/></mask>
+    <mask id="crescent"><rect width="${W}" height="${H}" fill="#fff"/><circle cx="${sx + R*.44}" cy="${sy - R*.20}" r="${R*.92}" fill="#000"/></mask>
     <filter id="grain" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency=".85" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
   </defs>
   <rect width="${W}" height="${H}" fill="url(#g-sky)"/>`;
@@ -363,14 +500,12 @@ function drawSky() {
   }
   const glowA = light ? .14 : ({ dawn:.22, day:.11, dusk:.25, night:.16 }[phase] || .14);
   s += `<defs><linearGradient id="g-bloom" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${p.accent}" stop-opacity="0"/><stop offset=".6" stop-color="${secondary}" stop-opacity="${(glowA*.55).toFixed(3)}"/><stop offset="1" stop-color="${p.accent}" stop-opacity="${glowA}"/></linearGradient></defs><rect x="0" y="${HZ - 220}" width="${W}" height="220" fill="url(#g-bloom)"/>`;
-  s += `<g clip-path="url(#above)"><rect x="${sx - haloR}" y="${sy - haloR}" width="${haloR*2}" height="${haloR*2}" fill="url(#g-halo)"/>`;
-  if (archetype === 2 && !night) {
-    const deg = (-0.22 * 180 / Math.PI).toFixed(1);
-    s += `<g transform="rotate(${deg} ${sx} ${sy})"><ellipse cx="${sx}" cy="${sy}" rx="${(R*2.2).toFixed(1)}" ry="${(R*.52).toFixed(1)}" fill="none" stroke="${secondary}" stroke-opacity="${light ? .22 : .28}" stroke-width="1.6"/><ellipse cx="${sx}" cy="${sy}" rx="${(R*3.1).toFixed(1)}" ry="${(R*.78).toFixed(1)}" fill="none" stroke="${p.accent}" stroke-opacity="${light ? .16 : .2}" stroke-width="1.1"/></g>`;
-  }
+  s += `<g clip-path="url(#above)"><rect x="${(sx - outerR).toFixed(1)}" y="${(sy - outerR).toFixed(1)}" width="${(outerR*2).toFixed(1)}" height="${(outerR*2).toFixed(1)}" fill="url(#g-scatter)"/>`;
+  if (!night) s += `<ellipse cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" rx="${(R*5.4).toFixed(1)}" ry="${(R*.68).toFixed(1)}" fill="url(#g-flare)"/>`;
+  s += `<circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${coronaR.toFixed(1)}" fill="url(#g-corona)"/>`;
   s += night
-    ? `<circle cx="${sx}" cy="${sy}" r="${R}" fill="${p.accent}" mask="url(#crescent)"/>`
-    : `<circle cx="${sx}" cy="${sy}" r="${R}" fill="${p.accent}" opacity="${phase === "day" ? (light ? .85 : .92) : 1}"/>` + (seed % 4 === 0 ? `<circle cx="${(sx - R*.08).toFixed(1)}" cy="${(sy + R*.06).toFixed(1)}" r="${(R*.84).toFixed(1)}" fill="${mix(p.background, p.surface, .45)}" opacity="${light ? .22 : .72}"/>` : "");
+    ? `<circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${R}" fill="${sunLimb}" opacity="${light ? .05 : .08}"/><circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${R}" fill="url(#g-moon)" mask="url(#crescent)"/>`
+    : `<circle cx="${sx.toFixed(1)}" cy="${sy.toFixed(1)}" r="${(R*1.18).toFixed(1)}" fill="url(#g-sun)"/>`;
   s += `</g>`;
 
   const far = mix(hz, p.foreground, light ? .12 : .11), midTone = light ? mix(p.background, p.foreground, .19) : mix(p.surface, p.foreground, .16);
@@ -393,8 +528,11 @@ function drawSky() {
   const waterSurf = () => {
     s += `<rect x="0" y="${HZ}" width="${W}" height="1.2" fill="${p.foreground}" opacity="${light ? .20 : .18}"/>`;
     for (let k = 1; k <= 26; k++) { const u = k / 26, y = HZ + (H - HZ) * u ** 1.7; s += `<rect x="0" y="${y.toFixed(1)}" width="${W}" height="${(.7 + u*1.6).toFixed(2)}" fill="${p.foreground}" opacity="${((light ? .05 : .045) + u*.055).toFixed(3)}"/>`; }
-    if (sy < HZ + R) for (let k = 0; k < 16; k++) { const u = k / 16, y = HZ + 6 + (H - HZ) * .62 * u ** 1.5, w = R * (night ? 1.15 : 1.75) * (1 - u*.7) * (.55 + r()*.45);
-      s += `<rect x="${(sx - w/2 + (r()-.5)*14).toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${(2 + u*3).toFixed(1)}" rx="1.5" fill="${k % 3 === 0 ? secondary : p.accent}" opacity="${((night ? .38 : .55) * (1 - u)).toFixed(2)}"/>`; }
+    if (sy < HZ + R * 2) {
+      s += `<ellipse cx="${sx.toFixed(1)}" cy="${(HZ + 12).toFixed(1)}" rx="${(R*4.2).toFixed(1)}" ry="${(R*1.6).toFixed(1)}" fill="url(#g-corona)" opacity="${night ? .32 : .42}"/>`;
+      for (let k = 0; k < 18; k++) { const u = k / 18, y = HZ + 5 + (H - HZ) * .56 * u ** 1.55, w = R * (night ? 1.8 : 2.6) * (1 - u*.68) * (.55 + r()*.45);
+        s += `<rect x="${(sx - w/2 + (r()-.5)*18).toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${(1.4 + u*2.2).toFixed(1)}" rx="1.5" fill="${k % 4 === 0 ? sunCore : sunLimb}" opacity="${((night ? .24 : .36) * (1 - u)).toFixed(2)}"/>`; }
+    }
   };
 
   if (archetype === 0) {
@@ -456,8 +594,16 @@ function applyTheme() {
   P = DATA.themes[theme][phase]; const r = document.documentElement.style;
   for (const k of ["accent","background","surface","foreground","muted","red","yellow","green","cyan","blue","magenta"]) r.setProperty("--" + k, P[k]);
   r.setProperty("--fg", rgb(P.foreground)); r.setProperty("--ac", rgb(P.accent)); r.setProperty("--bg", rgb(P.background)); r.setProperty("--sf", rgb(P.surface));
-  $("#c-theme").value = theme; $("#c-phase").value = phaseMode === "auto" ? "auto" : phase;
-  $("#live").innerHTML = `<b>${theme}</b> / <b>${phase}</b> from themes/*/theme.toml`;
+  // Sync solar azimuth & adaptive light-mode glass opacity with shell/Look/Style.qml
+  const light = luma(P.background) > 0.45;
+  r.setProperty("--sun-x", phase === "dawn" ? "22%" : phase === "dusk" ? "78%" : "50%");
+  const gRest = glassTint === "tinted" ? (light ? ".86" : ".82") : glassTint === "clear" ? (light ? ".68" : ".60") : (light ? ".80" : ".72");
+  const gOpen = glassTint === "tinted" ? (light ? ".94" : ".91") : glassTint === "clear" ? (light ? ".82" : ".74") : (light ? ".90" : ".84");
+  r.setProperty("--glass-rest", gRest);
+  r.setProperty("--glass-open", gOpen);
+  r.setProperty("--ao-edge", light ? ".11" : ".42");
+  $("#c-theme").value = theme; $("#c-phase").value = phaseMode === "auto" ? "auto" : phase; $("#c-glass").value = glassTint;
+  $("#live").innerHTML = `<b>${theme}</b> / <b>${phase}</b> · glass: <b>${glassTint}</b>`;
   drawSky(); renderRest(); renderStrip(false);
 }
 const setTheme = t => { if (DATA.themes[t]) { theme = t; applyTheme(); notice("sun", "Theme " + cap(t)); } };
@@ -466,7 +612,7 @@ const setPhase = p => { phaseMode = p; phase = p === "auto" ? clockPhase() : p; 
 /* ---------- Apps: dense, real, themed ---------- */
 const nvimCode = [
   ['c','#!/usr/bin/env bash'],
-  ['', '<span class="k">:</span> &lt;&lt;<span class="s">'ABOUT'</span>'],
+  ['', '<span class="k">:</span> &lt;&lt;<span class="s">\'ABOUT\'</span>'],
   ['c','summary: Print the phase in effect: dawn, day, dusk or night'],
   ['c','risk: 0'],
   ['', '<span class="s">ABOUT</span>'],
@@ -554,6 +700,8 @@ function renderStrip(rebuild = true) {
       if (cols.length === 1) x = (vw - parseFloat(el.style.width))/2 - left; else if (right + x > vw - 10) x = vw - 10 - right; else if (left + x < 10) x = 10 - left; }
     else x = 0;
     strip.dataset.x = x; strip.style.transform = `translateX(${x}px)`;
+    const pShift = cols.length > 1 ? Math.max(-24, Math.min(24, -(focus - (cols.length - 1) / 2) * 16)) : 0;
+    $("#sky").style.transform = `translateX(${pShift}px)`;
   });
   $("#core").classList.toggle("hidden", maximized);
   renderRest();
@@ -576,7 +724,9 @@ function renderRest() {
       <div class="bat"><div class="bat-ico"><div class="o"></div><div class="nub"></div><div class="f" style="width:${Math.round(13*batt/100)}px"></div></div><span>${batt}%</span></div>
       ${icon("vol")}</div>`;
   $("#rest .em").onclick = openCore;
-  $("#netmark").onclick = () => openCoreOn("wifi");
+  $("#clock").onclick = openToday;
+  $("#status").onclick = openQuick;
+  $("#netmark").onclick = e => { e.stopPropagation(); openCoreOn("wifi"); };
   $("#rest").querySelectorAll("#ticks i").forEach(t => t.onclick = () => gotoWs(+t.dataset.ws));
   $("#rest").querySelectorAll("#map i[data-col]").forEach(t => t.onclick = () => { focus = +t.dataset.col; maximized = false; renderStrip(false); });
   drawPhase();
@@ -802,8 +952,46 @@ function cardHtml(c) {
 const hl = (t, q) => { const i = t.toLowerCase().indexOf(q.toLowerCase()); return i < 0 || !q ? t : t.slice(0, i) + `<span class="hl">${t.slice(i, i + q.length)}</span>` + t.slice(i + q.length); };
 const swatch = t => { const p = DATA.themes[t][phase]; return `<div class="sw">${[p.background, p.surface, p.accent, p.foreground].map(c => `<i style="background:${c}"></i>`).join("")}</div>`; };
 function renderRows() {
-  const el = $("#rows"), q = $("#q").value.trim();
+  const el = $("#rows"), q = $("#q").value.trim(), ql = q.toLowerCase();
   if (card) { el.innerHTML = cardHtml(card); $("#plan").className = ""; $("#plan").innerHTML = ""; $("#core").style.setProperty("--open-h", (16 + 196 + 62) + "px"); return; }
+  // 3-column visual Theme Gallery with mode/phase pills + live hover-to-preview (shell/Core/ThemeGrid.qml)
+  if (!ask && (ql === "theme" || ql === "themes" || ql === "look" || ql.startsWith("theme ") || ql.startsWith("look "))) {
+    const sub = ql.replace(/^(themes?|look)\s*/, "").trim();
+    const list = Object.keys(DATA.themes).filter(t => {
+      const isL = luma(DATA.themes[t][phase].background) > .45;
+      if (themeModeFilter === "dark" && isL) return false;
+      if (themeModeFilter === "light" && !isL) return false;
+      return !sub || t.includes(sub);
+    });
+    el.style.flexDirection = "column";
+    el.innerHTML = `
+      <div class="tg-bar">
+        <div class="tg-pills">${["all","dark","light"].map(m => `<button class="tg-pill ${themeModeFilter===m?"on":""}" data-m="${m}">${cap(m)}</button>`).join("")}</div>
+        <div class="tg-pills">${["dawn","day","dusk","night"].map(p => `<button class="tg-pill ${phase===p?"on":""}" data-p="${p}">${cap(p)}</button>`).join("")}</div>
+      </div>
+      <div class="tgrid">${list.map(t => {
+        const p = DATA.themes[t][phase];
+        return `<div class="tcard ${t === theme ? "cur" : ""}" data-th="${t}">
+          <div class="tsw" style="background:linear-gradient(180deg, ${p.surface}, ${p.background} 65%, ${p.accent}40)">
+            <div style="position:absolute;left:50%;top:36%;width:16px;height:16px;border-radius:50%;transform:translate(-50%,-50%);background:${p.accent};box-shadow:0 0 18px ${p.accent}"></div>
+            <div style="position:absolute;left:8px;right:8px;bottom:7px;height:6px;border-radius:99px;background:${p.surface};border:1px solid ${p.foreground}24"></div>
+          </div>
+          <div class="tmeta"><span>${cap(t)}</span><span class="micro" style="color:${p.accent}">${luma(p.background) > .45 ? "Light" : "Dark"}</span></div>
+        </div>`;
+      }).join("")}</div>`;
+    let savedTheme = theme;
+    el.querySelectorAll("[data-m]").forEach(b => b.onclick = () => { themeModeFilter = b.dataset.m; renderRows(); });
+    el.querySelectorAll("[data-p]").forEach(b => b.onclick = () => { phaseMode = b.dataset.p; phase = b.dataset.p; applyTheme(); renderRows(); });
+    el.querySelectorAll(".tcard").forEach(c => {
+      c.onmouseenter = () => { theme = c.dataset.th; applyTheme(); };
+      c.onclick = () => { savedTheme = c.dataset.th; closeCore(); setTheme(c.dataset.th); };
+    });
+    el.onmouseleave = () => { if (theme !== savedTheme && coreView === "palette") { theme = savedTheme; applyTheme(); } };
+    $("#plan").className = ""; $("#plan").innerHTML = "";
+    $("#core").style.setProperty("--open-h", "468px");
+    return;
+  }
+  el.style.flexDirection = "column-reverse"; el.onmouseleave = null;
   const shown = ask ? [{ ...ask.row, sub:ask.note, tone:ask.tone, risk:0 }] : rows, at = ask ? 0 : cur;
   const pl = !ask && q.includes(" ") ? plan(q) : [];
   $("#plan").className = pl.length ? "show" : ""; $("#plan").innerHTML = pl.length ? `<span class="micro">Will run</span>` + pl.map(c => `<code>takumi ${c}</code>`).join("") : "";
@@ -833,15 +1021,132 @@ const run = i => {
   armed = ""; hist[r.id] = (hist[r.id]||0)+1; closeCore(); r.run();
 };
 function refreshRows() { const q = $("#q").value; card = null; rows = q.trim() ? providers(q) : startRows(); cur = 0; armed = ""; renderRows(); }
+function setCoreView(v, w, h) {
+  const c = $("#core"); clearTimeout(noticeTimer);
+  coreView = v;
+  c.classList.remove("notice", "v-palette", "v-quick", "v-today");
+  c.classList.add("open", "opening", "v-" + v);
+  c.style.setProperty("--open-w", w + "px");
+  c.style.setProperty("--open-h", h + "px");
+  $("#scrim").classList.add("open");
+  setTimeout(() => c.classList.remove("opening"), 450);
+}
 function openCore() {
-  const c = $("#core"); clearTimeout(noticeTimer); c.classList.remove("notice"); c.classList.add("open", "opening"); $("#scrim").classList.add("open");
-  lastHl = null; setTimeout(() => c.classList.remove("opening"), 450);
+  setCoreView("palette", 640, 440);
+  lastHl = null;
   if (!joining) ask = null; renderField(); $("#q").value = ""; refreshRows(); setTimeout(() => (ask ? $("#secret") : $("#q")).focus(), 60);
+}
+function renderQuick() {
+  const tiles = [
+    { k:"wifi",  i:"wifi", l:"Wi-Fi",         d: swState.wifi ? "Studio 6E" : "Off" },
+    { k:"bt",    i:"bt",   l:"Bluetooth",     d: swState.bt ? "Beoplay EX" : "Off" },
+    { k:"dnd",   i:"bell", l:"Do not disturb",d: swState.dnd ? "Quiet" : "Off" },
+    { k:"night", i:"moon", l:"Night light",   d: swState.night ? "Warm" : "Off" },
+    { k:"awake", i:"cup",  l:"Stay awake",    d: swState.awake ? "1 h" : "Off" },
+    { k:"mic",   i:"mic",  l:"Microphone",    d: swState.mic ? "Listening" : "Muted" },
+    { k:"perf",  i:"bolt", l:"Power mode",    d: swState.perf ? "Performance" : "Balanced" },
+    { k:"look",  i:"sun",  l:"Look",          d: cap(theme) + " · " + cap(phase), go: () => openCoreOn("theme") },
+  ];
+  const tr = TRACKS[trackIdx], curSec = Math.round(tr.len * trackPct / 100);
+  $("#quick").innerHTML = `
+    <div class="deck-head">
+      <div><h3>Quick settings</h3><div class="micro" style="margin-top:2px">${batt}% · on battery</div></div>
+      <div class="qhead-act">
+        <button class="qicon-btn" id="q-lock" title="Lock">${icon("lock")}</button>
+        <button class="qicon-btn" id="q-pwr" title="Power">${icon("power")}</button>
+      </div>
+    </div>
+    <div class="qgrid">${tiles.map(t => `<div class="qtile ${t.k === "look" ? "on" : swState[t.k] ? "on" : ""}" data-k="${t.k}">
+      <span class="qi">${icon(t.i)}</span><div class="qt"><div class="ql">${t.l}</div><div class="qd">${t.d}</div></div></div>`).join("")}</div>
+    <div class="qlevel" id="ql-vol"><div class="qbar" style="width:${vol}%"></div><div class="qlbl"><span>${icon(vol ? "vol" : "mute")}</span><span class="mono qval ${vol>=84?"inv":""}">${vol}%</span></div></div>
+    <div class="qlevel" id="ql-bri"><div class="qbar" style="width:${bright}%"></div><div class="qlbl"><span>${icon("sun")}</span><span class="mono qval ${bright>=84?"inv":""}">${bright}%</span></div></div>
+    <div class="qnp">
+      <div class="qnp-ambient" style="background:radial-gradient(65% 130% at 12% 35%, ${tr.c2}, transparent 72%)"></div>
+      <div class="qnp-top">
+        <div class="qnp-art">${albumArt(tr)}</div>
+        <div class="qnp-meta">
+          <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${tr.title}</div>
+          <div class="dim" style="font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${tr.artist} · ${tr.app}</div>
+        </div>
+        <div class="qnp-ctrls">
+          <button class="qnp-btn" id="q-prev" title="Previous">${icon("prev")}</button>
+          <button class="qnp-btn pri" id="q-play" title="${playing?"Pause":"Play"}">${icon(playing ? "pause" : "play")}</button>
+          <button class="qnp-btn" id="q-next" title="Next">${icon("next")}</button>
+        </div>
+      </div>
+      <div class="qnp-seek">
+        <span class="mono" id="q-pos">${fmtSec(curSec)}</span>
+        <div class="qnp-track" id="q-seek"><div class="qnp-rail"><div class="qnp-fill" id="q-sfill" style="width:${trackPct}%"></div></div></div>
+        <span class="mono">${fmtSec(tr.len)}</span>
+      </div>
+    </div>`;
+  $("#q-lock").onclick = () => lock();
+  $("#q-pwr").onclick = () => openCoreOn("power");
+  $("#q-prev").onclick = () => { trackIdx = (trackIdx + TRACKS.length - 1) % TRACKS.length; trackPct = 18; renderQuick(); };
+  $("#q-next").onclick = () => { trackIdx = (trackIdx + 1) % TRACKS.length; trackPct = 12; renderQuick(); };
+  $("#q-play").onclick = () => { playing = !playing; renderQuick(); };
+  const seekEl = $("#q-seek");
+  const updSeek = x => {
+    const r = seekEl.getBoundingClientRect();
+    trackPct = Math.round(Math.max(0, Math.min(100, ((x - r.left) / r.width) * 100)));
+    $("#q-sfill").style.width = trackPct + "%";
+    $("#q-pos").textContent = fmtSec(Math.round(tr.len * trackPct / 100));
+  };
+  seekEl.onpointerdown = e => { seekEl.classList.add("drag"); seekEl.setPointerCapture(e.pointerId); updSeek(e.clientX);
+    const mv = ev => updSeek(ev.clientX), up = () => { seekEl.classList.remove("drag"); seekEl.removeEventListener("pointermove", mv); seekEl.removeEventListener("pointerup", up); };
+    seekEl.addEventListener("pointermove", mv); seekEl.addEventListener("pointerup", up); };
+  $("#quick").querySelectorAll(".qtile").forEach(el => {
+    el.onpointermove = e => { const r = el.getBoundingClientRect(); el.style.setProperty("--mx", Math.round(((e.clientX - r.left) / r.width) * 100) + "%"); };
+    el.onclick = () => {
+      const k = el.dataset.k;
+      if (k === "look") { openCoreOn("theme"); return; }
+      swState[k] = !swState[k];
+      if (k === "night") { phaseMode = swState.night ? "dusk" : "auto"; phase = swState.night ? "dusk" : clockPhase(); applyTheme(); }
+      renderQuick();
+    };
+  });
+  const bindSlider = (id, get, set) => {
+    const el = $(id);
+    const upd = x => {
+      const r = el.getBoundingClientRect(), v = Math.round(Math.max(0, Math.min(100, ((x - r.left) / r.width) * 100)));
+      set(v); el.querySelector(".qbar").style.width = v + "%";
+      const val = el.querySelector(".qval"); val.textContent = v + "%"; val.classList.toggle("inv", v >= 84);
+    };
+    el.onpointerdown = e => { el.classList.add("drag"); el.setPointerCapture(e.pointerId); upd(e.clientX);
+      const mv = ev => upd(ev.clientX), up = () => { el.classList.remove("drag"); el.removeEventListener("pointermove", mv); el.removeEventListener("pointerup", up); };
+      el.addEventListener("pointermove", mv); el.addEventListener("pointerup", up); };
+  };
+  bindSlider("#ql-vol", () => vol, v => { vol = v; });
+  bindSlider("#ql-bri", () => bright, v => { bright = v; });
+}
+function openQuick() { setCoreView("quick", 420, 504); renderQuick(); }
+function openToday() {
+  setCoreView("today", 372, 412);
+  const d = new Date(), y = d.getFullYear(), m = d.getMonth(), td = d.getDate();
+  const first = (new Date(y, m, 1).getDay() + 6) % 7, days = new Date(y, m + 1, 0).getDate();
+  const pos = { dawn: 16, day: 50, dusk: 82, night: 92 }[phase] ?? 50;
+  let cells = ["M","T","W","T","F","S","S"].map(w => `<div class="cal-cell dow">${w}</div>`).join("");
+  for (let i = 0; i < first; i++) cells += `<div class="cal-cell"></div>`;
+  for (let day = 1; day <= days; day++) cells += `<div class="cal-cell ${day === td ? "today" : selDay === day ? "sel" : ""}" data-day="${day}">${day}</div>`;
+  $("#today").innerHTML = `
+    <div class="deck-head"><h3>${d.toLocaleDateString(undefined, { weekday:"long", day:"numeric", month:"long" })}</h3><span class="micro">${cap(phase)}</span></div>
+    <div class="solar-card">
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:8px"><span class="micro">Phase Solar Arc</span><span class="mono" style="color:var(--accent)">${cap(phase)}</span></div>
+      <div style="position:relative;height:22px;display:flex;align-items:center">
+        <div style="width:100%;height:2px;border-radius:2px;background:rgb(var(--fg)/.14)"></div>
+        <div style="position:absolute;left:${pos}%;width:10px;height:10px;border-radius:50%;transform:translateX(-50%);background:var(--accent);box-shadow:0 0 14px var(--accent);transition:left var(--morph) var(--ease)"></div>
+      </div>
+      <div class="solar-btns">${["dawn","day","dusk","night"].map(p => `<button class="${phase===p?"on":""}" data-sp="${p}">${cap(p)}</button>`).join("")}</div>
+    </div>
+    <div class="cal-grid">${cells}</div>`;
+  $("#today").querySelectorAll("[data-sp]").forEach(b => b.onclick = () => { phaseMode = b.dataset.sp; phase = b.dataset.sp; applyTheme(); openToday(); });
+  $("#today").querySelectorAll("[data-day]").forEach(c => c.onclick = () => { selDay = +c.dataset.day; openToday(); });
 }
 function openCoreOn(text) { openCore(); $("#q").value = text; refreshRows(); }
 function openCoreWith(text) { setTimeout(() => openCoreOn(text), 240); }
 function closeCore() {
-  $("#core").classList.remove("open"); $("#scrim").classList.remove("open"); $("#q").blur(); $("#secret").blur();
+  coreView = "";
+  $("#core").classList.remove("open", "v-palette", "v-quick", "v-today"); $("#scrim").classList.remove("open"); $("#q").blur(); $("#secret").blur();
   if (!joining) { ask = null; $("#secret").value = ""; } card = null; $("#field").classList.remove("err"); renderField(); sizeTo("#rest");
 }
 $("#scrim").onclick = closeCore;
@@ -879,8 +1184,11 @@ document.addEventListener("keydown", e => {
     if (e.key === "Enter") { if (typed) unlock(); } else if (e.key === "Backspace") { typed = Math.max(0, typed-1); renderPw(); } else if (e.key === "Escape") { typed = 0; renderPw(); } else if (e.key.length === 1) { typed++; renderPw(); }
     e.preventDefault(); return;
   }
-  if ($("#core").classList.contains("open")) return;
-  if (e.ctrlKey && e.code === "Space") { openCore(); e.preventDefault(); return; }
+  if ($("#core").classList.contains("open")) {
+    if (e.key === "Escape") { closeCore(); e.preventDefault(); }
+    return;
+  }
+  if ((e.ctrlKey && e.code === "Space") || (e.code === "Space" && e.target.tagName !== "SELECT" && e.target.tagName !== "BUTTON")) { openCore(); e.preventDefault(); return; }
   if (e.target.tagName === "SELECT") return;
   const cols = workspaces[wsIndex];
   switch (e.key) {
@@ -888,6 +1196,8 @@ document.addEventListener("keydown", e => {
     case "ArrowRight": focus = Math.min(cols.length-1, focus+1); maximized = false; renderStrip(false); break;
     case "ArrowUp": if (wsIndex > 0) gotoWs(wsIndex-1); break;
     case "ArrowDown": if (wsIndex < workspaces.length-1) gotoWs(wsIndex+1); break;
+    case "i": case "I": openQuick(); break;
+    case "t": case "T": openToday(); break;
     case "m": case "M": maximized = !maximized; renderStrip(false); break;
     case "r": case "R": { const k = focus+":"+wsIndex, w = widthOf(focus); colWidths[k] = [1/3, 1/2, 2/3][([1/3, 1/2, 2/3].findIndex(x => Math.abs(x-w) < .01)+1) % 3]; maximized = false; renderStrip(false); break; }
     case "o": case "O": $("#strip-viewport").classList.toggle("overview"); break;
@@ -899,10 +1209,12 @@ document.addEventListener("keydown", e => {
   }
   e.preventDefault();
 });
-$("#c-open").onclick = openCore; $("#c-lock").onclick = lock; $("#c-vol").onclick = () => { vol = (vol + 10) % 110; notice("vol", "Volume", "", vol); };
+$("#c-open").onclick = openCore; $("#c-quick").onclick = openQuick; $("#c-today").onclick = openToday;
+$("#c-lock").onclick = lock; $("#c-vol").onclick = () => { vol = (vol + 10) % 110; notice("vol", "Volume", "", vol); };
 $("#controls h4").onclick = () => $("#controls").classList.toggle("open");
 $("#c-theme").onchange = e => setTheme(e.target.value);
 $("#c-phase").onchange = e => setPhase(e.target.value);
+$("#c-glass").onchange = e => { glassTint = e.target.value; applyTheme(); };
 $("#lock").onclick = () => { if (typed) unlock(); };
 
 function tick() {

@@ -1,7 +1,11 @@
 // rendered by takumi theme render
 layout {
-    focus-ring { active-color "{{accent}}"; inactive-color "{{muted}}"; }
-    shadow { color "#00000070"; }
+    // Directional optical light catch on the focused column rather than a flat neon outline.
+    focus-ring {
+        active-gradient from="{{accent}}d0" to="{{accent}}44" angle=135
+        inactive-color "{{muted}}38"
+    }
+    shadow { color "#00000078"; }
 }
 // The focus ring is drawn as a ring, never as a plate behind the window, so a window that lets the sky
 // through (a theme with glass = true) shows the sky, not the ring's colour. Opaque windows look the same.

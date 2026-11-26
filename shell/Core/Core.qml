@@ -106,13 +106,13 @@ PanelWindow {
             radius: body.radius
             level: capsule.lit ? 32 : 8
         }
-        // The contour: a dark hairline just outside the body, so the Core holds its edge over a pale sky
-        // or a white window.
+        // The contour: a dark ambient-occlusion hairline just outside the body (dual-stroke optical glass),
+        // so the Core holds a crisp cut edge over a pale sky or a white window.
         Rectangle {
             anchors.fill: body; anchors.margins: -Style.hairline
             radius: body.radius + Style.hairline
             color: "transparent"
-            border.width: Style.hairline; border.color: Qt.rgba(0, 0, 0, Theme.mode === "light" ? 0.10 : 0.38)
+            border.width: Style.hairline; border.color: Qt.rgba(0, 0, 0, Theme.mode === "light" ? 0.11 : 0.42)
         }
 
         Rectangle {
@@ -120,7 +120,7 @@ PanelWindow {
             anchors.fill: parent
             radius: win.open || win.approving ? Style.coreOpenRadius : Style.coreRadius
             Behavior on radius { NumberAnimation { duration: Style.morph; easing.type: Easing.BezierSpline; easing.bezierCurve: Style.easeMove } }
-            color: Theme.withAlpha(Theme.surface, Style.glow ? (win.open || win.approving ? Style.glassFillOpen : Style.glassFill)
+            color: Theme.withAlpha(Theme.surface, Style.glow ? Style.glassAlpha(win.open || win.approving, Theme.mode === "light")
                                                               : (win.open || win.approving ? Style.coreFillOpen : Style.coreFill))
             clip: true
             Behavior on color { ColorAnimation { duration: Style.retint } }
@@ -177,7 +177,7 @@ PanelWindow {
                 anchors.horizontalCenter: parent.horizontalCenter
                 opacity: win.approving ? 1 : 0
                 visible: opacity > 0
-                Behavior on opacity { NumberAnimation { duration: win.approving ? Style.enter : 90 } }
+                Behavior on opacity { NumberAnimation { duration: win.approving ? Style.enter : Style.exit } }
             }
             Open {
                 id: pane
@@ -185,7 +185,7 @@ PanelWindow {
                 anchors.fill: parent
                 opacity: active ? 1 : 0
                 visible: opacity > 0
-                Behavior on opacity { NumberAnimation { duration: pane.active ? Style.enter : 90 } }
+                Behavior on opacity { NumberAnimation { duration: pane.active ? Style.enter : Style.exit } }
             }
             Quick {
                 id: quick
@@ -196,7 +196,7 @@ PanelWindow {
                 width: implicitWidth; height: implicitHeight
                 opacity: active ? 1 : 0
                 visible: opacity > 0
-                Behavior on opacity { NumberAnimation { duration: quick.active ? Style.enter : 90 } }
+                Behavior on opacity { NumberAnimation { duration: quick.active ? Style.enter : Style.exit } }
             }
             Today {
                 id: today
@@ -207,7 +207,7 @@ PanelWindow {
                 width: implicitWidth; height: implicitHeight
                 opacity: active ? 1 : 0
                 visible: opacity > 0
-                Behavior on opacity { NumberAnimation { duration: today.active ? Style.enter : 90 } }
+                Behavior on opacity { NumberAnimation { duration: today.active ? Style.enter : Style.exit } }
             }
             KeysSheet {
                 id: keysSheet
@@ -218,7 +218,7 @@ PanelWindow {
                 width: implicitWidth; height: implicitHeight
                 opacity: active ? 1 : 0
                 visible: opacity > 0
-                Behavior on opacity { NumberAnimation { duration: keysSheet.active ? Style.enter : 90 } }
+                Behavior on opacity { NumberAnimation { duration: keysSheet.active ? Style.enter : Style.exit } }
             }
             SoundDeck {
                 id: soundDeck
@@ -229,7 +229,7 @@ PanelWindow {
                 width: implicitWidth; height: implicitHeight
                 opacity: active ? 1 : 0
                 visible: opacity > 0
-                Behavior on opacity { NumberAnimation { duration: soundDeck.active ? Style.enter : 90 } }
+                Behavior on opacity { NumberAnimation { duration: soundDeck.active ? Style.enter : Style.exit } }
             }
             DisplayDeck {
                 id: displayDeck
@@ -240,7 +240,7 @@ PanelWindow {
                 width: implicitWidth; height: implicitHeight
                 opacity: active ? 1 : 0
                 visible: opacity > 0
-                Behavior on opacity { NumberAnimation { duration: displayDeck.active ? Style.enter : 90 } }
+                Behavior on opacity { NumberAnimation { duration: displayDeck.active ? Style.enter : Style.exit } }
             }
             NetDeck {
                 id: netDeck
@@ -251,7 +251,7 @@ PanelWindow {
                 width: implicitWidth; height: implicitHeight
                 opacity: active ? 1 : 0
                 visible: opacity > 0
-                Behavior on opacity { NumberAnimation { duration: netDeck.active ? Style.enter : 90 } }
+                Behavior on opacity { NumberAnimation { duration: netDeck.active ? Style.enter : Style.exit } }
             }
             Cockpit {
                 id: cockpitView
@@ -262,16 +262,20 @@ PanelWindow {
                 width: implicitWidth; height: implicitHeight
                 opacity: active ? 1 : 0
                 visible: opacity > 0
-                Behavior on opacity { NumberAnimation { duration: cockpitView.active ? Style.enter : 90 } }
+                Behavior on opacity { NumberAnimation { duration: cockpitView.active ? Style.enter : Style.exit } }
             }
         }
 
-        // GPU Scene Graph optical rim: replaces imperative 2D Canvas so 120Hz spring morphs do zero CPU repaints.
+        // GPU Scene Graph solar-coupled optical rim: zero CPU Canvas repaints on 120 Hz morphs.
+        // Upper specular highlight shifts smoothly along the top edge with the active Sky phase (dawn -> day -> dusk),
+        // paired with a faint bottom counter-bounce for machined glass volume.
         Item {
             id: rim
             anchors.fill: body
             readonly property color lightTop: capsule.lit ? Theme.accentTint(Style.rimLit) : Theme.tint(Style.rimTop)
-            readonly property color lightMid: capsule.lit ? Theme.accentTint(0.22) : Theme.tint(Style.rimMid)
+            readonly property color lightMid: capsule.lit ? Theme.accentTint(0.24) : Theme.tint(Style.rimMid)
+            readonly property color lightLow: Theme.tint(Style.rimLow)
+            readonly property real azimuth: Style.solarAzimuth(Theme.phase)
             Rectangle {
                 anchors.fill: parent
                 radius: body.radius
@@ -280,16 +284,35 @@ PanelWindow {
                 border.color: rim.lightMid
                 Behavior on border.color { ColorAnimation { duration: Style.enter } }
             }
-            // Upper horizon catch along the top edge.
-            Rectangle {
-                readonly property real inset: Math.min(body.radius * 0.7, parent.width * 0.2)
+            // Upper horizon specular catch positioned by the Sky's solar azimuth.
+            Item {
+                readonly property real inset: Math.min(body.radius * 0.72, parent.width * 0.18)
                 anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: inset; rightMargin: inset }
+                height: Style.hairline
+                clip: true
+                Rectangle {
+                    width: Math.max(Style.space(96), parent.width * 0.72)
+                    height: parent.height
+                    x: Math.max(0, Math.min(parent.width - width, parent.width * rim.azimuth - width / 2))
+                    Behavior on x { NumberAnimation { duration: Style.retint; easing.type: Easing.InOutSine } }
+                    gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop { position: 0.0; color: "transparent" }
+                        GradientStop { position: 0.3; color: rim.lightTop }
+                        GradientStop { position: 0.7; color: rim.lightTop }
+                        GradientStop { position: 1.0; color: "transparent" }
+                    }
+                }
+            }
+            // Subtle lower optical refraction bounce along the bottom edge.
+            Rectangle {
+                readonly property real inset: Math.min(body.radius * 0.75, parent.width * 0.22)
+                anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: inset; rightMargin: inset }
                 height: Style.hairline
                 gradient: Gradient {
                     orientation: Gradient.Horizontal
                     GradientStop { position: 0.0; color: "transparent" }
-                    GradientStop { position: 0.25; color: rim.lightTop }
-                    GradientStop { position: 0.75; color: rim.lightTop }
+                    GradientStop { position: 0.5; color: rim.lightLow }
                     GradientStop { position: 1.0; color: "transparent" }
                 }
             }

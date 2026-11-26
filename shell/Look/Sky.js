@@ -92,44 +92,79 @@ function paint(ctx, W, H, p, phase, t, name) {
     ctx.fillStyle = bloom;
     ctx.fillRect(0, HZ - bandH, VW, bandH);
 
-    // Disc / eclipse celestial element
-    var R = night ? 48 : 88;
+    // Photorealistic celestial optics: true solar scale, limb-darkened photosphere, Rayleigh + Mie scattering,
+    // subtle atmospheric horizon flare, and shaded lunar crescent with faint earthshine at night.
+    var R = night ? 26 : 34;
     var sx = 220 + t * 1160;
-    var sy = HZ - Math.sin(Math.PI * t) * (night ? 500 : 450) + (night ? 0 : 24);
-    var haloR = R * (night ? 3.1 : phase === "day" ? 2.5 : 3.5);
-    var haloA = light ? 0.22 : ({ dawn: 0.36, day: 0.19, dusk: 0.38, night: 0.25 }[phase] || 0.2);
+    var sy = HZ - Math.sin(Math.PI * t) * (night ? 470 : 420) + (night ? 0 : 18);
+    var sunWarm = { dawn: "#ffdfa8", day: "#fff8eb", dusk: "#ffbe85", night: "#dde7f5" }[phase] || "#fff8eb";
+    var sunCore = night ? mix(sunWarm, "#ffffff", 0.55) : mix(sunWarm, "#ffffff", phase === "day" ? 0.88 : 0.72);
+    var sunLimb = night ? mix(sunWarm, p.accent, 0.22) : mix(sunWarm, p.accent, light ? 0.16 : 0.24);
+    var scatterCol = mix(sunLimb, p.accent, 0.42);
+    var outerR = R * (night ? 5.2 : phase === "day" ? 6.8 : 8.4);
+    var coronaR = R * (night ? 2.4 : phase === "day" ? 2.6 : 3.2);
+    var scatterA = light
+        ? ({ dawn: 0.24, day: 0.16, dusk: 0.26, night: 0.12 }[phase] || 0.16)
+        : ({ dawn: 0.32, day: 0.20, dusk: 0.34, night: 0.18 }[phase] || 0.20);
 
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, VW, HZ); ctx.clip();
-    if (archetype === 2 && !night) {
-        // Orbital rings around the celestial body
-        ctx.strokeStyle = rgba(secondary, light ? 0.22 : 0.28);
-        ctx.lineWidth = 1.6;
-        ctx.beginPath(); ctx.ellipse(sx, sy, R * 2.2, R * 0.52, -0.22, 0, Math.PI * 2); ctx.stroke();
-        ctx.strokeStyle = rgba(p.accent, light ? 0.16 : 0.2);
-        ctx.lineWidth = 1.1;
-        ctx.beginPath(); ctx.ellipse(sx, sy, R * 3.1, R * 0.78, -0.22, 0, Math.PI * 2); ctx.stroke();
+
+    // 1. Wide Rayleigh atmospheric sky scattering around the sun/moon
+    var skyScatter = ctx.createRadialGradient(sx, sy, R * 0.4, sx, sy, outerR);
+    skyScatter.addColorStop(0, rgba(sunLimb, scatterA));
+    skyScatter.addColorStop(0.28, rgba(scatterCol, scatterA * 0.48));
+    skyScatter.addColorStop(0.62, rgba(secondary, scatterA * 0.14));
+    skyScatter.addColorStop(1, rgba(scatterCol, 0));
+    ctx.fillStyle = skyScatter;
+    ctx.fillRect(sx - outerR, sy - outerR, outerR * 2, outerR * 2);
+
+    // 2. Subtle horizontal atmospheric haze streak near solar elevation (no extra ctx.translate/scale)
+    if (!night) {
+        var fW = R * 5.4, fH = R * 0.72, fA = light ? 0.10 : (phase === "day" ? 0.11 : 0.18);
+        var flare = ctx.createLinearGradient(sx - fW, sy, sx + fW, sy);
+        flare.addColorStop(0, rgba(sunLimb, 0));
+        flare.addColorStop(0.32, rgba(sunLimb, fA * 0.42));
+        flare.addColorStop(0.5, rgba(sunCore, fA));
+        flare.addColorStop(0.68, rgba(sunLimb, fA * 0.42));
+        flare.addColorStop(1, rgba(sunLimb, 0));
+        ctx.fillStyle = flare;
+        ctx.beginPath(); ctx.ellipse(sx, sy, fW, fH, 0, 0, Math.PI * 2); ctx.fill();
     }
-    ctx.globalAlpha = phase === "day" ? (light ? 0.85 : 0.92) : 1;
-    ctx.fillStyle = p.accent;
-    ctx.beginPath(); ctx.arc(sx, sy, R, 0, Math.PI * 2); ctx.fill();
-    ctx.globalAlpha = 1;
+
+    // 3. Inner Mie solar/lunar corona (smooth optical glare, zero hard cartoon border)
+    var corona = ctx.createRadialGradient(sx, sy, R * 0.35, sx, sy, coronaR);
+    corona.addColorStop(0, rgba(sunCore, night ? 0.26 : (light ? 0.42 : 0.62)));
+    corona.addColorStop(0.32, rgba(sunLimb, night ? 0.12 : (light ? 0.20 : 0.30)));
+    corona.addColorStop(0.68, rgba(scatterCol, night ? 0.04 : 0.08));
+    corona.addColorStop(1, rgba(scatterCol, 0));
+    ctx.fillStyle = corona;
+    ctx.beginPath(); ctx.arc(sx, sy, coronaR, 0, Math.PI * 2); ctx.fill();
+
+    // 4. Photosphere disc with limb darkening (day) or shaded lunar crescent with earthshine (night)
     if (night) {
+        // Faint earthshine on shadowed lunar sphere
+        ctx.fillStyle = rgba(sunLimb, light ? 0.05 : 0.08);
+        ctx.beginPath(); ctx.arc(sx, sy, R, 0, Math.PI * 2); ctx.fill();
+        // Lit crescent with subtle terminator gradient
+        var moonGrad = ctx.createRadialGradient(sx - R * 0.28, sy + R * 0.12, R * 0.1, sx, sy, R);
+        moonGrad.addColorStop(0, rgba(sunCore, 0.96));
+        moonGrad.addColorStop(0.72, rgba(sunLimb, 0.88));
+        moonGrad.addColorStop(1, rgba(sunLimb, 0.55));
+        ctx.fillStyle = moonGrad;
+        ctx.beginPath(); ctx.arc(sx, sy, R, 0, Math.PI * 2); ctx.fill();
         ctx.fillStyle = sky;
-        ctx.beginPath(); ctx.arc(sx + R * 0.42, sy - R * 0.22, R * 0.92, 0, Math.PI * 2); ctx.fill();
-    } else if (seed % 4 === 0) {
-        // Subtle annular eclipse ring silhouette
-        ctx.fillStyle = mix(p.background, p.surface, 0.45);
-        ctx.globalAlpha = light ? 0.22 : 0.72;
-        ctx.beginPath(); ctx.arc(sx - R * 0.08, sy + R * 0.06, R * 0.84, 0, Math.PI * 2); ctx.fill();
-        ctx.globalAlpha = 1;
+        ctx.beginPath(); ctx.arc(sx + R * 0.44, sy - R * 0.20, R * 0.92, 0, Math.PI * 2); ctx.fill();
+    } else {
+        var disc = ctx.createRadialGradient(sx, sy, 0, sx, sy, R * 1.18);
+        disc.addColorStop(0, rgba("#ffffff", light ? 0.96 : 0.98));
+        disc.addColorStop(0.42, rgba(sunCore, light ? 0.92 : 0.95));
+        disc.addColorStop(0.76, rgba(sunLimb, light ? 0.68 : 0.78));
+        disc.addColorStop(0.92, rgba(sunLimb, light ? 0.24 : 0.34));
+        disc.addColorStop(1, rgba(sunLimb, 0));
+        ctx.fillStyle = disc;
+        ctx.beginPath(); ctx.arc(sx, sy, R * 1.18, 0, Math.PI * 2); ctx.fill();
     }
-    var halo = ctx.createRadialGradient(sx, sy, R * 0.55, sx, sy, haloR);
-    halo.addColorStop(0, rgba(p.accent, haloA));
-    halo.addColorStop(0.5, rgba(secondary, haloA * 0.35));
-    halo.addColorStop(1, rgba(p.accent, 0));
-    ctx.fillStyle = halo;
-    ctx.fillRect(sx - haloR, sy - haloR, haloR * 2, haloR * 2);
     ctx.restore();
 
     // Distinct archetype foreground & midground layers with legible tonal separation

@@ -37,7 +37,7 @@ Singleton {
     readonly property int hairline:       1
     readonly property int coreHeight:     space(46)   // the Core at rest: a capsule, its radius half of this
     readonly property int coreRadius:     space(23)
-    readonly property int coreOpenRadius: space(22)
+    readonly property int coreOpenRadius: space(24)   // concentric outer curve; nested radii subtract their inset
     readonly property int coreOpenWidth:  space(640)
     readonly property int coreOpenMin:    space(200)
     readonly property int coreOpenMax:    space(500)
@@ -47,15 +47,15 @@ Singleton {
     readonly property int corePadRight:   space(18)
     readonly property int faceSpacing:    space(16)
     readonly property int field:          space(52)
-    readonly property int fieldRadius:    space(13)
+    readonly property int fieldRadius:    space(14)   // concentric with coreOpenRadius (24) at 10 px inset
     readonly property int planRow:        space(36)
     readonly property int rowHeight:      space(44)
     readonly property int rowHeightCompact: space(38) // a row while browsing: its title alone
     readonly property int rowGap:         space(2)
     readonly property int sectionHeight:  space(26)   // a group's name over its rows in the Palette
-    readonly property int rowRadius:      space(11)
+    readonly property int rowRadius:      space(12)   // concentric with coreOpenRadius (24) at 12 px inset
     readonly property int iconSlot:       space(30)
-    readonly property int appCell:        space(106)   // an app tile on the empty Palette and in the grid of every app
+    readonly property int appCell:        space(106)  // an app tile on the empty Palette and in the grid of every app
     readonly property int appIcon:        space(44)
     readonly property int appColumns:     6
     readonly property int themeColumns:   3           // visual Theme gallery grid
@@ -65,6 +65,7 @@ Singleton {
     readonly property int emojiGlyph:     space(26)
     readonly property int previewSlotWidth: space(50)
     readonly property int slotRadius:     space(8)
+    function concentric(outer, inset) { return Math.max(space(4), outer - inset); }
     readonly property int icon:           space(18)
     readonly property int iconSmall:      space(15)
     readonly property int emblemSmall:    space(16)
@@ -95,17 +96,17 @@ Singleton {
     readonly property int netWidth:       space(440)  // in-Core Network & Bluetooth Deck
     readonly property int cockpitWidth:   space(540)  // Intent & Agent Cockpit
     readonly property int canvasHeight:   space(128)  // spatial monitor layout stage
-    readonly property int solarHeight:    space(58)   // Phase Solar Arc strip in Today
+    readonly property int solarHeight:    space(72)   // Phase Solar Arc strip in Today (header + rail + labels)
     readonly property int parallaxStep:   space(18)   // Strip-coupled Sky midground shift per column
     readonly property int parallaxMax:    space(42)
     readonly property int tileHeight:     space(58)   // a switch in Quick settings
-    readonly property int tileRadius:     space(16)
+    readonly property int tileRadius:     space(14)   // harmonised concentrically inside coreOpenRadius (24)
     readonly property int tileGap:        space(8)
     readonly property int iconDisc:       space(34)   // the round field a switch's icon sits in
     readonly property int levelHeight:    space(34)   // the sound and brightness levels
     readonly property int dayCell:        space(32)   // a day in Today's month
     readonly property int peekHeight:     space(28)
-    readonly property int coreSurface:    space(560)  // the Core's surface: room for its tallest open shape
+    readonly property int coreSurface:    space(640)  // the Core's surface: fits Quick + Brightness + NowPlaying without clipping
     // The setup disc's screen (shell/setup.qml): the glass the questions sit in, its type, its lists.
     readonly property int setupWidth:     space(600)
     readonly property int setupPad:       space(36)
@@ -122,8 +123,21 @@ Singleton {
     readonly property real coreFillOpen:  0.985   // open over windows: their edges must not show through
     // With a GPU, niri blurs what is behind the Core (ext-background-effect, through Quickshell's
     // BackgroundEffect), so the body can be glass: the blur keeps words readable over any window.
+    // Adaptive tint raises opacity slightly on light themes to prevent bright-background whiteout.
+    property string glassTint: "adaptive"         // shell.toml: glass_tint = "adaptive" | "tinted" | "clear"
     readonly property real glassFill:     0.72
     readonly property real glassFillOpen: 0.84
+    function glassAlpha(open, lightMode) {
+        if (glassTint === "tinted") return open ? (lightMode ? 0.94 : 0.91) : (lightMode ? 0.86 : 0.82);
+        if (glassTint === "clear")  return open ? (lightMode ? 0.82 : 0.74) : (lightMode ? 0.68 : 0.60);
+        return open ? (lightMode ? 0.90 : glassFillOpen) : (lightMode ? 0.80 : glassFill);
+    }
+    // Solar azimuth along the horizon (0..1) so optical glass rims follow dawn -> day -> dusk light.
+    function solarAzimuth(phase) {
+        if (phase === "dawn") return 0.22;
+        if (phase === "dusk") return 0.78;
+        return 0.50;
+    }
     readonly property real fillField:     0.06
     readonly property real fillHover:     0.05
     readonly property real fillSelected:  0.11    // of the accent
@@ -198,20 +212,47 @@ Singleton {
     // Intent shows its plan while you type. Off when the endpoint is hosted and you would rather not pay per keystroke.
     property bool intentPreview: true
 
-    // ~/.config/takumi/clock.toml, watched: shared 12h / 24h setting for Rest, LockFace and Today.
+    // ~/.config/takumi/clock.toml + /etc/localtime, watched: shared 12h / 24h setting and live TZ refresh
+    // for Rest, LockFace and Today so every clock in the shell agrees immediately.
     property string clockFormat: ""
+    property int tzRevision: 0
     readonly property bool twelveHour: clockFormat !== "" ? clockFormat === "12h"
         : Qt.locale().timeFormat(Locale.ShortFormat).toLowerCase().includes("ap")
-    function formatTime(d) { return Qt.formatDateTime(d, twelveHour ? "h:mm AP" : "HH:mm"); }
+    function formatTime(d) {
+        void tzRevision;
+        if (!d) return "";
+        const h = d.getHours(), m = d.getMinutes();
+        const pad = n => (n < 10 ? "0" : "") + n;
+        return twelveHour ? (((h + 11) % 12 + 1) + ":" + pad(m) + (h < 12 ? " AM" : " PM")) : (pad(h) + ":" + pad(m));
+    }
+    function formatLockTime(d) {
+        void tzRevision;
+        if (!d) return "";
+        const h = d.getHours(), m = d.getMinutes();
+        const pad = n => (n < 10 ? "0" : "") + n;
+        return twelveHour ? (((h + 11) % 12 + 1) + ":" + pad(m)) : (pad(h) + ":" + pad(m));
+    }
+    function formatMeridiem(d) {
+        void tzRevision;
+        if (!d || !twelveHour) return "";
+        return d.getHours() < 12 ? "AM" : "PM";
+    }
     property FileView clockConfig: FileView {
         path: Quickshell.env("HOME") + "/.config/takumi/clock.toml"
         watchChanges: true
         printErrors: false
+        blockLoading: true
         onFileChanged: reload()
         onLoaded: {
             const m = text().match(/^format\s*=\s*"(12h|24h)"/m);
             style.clockFormat = m ? m[1] : "";
         }
+    }
+    property FileView tzWatch: FileView {
+        path: "/etc/localtime"
+        watchChanges: true
+        printErrors: false
+        onFileChanged: { Date.timeZoneUpdated(); style.tzRevision++; }
     }
 
     // ~/.config/takumi/shell.toml, watched.
@@ -232,6 +273,8 @@ Singleton {
             const fm = text.match(/^font_mono\s*=\s*"([^"]+)"/m); monoFamily = fm ? fm[1] : "JetBrains Mono";
             const ip = text.match(/^intent_preview\s*=\s*(true|false)/m);
             if (ip) intentPreview = ip[1] === "true";
+            const gt = text.match(/^glass_tint\s*=\s*"(adaptive|tinted|clear)"/m);
+            glassTint = gt ? gt[1] : "adaptive";
         } catch (e) { console.warn("shell.toml:", e); }
     }
 }

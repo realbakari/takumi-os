@@ -114,14 +114,29 @@ Item {
             anchors.horizontalCenter: parent.horizontalCenter
             opacity: face.reveal
             transform: Translate { y: (1 - face.reveal) * Style.space(12) }
-            Label {
-                readonly property real size: Math.min(Style.space(150), face.height * 0.15)
+            Item {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: Style.formatTime(clock.date)
-                font.pixelSize: size
-                font.weight: Font.Light
-                font.letterSpacing: size * Style.displayTracking
-                elide: Text.ElideNone
+                width: bigTime.implicitWidth + (ampm.visible ? ampm.implicitWidth + Style.space(8) : 0)
+                height: bigTime.implicitHeight
+                Label {
+                    id: bigTime
+                    readonly property real size: Math.min(Style.space(150), face.height * 0.15)
+                    text: Style.formatLockTime(clock.date)
+                    font.pixelSize: size
+                    font.weight: Font.Light
+                    font.letterSpacing: size * Style.displayTracking
+                    elide: Text.ElideNone
+                }
+                Label {
+                    id: ampm
+                    visible: Style.formatMeridiem(clock.date) !== ""
+                    anchors { left: bigTime.right; leftMargin: Style.space(8); baseline: bigTime.baseline }
+                    text: Style.formatMeridiem(clock.date)
+                    font.pixelSize: Style.heading
+                    font.weight: Font.Medium
+                    dim: Style.textDim
+                    elide: Text.ElideNone
+                }
             }
             Item { width: 1; height: Style.space(16) }
             Label { anchors.horizontalCenter: parent.horizontalCenter; micro: true; text: Qt.formatDateTime(clock.date, "dddd d MMMM") }

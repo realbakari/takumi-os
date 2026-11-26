@@ -46,13 +46,14 @@ genfstab -U /mnt > /mnt/etc/fstab
 uuid=$(blkid -s UUID -o value "${disk}2")
 
 echo "== configure"
+vm_tz=${TAKUMI_VM_TZ:-UTC}
 arch-chroot /mnt /bin/bash -e <<CH
-ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+if [ -f "/usr/share/zoneinfo/$vm_tz" ]; then ln -sf "/usr/share/zoneinfo/$vm_tz" /etc/localtime; else ln -sf /usr/share/zoneinfo/UTC /etc/localtime; fi
 sed -i 's/^#en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen && locale-gen >/dev/null
 echo LANG=en_US.UTF-8 > /etc/locale.conf
 echo takumi-vm > /etc/hostname
 pacman-key --init >/dev/null 2>&1; pacman-key --populate archlinuxarm >/dev/null 2>&1
-systemctl enable NetworkManager sshd >/dev/null
+systemctl enable NetworkManager sshd systemd-timesyncd >/dev/null
 useradd -m -G wheel -s /bin/bash $user
 echo "$user:takumi" | chpasswd
 echo "root:takumi" | chpasswd

@@ -48,15 +48,30 @@ dimmed values beside bright ones. Numbers are tabular so nothing jitters.
 
 ## One material
 
-Every surface the shell draws is the same material: frosted glass over niri's
-background blur (`0.72` at rest, `0.84` open) when a GPU is present, falling
-back cleanly to the theme's surface at `0.94` (`0.985` open) without a GPU so
-window edges never show through. Each surface carries a hairline rim brightest
-along the top, a faint sheen and sky tint down from the top, subtle fine grain,
-and a deep soft shadow. While the Core is open, asking or saying something, a
-soft light in the accent surrounds it. No gradients on individual controls. The
-accent is spent in a few places only: the focused window's ring, the selected
-row's rail, a switch that is on, today in the month, the disc in the sky.
+Every surface the shell draws is the same optical material, respecting a strict
+boundary between floating controls and work content:
+
+- **Work windows stay solid and legible** (never smeared with stacked glass
+  blur), lifted off the Sky with soft elevation shadows (`softness 30`) and a
+  directional gradient focus catch instead of a harsh flat neon outline.
+- **The Core is adaptive optical glass** over niri's background blur (`0.72` at
+  rest / `0.84` open on dark themes, automatically rising to `0.80` / `0.90` on
+  light themes so light skies never cause contrast whiteout, tunable via
+  `glass_tint = "adaptive" | "tinted" | "clear"` in `shell.toml`). Without a
+  GPU it falls back cleanly to `0.94` / `0.985` so window edges never show
+  through.
+- **Dual-stroke solar rim & concentric geometry:** Each surface carries a dark
+  outer ambient-occlusion contour paired with an inner glass hairline whose
+  upper specular catch shifts smoothly with the Sky's phase azimuth (left at
+  dawn, overhead at day, right at dusk), plus a faint lower refraction bounce.
+  Nested controls scale concentrically (`coreOpenRadius 24` → `fieldRadius 14`,
+  `tileRadius 14`, `rowRadius 12`, Strip windows `14` at `10` px gap). Sliders
+  and switches stay quiet at rest and activate localized bevel refraction while
+  hovered or dragged.
+- **Restraint:** Fine sub-perceptual grain, an optical smoke gradient behind
+  open surfaces, and no gradients on individual controls. The accent is spent
+  in a few places only: the focused window's directional catch, the selected
+  row's rail, a switch that is on, today in the month, the disc in the sky.
 
 ## Motion that explains
 

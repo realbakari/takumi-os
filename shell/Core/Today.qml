@@ -193,7 +193,7 @@ FocusScope {
             Label { anchors { right: parent.right; baseline: date.baseline } text: "Week " + today.week(today.now); font.pixelSize: Style.caption; dim: Style.textFaint }
         }
 
-        // Phase Solar Arc: live visual position across Dawn -> Day -> Dusk -> Night; click opens Theme Studio.
+        // Phase Solar Arc: live visual position across Night -> Dawn -> Day -> Dusk; click opens Theme Studio.
         Pressable {
             id: solarArc
             width: parent.width; height: Style.solarHeight; radius: Style.rowRadius; raised: true
@@ -202,18 +202,21 @@ FocusScope {
             onClicked: today.core.search("theme")
             readonly property real dayFrac: (today.now.getHours() * 60 + today.now.getMinutes()) / 1440
             Item {
-                anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: Style.space(12); rightMargin: Style.space(12); topMargin: Style.space(8) }
+                id: solarHead
+                anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: Style.space(12); rightMargin: Style.space(12); topMargin: Style.space(9) }
                 height: Style.space(16)
-                Label { anchors.left: parent.left; micro: true; text: "Solar phase" }
+                Label { anchors { left: parent.left; verticalCenter: parent.verticalCenter } micro: true; text: "Solar phase" }
                 Label {
-                    anchors.right: parent.right; font.pixelSize: Style.caption; color: Theme.accent
+                    anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+                    font.pixelSize: Style.caption; color: Theme.accent
                     text: Theme.phase.charAt(0).toUpperCase() + Theme.phase.slice(1) + " · " + Theme.name
                 }
             }
+            // Dedicated 14 px track rail cleanly separated from the phase labels below.
             Item {
                 id: track
-                anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: Style.space(12); rightMargin: Style.space(12); bottomMargin: Style.space(10) }
-                height: Style.space(20)
+                anchors { left: parent.left; right: parent.right; top: solarHead.bottom; leftMargin: Style.space(12); rightMargin: Style.space(12); topMargin: Style.space(8) }
+                height: Style.space(14)
                 Rectangle {
                     anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter }
                     height: 2; radius: 1
@@ -226,23 +229,30 @@ FocusScope {
                         GradientStop { position: 1.0; color: Theme.tint(0.14) }
                     }
                 }
-                // Luminous phase orb positioned along the 24h cycle.
+                // Luminous phase orb positioned accurately along the 24h cycle (00:00..24:00).
                 Rectangle {
                     width: Style.space(10); height: width; radius: width / 2
                     color: Theme.accent
                     x: Math.max(0, Math.min(parent.width - width, parent.width * solarArc.dayFrac - width / 2))
                     anchors.verticalCenter: parent.verticalCenter
                 }
-                Row {
-                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                    Repeater {
-                        model: ["Night", "Dawn", "Day", "Dusk"]
-                        delegate: Label {
-                            required property string modelData
-                            width: track.width / 4
-                            horizontalAlignment: index === 0 ? Text.AlignLeft : index === 3 ? Text.AlignRight : Text.AlignHCenter
-                            text: modelData; font.pixelSize: Style.micro; dim: Style.textFaint
-                        }
+            }
+            Item {
+                anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: Style.space(12); rightMargin: Style.space(12); bottomMargin: Style.space(8) }
+                height: Style.space(14)
+                Repeater {
+                    model: [
+                        { label: "00:00", pos: 0.0 },
+                        { label: "Dawn",  pos: 0.25 },
+                        { label: "Day",   pos: 0.50 },
+                        { label: "Dusk",  pos: 0.75 },
+                        { label: "Night", pos: 1.0 }
+                    ]
+                    delegate: Label {
+                        required property var modelData
+                        x: modelData.pos === 0 ? 0 : modelData.pos === 1 ? parent.width - implicitWidth : Math.round(parent.width * modelData.pos - implicitWidth / 2)
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: modelData.label; font.pixelSize: Style.micro; dim: Style.textFaint
                     }
                 }
             }

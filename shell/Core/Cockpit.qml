@@ -65,10 +65,11 @@ FocusScope {
         Item {
             width: parent.width; height: Style.space(38)
             Column {
-                anchors { left: parent.left; verticalCenter: parent.verticalCenter }
+                anchors { left: parent.left; right: cfgBtn.left; rightMargin: Style.space(10); verticalCenter: parent.verticalCenter }
                 spacing: Style.space(2)
-                Label { text: "Intent Cockpit"; font.pixelSize: Style.heading; font.weight: Font.DemiBold }
+                Label { width: parent.width; text: "Intent Cockpit"; font.pixelSize: Style.heading; font.weight: Font.DemiBold }
                 Label {
+                    width: parent.width
                     font.pixelSize: Style.caption; dim: Style.textDim
                     text: cockpit.engine
                         ? (cockpit.engine.charAt(0).toUpperCase() + cockpit.engine.slice(1) + (cockpit.modelName ? " · " + cockpit.modelName : "") + " · Typed commands only")
@@ -76,6 +77,7 @@ FocusScope {
                 }
             }
             Pressable {
+                id: cfgBtn
                 anchors { right: parent.right; verticalCenter: parent.verticalCenter }
                 width: cfgLbl.implicitWidth + Style.space(18); height: Style.space(28); radius: height / 2
                 raised: true; accessibleName: "Configure assistant engine"

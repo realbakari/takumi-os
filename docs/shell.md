@@ -329,12 +329,12 @@ larger text size gives a roomier shell, not a cramped one.
 | Token | Value |
 |---|---|
 | gap | 10, niri's layout gap |
-| coreHeight, coreRadius, coreOpenRadius | 46, 23, 22 |
-| coreOpenWidth, coreOpenMin, coreOpenMax | 640, 200, 440 |
-| quickWidth, todayWidth, coreSurface | 420, 372, 560 |
-| tileHeight, tileRadius, levelHeight, dayCell | 58, 16, 34, 32 |
-| field, rowHeight (searching / browsing), iconSlot, previewSlotWidth | 52, 44 / 38, 30, 50 |
-| cardHeight, qrTile, qrRadius | 196, 168, 14 |
+| coreHeight, coreRadius, coreOpenRadius | 46, 23, 24 (concentric with 14 px Strip windows and 14/12 px inner controls) |
+| coreOpenWidth, coreOpenMin, coreOpenMax | 640, 200, 500 |
+| quickWidth, todayWidth, coreSurface | 420, 372, 640 |
+| tileHeight, tileRadius, levelHeight, dayCell | 58, 14, 34, 32 |
+| field, fieldRadius, rowHeight (searching / browsing), rowRadius | 52, 14, 44 / 38, 12 |
+| iconSlot, previewSlotWidth, cardHeight, qrTile, qrRadius | 30, 50, 196, 168, 14 |
 | micro / caption / body / subtitle / title | 12 / 12 / 14 / 15 / 18 |
 
 ## Colour
@@ -365,11 +365,15 @@ Wi-Fi mark are its colour at 0.22.
 Entrances take 167 ms on a decelerating curve and exits take 110 ms (faster
 exits than entrances), hover and press 83 ms, things already on screen moving
 point to point in 167 to 333 ms (the values in `Look/Style.qml`). The Core's
-rim and control bevels (`Parts/Bevel.qml`) are GPU Scene Graph surfaces (zero
-CPU Canvas repaints on 120 Hz morphs) with a restrained pointer-reactive
-specular highlight along hovered edges, and the Sky shifts with subtle
-Strip-coupled depth parallax as you move across columns. The Core's morph is
-333 ms on a slight spring. Retints are 1.5 s.
+dual-stroke solar rim and control bevels (`Parts/Bevel.qml`) are GPU Scene Graph
+surfaces (zero CPU Canvas repaints on 120 Hz morphs): the upper specular catch
+glides with the Sky's phase azimuth (`Style.solarAzimuth`), sliders and tiles
+activate localized specular refraction while hovered or dragged (`Level.qml`,
+`Tile.qml`), the open scrim draws an optical smoke gradient (`Scrim.qml`), and
+the Sky shifts with subtle Strip-coupled depth parallax as you move across
+columns. Glass opacity adapts automatically to light vs. dark themes (tunable
+via `glass_tint = "adaptive" | "tinted" | "clear"` in `shell.toml`). The Core's
+morph is 333 ms on a slight spring. Retints are 1.5 s.
 Press scale is 0.975, and the hit area counter-scales so a press near an edge
 still lands. Something in progress breathes (a row's rail, 760 ms each way)
 or sweeps (the field's line, 1.1 s a pass).

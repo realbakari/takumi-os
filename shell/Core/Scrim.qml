@@ -21,9 +21,14 @@ PanelWindow {
     Rectangle {
         id: shade
         anchors.fill: parent
-        color: Theme.withAlpha(Theme.background, Style.scrim)
         opacity: win.open ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: win.open ? Style.enter : Style.exit } }
+        // Optical smoke gradient: keeps the upper Sky open while grounding the open Core below.
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: Theme.withAlpha(Theme.background, Style.scrim * 0.55) }
+            GradientStop { position: 0.55; color: Theme.withAlpha(Theme.background, Style.scrim * 0.92) }
+            GradientStop { position: 1.0; color: Theme.withAlpha(Theme.background, Style.scrim * 1.25) }
+        }
     }
     MouseArea { anchors.fill: parent; onClicked: win.core.close() }
 }

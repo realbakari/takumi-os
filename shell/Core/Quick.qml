@@ -111,16 +111,17 @@ FocusScope {
         width: parent.width - Style.space(32)
         spacing: Style.space(14)
 
-        // What the computer is running on, then the lock and the power button.
+        // What the computer is running on, then the cockpit, lock and power buttons.
         Item {
             width: parent.width; height: Style.space(38)
             Column {
-                anchors { left: parent.left; verticalCenter: parent.verticalCenter }
+                anchors { left: parent.left; right: headActions.left; rightMargin: Style.space(10); verticalCenter: parent.verticalCenter }
                 spacing: Style.space(2)
-                Label { text: quick.stopping ? "Stop for now" : "Quick settings"; font.pixelSize: Style.heading; font.weight: Font.DemiBold }
-                Label { text: quick.stopping ? "Open apps are asked to close first" : quick.powerWords; visible: text !== ""; font.pixelSize: Style.caption; dim: Style.textDim }
+                Label { width: parent.width; text: quick.stopping ? "Stop for now" : "Quick settings"; font.pixelSize: Style.heading; font.weight: Font.DemiBold }
+                Label { width: parent.width; text: quick.stopping ? "Open apps are asked to close first" : quick.powerWords; visible: text !== ""; font.pixelSize: Style.caption; dim: Style.textDim }
             }
             Row {
+                id: headActions
                 anchors { right: parent.right; verticalCenter: parent.verticalCenter }
                 spacing: Style.space(6)
                 Pressable {

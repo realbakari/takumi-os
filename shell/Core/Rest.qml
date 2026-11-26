@@ -259,7 +259,7 @@ Item {
             onHoveredChanged: rest.hover(clockSeg, hovered)
             onClicked: rest.todayRequested()
             SystemClock { id: clock; precision: SystemClock.Minutes }
-            Label { text: Qt.formatDateTime(clock.date, "ddd d MMM"); dim: Style.textDim; font.pixelSize: Style.restText; anchors.baseline: time.baseline }
+            Label { anchors.verticalCenter: parent.verticalCenter; text: Qt.formatDateTime(clock.date, "ddd d MMM"); dim: Style.textDim; font.pixelSize: Style.restText }
             Label { id: time; anchors.verticalCenter: parent.verticalCenter; text: Style.formatTime(clock.date); font.weight: Font.DemiBold; font.pixelSize: Style.restTime }
         }
 
@@ -365,7 +365,7 @@ Item {
             id: timerSeg
             visible: timerLeft.secs > 0
             pad: Style.space(9)
-            hint: "Timer · rings at " + Qt.formatDateTime(new Date(rest.poll.timerAt * 1000), "HH:mm") + " · press for Today"
+            hint: "Timer · rings at " + Style.formatTime(new Date(rest.poll.timerAt * 1000)) + " · press for Today"
             onHoveredChanged: rest.hover(timerSeg, hovered)
             onClicked: rest.todayRequested()
             Icon { anchors.verticalCenter: parent.verticalCenter; name: "clock"; size: Style.restIcon; color: Theme.withAlpha(Theme.foreground, Style.textDim) }
