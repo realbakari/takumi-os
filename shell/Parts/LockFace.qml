@@ -6,6 +6,7 @@ import QtQuick
 import QtQuick.Effects
 import QtQuick.Shapes
 import Quickshell
+import Quickshell.Io
 import Quickshell.Services.Mpris
 import "../Look"
 
@@ -24,6 +25,7 @@ Item {
     property bool fingerDone: false        // three wrong fingers: only the password now
     property string hint: fingerOn ? "Touch the sensor or type your password" : "Type your password"
     property string typed: ""
+    property string avatarPath: ""
     // The login screen hides its emblem while the boot splash's tile flies onto it (Parts/Arrival.qml).
     property bool emblemShown: true
     property real reveal: 1
@@ -31,6 +33,25 @@ Item {
     signal submitted(string secret)
 
     SystemClock { id: clock; precision: SystemClock.Minutes }
+
+    // Resolve user profile picture: TAKUMI_AVATAR (greeter), ~/.config/takumi/avatar, ~/.face, or AccountsService.
+    Process {
+        id: avatarProbe
+        running: true
+        command: [
+            "sh", "-c",
+            'for p in "${TAKUMI_AVATAR:-}" "$HOME/.config/takumi/avatar" "$HOME/.face" "/var/lib/takumi/greeter/avatar" "/var/lib/AccountsService/icons/$1"; do ' +
+            '[ -n "$p" ] && [ -r "$p" ] && [ -s "$p" ] && { printf "%s" "$p"; exit 0; }; done',
+            "_", face.user || Quickshell.env("USER") || ""
+        ]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const p = this.text.trim();
+                face.avatarPath = p ? ("file://" + p) : "";
+            }
+        }
+    }
+    onUserChanged: if (user && !avatarProbe.running) avatarProbe.running = true
 
     // Arriving: the corner marks draw out from each corner and the great 匠 comes up behind (0 to 1).
     property real frame: 0
@@ -138,9 +159,61 @@ Item {
                     elide: Text.ElideNone
                 }
             }
-            Item { width: 1; height: Style.space(16) }
+            Item { width: 1; height: Style.space(14) }
             Label { anchors.horizontalCenter: parent.horizontalCenter; micro: true; text: Qt.formatDateTime(clock.date, "dddd d MMMM") }
-            Item { width: 1; height: Style.space(44) }
+            Item { width: 1; height: Style.space(30) }
+            // Circular profile picture (or sculpted monogram when no photo is set yet).
+            Item {
+                id: avatarWrap
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: Style.lockAvatar; height: Style.lockAvatar
+                Elevation { anchors.fill: parent; radius: width / 2; level: 16 }
+                Rectangle {
+                    anchors.fill: parent; radius: width / 2
+                    color: Theme.withAlpha(Theme.surface, Style.lockGlass)
+                    border.width: Style.hairline
+                    border.color: face.failed ? Theme.red : face.typed.length > 0 ? Theme.accentTint(Style.rimLit) : Theme.tint(Style.rimTop)
+                    Behavior on border.color { ColorAnimation { duration: Style.quick } }
+                    Label {
+                        visible: !avatarCanvas.loaded
+                        anchors.centerIn: parent
+                        text: face.user ? face.user.charAt(0).toUpperCase() : "匠"
+                        font.pixelSize: Style.space(26); font.weight: Font.Light
+                        color: Theme.withAlpha(Theme.foreground, 0.88)
+                        elide: Text.ElideNone
+                    }
+                    Canvas {
+                        id: avatarCanvas
+                        anchors.fill: parent
+                        anchors.margins: Style.hairline
+                        property bool loaded: false
+                        property string src: face.avatarPath
+                        onSrcChanged: { loaded = false; if (src !== "") loadImage(src); else requestPaint(); }
+                        Component.onCompleted: if (src !== "") loadImage(src)
+                        onImageLoaded: { loaded = isImageLoaded(src); requestPaint(); }
+                        onPaint: {
+                            const ctx = getContext("2d");
+                            ctx.clearRect(0, 0, width, height);
+                            if (!loaded || !src || !isImageLoaded(src)) return;
+                            ctx.save();
+                            ctx.beginPath();
+                            ctx.arc(width / 2, height / 2, Math.min(width, height) / 2, 0, Math.PI * 2);
+                            ctx.closePath();
+                            ctx.clip();
+                            ctx.drawImage(src, 0, 0, width, height);
+                            ctx.restore();
+                        }
+                    }
+                }
+            }
+            Item { width: 1; height: Style.space(12) }
+            Label {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: face.capsOn ? "Caps Lock is on" : face.user
+                font.pixelSize: Style.subtitle; font.weight: Font.Medium
+                color: face.capsOn ? Theme.accent : Theme.withAlpha(Theme.foreground, 0.88)
+            }
+            Item { width: 1; height: Style.space(16) }
             Item {
                 anchors.horizontalCenter: parent.horizontalCenter
                 width: Style.lockField; height: Style.space(44)
@@ -203,11 +276,6 @@ Item {
                     visible: face.fingerMissed
                     text: "Not recognised"; font.pixelSize: Style.caption; color: Theme.red
                 }
-            }
-            Label {
-                anchors.horizontalCenter: parent.horizontalCenter; micro: true
-                text: face.capsOn ? "Caps Lock is on" : face.user
-                color: face.capsOn ? Theme.accent : Theme.withAlpha(Theme.foreground, Style.textMicro)
             }
         }
     }

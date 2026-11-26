@@ -83,6 +83,7 @@ Singleton {
     readonly property real emblemRadius:  0.28   // of its size
     readonly property real emblemGlyph:   0.74   // the glyph's height as a share of the tile
     readonly property int mapUnit:        space(56)   // a full-width column on the strip minimap
+    readonly property int lockAvatar:     space(68)   // circular profile picture on the Lock and login screen
     readonly property int lockField:      space(240)
     readonly property int cardHeight:     space(196)  // a card in the open Core (sharing Wi-Fi)
     readonly property int approvalWidth:  space(520)  // the Core asking for your password

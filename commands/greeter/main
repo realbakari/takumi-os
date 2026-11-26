@@ -14,6 +14,7 @@ if [[ -e "$g/$phase/sky" ]]; then
 else
   export TAKUMI_WALLPAPER="$g/sky"
 fi
+[[ -r "$g/avatar" ]] && export TAKUMI_AVATAR="$g/avatar"
 # The first login screen since the computer started opens on the boot splash's picture (docs/boot.md); the
 # screen writes /run/takumi/desktop-ready, so a later one (after a logout) only fades in.
 [[ -e /run/takumi/desktop-ready ]] || export TAKUMI_GREETER_FROM_BOOT=1

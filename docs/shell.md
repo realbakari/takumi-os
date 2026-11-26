@@ -304,11 +304,15 @@ first start (see [atomic-rooms.md](atomic-rooms.md)).
 `takumi lock` (Super+L) launches the isolated standalone session lock process
 (`shell/lock.qml`, decoupled from the Sky/Core shell so a shell restart or crash
 can never strand `ext-session-lock`), falling back to the running shell's IPC
-lock and then `swaylock`. Each screen gets the sky and the Lock face (`Parts/LockFace.qml`):
-the emblem, the time at up to 150 px, the date, one field, and the user name, in front of 匠 drawn as a faint
-outline most of the screen tall. As it appears, a thin mark draws out from each corner of the screen; inside the
-top left one, how the computer is connected (Wi-Fi, Wired or Offline, "no internet", the VPN). Typing goes
-straight to the field.
+lock and then `swaylock`. The Lock face (`Parts/LockFace.qml`) shows the emblem, the time at up to 150 px,
+the date, a 68 px circular profile picture (from `~/.config/takumi/avatar`,
+`~/.face`, `/var/lib/AccountsService/icons/<user>`, or `/var/lib/takumi/greeter/avatar`,
+falling back to a frosted-glass initial monogram when none is set via
+`takumi settings avatar`), the user name, and one password field, in front of 匠
+drawn as a faint outline most of the screen tall. As it appears, a thin mark
+draws out from each corner of the screen; inside the top left one, how the
+computer is connected (Wi-Fi, Wired or Offline, "no internet", the VPN). Typing
+goes straight to the field.
 When what you type comes out in capitals without Shift, "Caps Lock is on" takes the user name's place. Along
 the bottom: what is playing, with play and pause, and at the right the keyboard layout (when there is more
 than one; a press goes to the next, so the password goes in the layout it was made in) and the battery.

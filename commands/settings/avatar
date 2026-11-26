@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+: <<'ABOUT'
+summary: Set or clear your lock and login screen profile picture
+usage: [image | clear]
+example: takumi settings avatar ~/Pictures/me.jpg
+example: takumi settings avatar clear
+risk: 0
+title: Profile picture
+words: avatar photo picture face account lock login profile
+glyph: person
+ABOUT
+set -euo pipefail
+dest="$HOME/.config/takumi/avatar"
+face="$HOME/.face"
+greeter="/var/lib/takumi/greeter/avatar"
+
+arg=${1:-}
+if [[ -z "$arg" ]]; then
+  if command -v zenity >/dev/null 2>&1; then
+    arg=$(zenity --file-selection --title="Choose profile picture" --file-filter="Images | *.png *.jpg *.jpeg *.webp" 2>/dev/null || true)
+  elif command -v kdialog >/dev/null 2>&1; then
+    arg=$(kdialog --getopenfilename "$HOME/Pictures" "Images (*.png *.jpg *.jpeg *.webp)" 2>/dev/null || true)
+  fi
+  if [[ -z "$arg" ]]; then
+    echo "usage: takumi settings avatar <image | clear>" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$arg" == clear || "$arg" == reset || "$arg" == remove ]]; then
+  rm -f "$dest" "$face"
+  [[ -w "$(dirname "$greeter")" ]] && rm -f "$greeter" || true
+  command -v takumi >/dev/null 2>&1 && takumi notice person "Profile picture" "Cleared" >/dev/null 2>&1 || true
+  echo "profile picture cleared"
+  exit 0
+fi
+
+[[ -f "$arg" && -r "$arg" ]] || { echo "takumi settings avatar: cannot read $arg" >&2; exit 1; }
+mkdir -p "$(dirname "$dest")"
+
+# Center-crop to a clean 256x256 square PNG when Pillow is available; otherwise copy the image directly.
+if command -v python3 >/dev/null 2>&1 && python3 -c "import PIL" 2>/dev/null; then
+  python3 - "$arg" "$dest.tmp" <<'PY'
+import sys
+from PIL import Image, ImageOps
+im = ImageOps.exif_transpose(Image.open(sys.argv[1])).convert("RGB")
+w, h = im.size
+s = min(w, h)
+im = im.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2))
+im = im.resize((256, 256), Image.Resampling.LANCZOS)
+im.save(sys.argv[2], format="PNG", optimize=True)
+PY
+else
+  cp -f "$arg" "$dest.tmp"
+fi
+mv -f "$dest.tmp" "$dest"
+cp -f "$dest" "$face"
+
+if [[ -d "$(dirname "$greeter")" && -w "$(dirname "$greeter")" ]]; then
+  cp -f "$dest" "$greeter.tmp" && chmod 0644 "$greeter.tmp" && mv -f "$greeter.tmp" "$greeter"
+fi
+
+command -v takumi >/dev/null 2>&1 && takumi notice person "Profile picture" "Updated for lock and login screens" >/dev/null 2>&1 || true
+echo "profile picture updated -> $dest"
