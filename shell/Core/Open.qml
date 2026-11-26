@@ -414,12 +414,12 @@ Item {
         clip: true
         model: pane.shownRows
         currentIndex: 0
-        // One selection that glides from row to row: the accent's tint and a rail.
+        // One selection that glides from row to row: the accent's tint and an inset rail inside the pill.
         highlight: Rectangle {
             radius: Style.rowRadius
             visible: pane.stripIndex < 0
             color: Theme.tint(Style.fillCurrent)
-            Rectangle { x: 0; anchors.verticalCenter: parent.verticalCenter; width: 2; height: Math.max(Style.space(14), parent.height - Style.space(24)); radius: 1; color: Theme.accent }
+            Rectangle { x: Style.space(3); anchors.verticalCenter: parent.verticalCenter; width: 2; height: Math.max(Style.space(14), parent.height - Style.space(22)); radius: 1; color: Theme.accent }
         }
         highlightFollowsCurrentItem: true
         highlightMoveDuration: Style.glide
@@ -439,18 +439,6 @@ Item {
             showKey: pane.altHeld
             query: pane.talk ? "" : field.text
             onActivated: pane.talk ? pane.talkEnter() : pane.run(index, false)
-        }
-    }
-
-    // Soft top edge fade whenever the list overflows upward, so rows never clip abruptly in half.
-    Rectangle {
-        visible: list.visible && !list.atYBeginning
-        anchors { left: list.left; right: list.right; top: list.top }
-        height: Style.fadeEdge
-        z: 2
-        gradient: Gradient {
-            GradientStop { position: 0; color: Theme.withAlpha(Theme.surface, 0.96) }
-            GradientStop { position: 1; color: Theme.withAlpha(Theme.surface, 0) }
         }
     }
 

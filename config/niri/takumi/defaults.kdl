@@ -109,6 +109,11 @@ window-rule {
     match app-id=r#"^foot$"#
     default-column-width { proportion 0.5; }
 }
+// btop needs >= 80 columns to draw its dashboard cleanly on 1440px screens.
+window-rule {
+    match title=r#"^btop$"#
+    default-column-width { proportion 0.66667; }
+}
 window-rule {
     match app-id=r#"^firefox$"#
     default-column-width { proportion 0.66667; }

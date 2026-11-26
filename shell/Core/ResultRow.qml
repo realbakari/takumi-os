@@ -89,7 +89,7 @@ Pressable {
     }
 
     Rectangle {   // working on it: the rail breathes
-        x: 0; y: Style.space(12); width: 2; height: parent.height - Style.space(24); radius: 1
+        x: Style.space(3); anchors.verticalCenter: parent.verticalCenter; width: 2; height: Math.max(Style.space(14), parent.height - Style.space(22)); radius: 1
         color: Theme.accent
         visible: row.busy
         SequentialAnimation on opacity {
