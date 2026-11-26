@@ -66,6 +66,7 @@ GridView {
                 anchors.fill: parent
                 visible: tile.iconPath !== "" && status === Image.Ready
                 source: tile.iconPath
+                fillMode: Image.PreserveAspectFit
                 sourceSize: Qt.size(width * 2, height * 2)
                 asynchronous: true
                 smooth: true
@@ -87,7 +88,7 @@ GridView {
             text: tile.modelData.title ?? ""
             font.pixelSize: Style.caption
             color: tile.current ? Theme.foreground : Theme.withAlpha(Theme.foreground, Style.textDim)
-            wrapMode: Text.Wrap; maximumLineCount: 2; lineHeight: 0.92   // "LibreOffice Calc" on two lines, not cut short
+            wrapMode: Text.Wrap; maximumLineCount: 2; lineHeight: 1.08   // clean two-line spacing without crowding
             elide: Text.ElideRight
         }
     }

@@ -284,11 +284,11 @@ PanelWindow {
                 border.color: rim.lightMid
                 Behavior on border.color { ColorAnimation { duration: Style.enter } }
             }
-            // Upper horizon specular catch positioned by the Sky's solar azimuth.
+            // Upper horizon specular catch positioned by the Sky's solar azimuth (strictly inside straight edge).
             Item {
-                readonly property real inset: Math.min(body.radius * 0.72, parent.width * 0.18)
-                anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: inset; rightMargin: inset }
-                height: Style.hairline
+                readonly property real span: Math.max(0, rim.width - body.radius * 2)
+                visible: span > Style.space(8)
+                x: body.radius; y: 0; width: span; height: Style.hairline
                 clip: true
                 Rectangle {
                     width: Math.max(Style.space(96), parent.width * 0.72)
@@ -304,11 +304,11 @@ PanelWindow {
                     }
                 }
             }
-            // Subtle lower optical refraction bounce along the bottom edge.
+            // Subtle lower optical refraction bounce strictly inside the straight lower edge.
             Rectangle {
-                readonly property real inset: Math.min(body.radius * 0.75, parent.width * 0.22)
-                anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: inset; rightMargin: inset }
-                height: Style.hairline
+                readonly property real span: Math.max(0, rim.width - body.radius * 2)
+                visible: span > Style.space(8)
+                x: body.radius; y: rim.height - height; width: span; height: Style.hairline
                 gradient: Gradient {
                     orientation: Gradient.Horizontal
                     GradientStop { position: 0.0; color: "transparent" }

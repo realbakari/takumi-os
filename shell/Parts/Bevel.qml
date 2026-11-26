@@ -12,34 +12,46 @@ Item {
     property bool tracking: false          // pointer is over the control
     readonly property bool light: Theme.mode === "light"
     readonly property color rimColor: lit ? Theme.accentTint(down ? 0.44 : 0.32) : Theme.tint(down ? (light ? 0.16 : 0.10) : (light ? 0.13 : 0.06))
-    readonly property color topColor: lit ? Theme.accentTint(down ? 0.76 : 0.62) : Theme.tint(down ? (light ? 0.10 : 0.07) : (light ? 0.09 : 0.16))
-    readonly property color specColor: lit ? Theme.accentTint(down ? 0.96 : 0.85) : Theme.tint(light ? 0.20 : 0.38)
+    readonly property color topColor: lit ? Theme.accentTint(down ? 0.72 : 0.56) : Theme.tint(down ? (light ? 0.10 : 0.07) : (light ? 0.09 : 0.14))
+    readonly property color specColor: lit ? Theme.accentTint(down ? 0.94 : 0.84) : Theme.tint(light ? 0.20 : 0.36)
     readonly property color lowColor: Theme.tint(light ? 0.04 : 0.03)
     readonly property bool specular: tracking && Style.glow && !Style.reduceMotion
+    // Effective corner radius and strictly straight horizontal span between corners (0 on circular buttons).
+    readonly property real effectiveRadius: Math.min(bevel.radius, height / 2, width / 2)
+    readonly property real straightSpan: Math.max(0, width - effectiveRadius * 2)
+    readonly property bool hasStraightEdge: straightSpan > Style.space(6)
     anchors.fill: parent
 
     // Perimeter 1px hairline border (GPU Scene Graph rounded rect).
     Rectangle {
         anchors.fill: parent
-        radius: Math.min(bevel.radius, height / 2, width / 2)
+        radius: bevel.effectiveRadius
         color: "transparent"
         border.width: Style.hairline
         border.color: bevel.rimColor
         Behavior on border.color { ColorAnimation { duration: Style.quick } }
     }
 
-    // Top specular catch along the upper edge; shifts toward pointer X while hovered or dragged.
+    // Top specular catch strictly inside the straight upper edge (never overshoots corners or circles).
     Item {
-        readonly property real inset: Math.min(bevel.radius * 0.65, width * 0.25)
-        anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: inset; rightMargin: inset }
+        visible: bevel.hasStraightEdge
+        x: bevel.effectiveRadius
+        y: 0
+        width: bevel.straightSpan
         height: Style.hairline
         clip: true
 
         Rectangle {
             anchors.fill: parent
-            color: bevel.topColor
             opacity: bevel.specular ? 0.55 : 0.9
             Behavior on opacity { NumberAnimation { duration: Style.quick } }
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: "transparent" }
+                GradientStop { position: 0.15; color: bevel.topColor }
+                GradientStop { position: 0.85; color: bevel.topColor }
+                GradientStop { position: 1.0; color: "transparent" }
+            }
         }
         Rectangle {
             visible: bevel.specular
@@ -56,10 +68,12 @@ Item {
         }
     }
 
-    // Subtle lower inner bounce for machined optical depth.
+    // Subtle lower inner bounce strictly inside the straight lower edge.
     Rectangle {
-        readonly property real inset: Math.min(bevel.radius * 0.72, width * 0.25)
-        anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: inset; rightMargin: inset }
+        visible: bevel.hasStraightEdge
+        x: bevel.effectiveRadius
+        y: bevel.height - height
+        width: bevel.straightSpan
         height: Style.hairline
         gradient: Gradient {
             orientation: Gradient.Horizontal

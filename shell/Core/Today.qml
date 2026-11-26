@@ -200,7 +200,8 @@ FocusScope {
             accessibleName: "Phase " + Theme.phase + ". Open theme studio"
             color: pressed ? Theme.tint(Style.fillPressed) : hovered ? Theme.tint(Style.fillTile + Style.fillHover) : Theme.tint(Style.fillTile)
             onClicked: today.core.search("theme")
-            readonly property real dayFrac: (today.now.getHours() * 60 + today.now.getMinutes()) / 1440
+            // Dawn (06:00) -> 0.0, Day (12:00) -> 0.33, Dusk (18:00) -> 0.67, Night (00:00) -> 1.0
+            readonly property real dayFrac: ((today.now.getHours() * 60 + today.now.getMinutes() - 360 + 1440) % 1440) / 1440
             Item {
                 id: solarHead
                 anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: Style.space(12); rightMargin: Style.space(12); topMargin: Style.space(9) }
@@ -222,14 +223,13 @@ FocusScope {
                     height: 2; radius: 1
                     gradient: Gradient {
                         orientation: Gradient.Horizontal
-                        GradientStop { position: 0.0; color: Theme.tint(0.14) }
-                        GradientStop { position: 0.25; color: Theme.accentTint(0.55) }
-                        GradientStop { position: 0.50; color: Theme.accent }
-                        GradientStop { position: 0.75; color: Theme.accentTint(0.55) }
+                        GradientStop { position: 0.0; color: Theme.accentTint(0.55) }
+                        GradientStop { position: 0.35; color: Theme.accent }
+                        GradientStop { position: 0.70; color: Theme.accentTint(0.55) }
                         GradientStop { position: 1.0; color: Theme.tint(0.14) }
                     }
                 }
-                // Luminous phase orb positioned accurately along the 24h cycle (00:00..24:00).
+                // Luminous phase orb positioned accurately along the Dawn -> Day -> Dusk -> Night cycle.
                 Rectangle {
                     width: Style.space(10); height: width; radius: width / 2
                     color: Theme.accent
@@ -242,10 +242,9 @@ FocusScope {
                 height: Style.space(14)
                 Repeater {
                     model: [
-                        { label: "00:00", pos: 0.0 },
-                        { label: "Dawn",  pos: 0.25 },
-                        { label: "Day",   pos: 0.50 },
-                        { label: "Dusk",  pos: 0.75 },
+                        { label: "Dawn",  pos: 0.0 },
+                        { label: "Day",   pos: 0.333 },
+                        { label: "Dusk",  pos: 0.667 },
                         { label: "Night", pos: 1.0 }
                     ]
                     delegate: Label {
@@ -284,12 +283,12 @@ FocusScope {
                         width: parent.width - Style.space(16)
                         spacing: Style.space(6)
                         Label {
-                            id: cityTime; font.weight: Font.DemiBold
+                            id: cityTime; anchors.verticalCenter: parent.verticalCenter; font.weight: Font.DemiBold
                             text: today.timeAt(cityClock.secs, cityClock.modelData.offset)
                                   + (cityClock.dayDiff > 0 ? " +1" : cityClock.dayDiff < 0 ? " −1" : "")
                         }
                         Label {
-                            anchors.baseline: cityTime.baseline
+                            anchors.verticalCenter: parent.verticalCenter
                             width: Math.max(0, parent.width - cityTime.implicitWidth - parent.spacing)
                             text: cityClock.modelData.diff; font.pixelSize: Style.caption; dim: Style.textDim
                         }
