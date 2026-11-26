@@ -59,7 +59,40 @@ Item {
         return most.slice(0, Style.appColumns - 1).concat([{ id: "apps:all", title: "All apps", glyph: "apps" }]);
     }
     readonly property bool browsing: !talk && !card && ["apps", "all apps", "applications", "my apps"].includes(field.text.trim().toLowerCase())
-    readonly property bool showStrip: !talk && !card && field.text === "" && apps.length > 0
+    readonly property string trimmedQuery: field.text.trim().toLowerCase()
+    readonly property bool browsingThemes: {
+        if (talk || card || browsing) return false;
+        const q = trimmedQuery;
+        if (q === "theme" || q === "themes" || q === "look" || q === "dark theme" || q === "light theme") return true;
+        if ((q.startsWith("theme ") || q.startsWith("themes ") || q.startsWith("look ")) &&
+            !/^themes?\s+(from|pick|browsers?|prompt|check|list)\b/.test(q)) return true;
+        return false;
+    }
+    property string themeModeFilter: "all" // "all", "dark", "light"
+    readonly property var galleryThemes: {
+        if (!browsingThemes) return [];
+        const base = providers.cachedThemes.length > 0 ? providers.cachedThemes
+                   : providers.rows.filter(r => String(r.id ?? "").startsWith("theme:"));
+        let q = trimmedQuery.replace(/^(themes?|look)\s*/, "").trim();
+        let mode = themeModeFilter;
+        if (q === "dark") { mode = "dark"; q = ""; }
+        else if (q === "light") { mode = "light"; q = ""; }
+        else if (trimmedQuery === "dark theme") { mode = "dark"; q = ""; }
+        else if (trimmedQuery === "light theme") { mode = "light"; q = ""; }
+        return base.filter(r => {
+            const kw = String(r.keywords ?? "").split(" ");
+            if (mode === "dark" && !kw.includes("dark")) return false;
+            if (mode === "light" && !kw.includes("light")) return false;
+            return q === "" || providers.matchesQuery(r, q);
+        });
+    }
+    readonly property bool browsingEmoji: {
+        if (talk || card || browsing || browsingThemes) return false;
+        const q = trimmedQuery;
+        return q.startsWith(":") || q === "emoji" || q === "emojis" || q === "symbols" || q.startsWith("emoji ");
+    }
+    readonly property var emojiItems: browsingEmoji ? providers.rows.filter(r => !!r.char) : []
+    readonly property bool showStrip: !talk && !card && !browsing && !browsingThemes && !browsingEmoji && field.text === "" && apps.length > 0
     property int stripIndex: -1            // a tile in the row of apps is current, not a row
     // What the Palette starts runs in its own scope in app.slice, not inside the shell's service: systemd-oomd
     // can then stop that one app when memory runs out, and never the shell (docs/tuning.md).
@@ -89,14 +122,17 @@ Item {
         Font: "Fonts", Window: "Open windows", Intent: "Ask", Start: "Start here", Find: "Find your way", Topic: "Settings"
     })
     function grouped(rows) {
-        if (rows.length < 2) return rows;
+        // Declutter "Ask Intent" when real matches already exist, unless Intent has a previewed multi-word plan.
+        const hasReal = rows.some(r => r.kind !== "Intent");
+        const clean = hasReal && providers.plan.length === 0 ? rows.filter(r => r.kind !== "Intent") : rows;
+        if (clean.length < 2) return clean;
         const name = r => sectionNames[r.kind] ?? (r.kind || "More");
         const head = t => ({ header: true, id: "section:" + t, title: t });
         const out = [];
-        let rest = rows;
+        let rest = clean;
         if (field.text.trim() !== "") {
-            out.push(Object.assign({}, rows[0], { kindShown: true }), head("Best match"));
-            rest = rows.slice(1);
+            out.push(Object.assign({}, clean[0], { kindShown: true }), head("Best match"));
+            rest = clean.slice(1);
         }
         const order = [], byName = {};
         for (const r of rest) { const n = name(r); if (!(n in byName)) { byName[n] = []; order.push(n); } byName[n].push(r); }
@@ -136,6 +172,8 @@ Item {
     readonly property int wantedHeight: {
         if (card) return Math.min(Style.coreOpenMax, Style.space(16) + cardView.implicitHeight + Style.field + Style.gap);
         if (browsing) return Math.min(Style.coreOpenMax, Style.space(16) + browseHead.height + Math.max(1, Math.ceil(apps.length / Style.appColumns)) * Style.appCell + Style.field + Style.gap);
+        if (browsingThemes) return Math.min(Style.coreOpenMax, Style.space(16) + themeHead.height + Math.max(1, Math.ceil(galleryThemes.length / Style.themeColumns)) * Style.themeCellH + Style.field + Style.gap);
+        if (browsingEmoji) return Math.min(Style.coreOpenMax, Style.space(16) + emojiHead.height + Math.max(1, Math.ceil(emojiItems.length / Style.emojiColumns)) * Style.emojiCell + Style.field + Style.gap);
         const n = list.count, plan = planRow.visible, stripHeight = showStrip ? Style.appCell + Style.space(6) : 0;
         if (n === 0) return Math.max(Style.coreOpenMin, Style.space(16) + stripHeight + (emptyHint.visible ? emptyHint.implicitHeight + Style.space(36) : 0) + Style.field + Style.gap);
         const rowsHeight = talk ? talkRowHeight + Style.rowGap
@@ -169,8 +207,9 @@ Item {
         if (active) {
             opening = true; openingDone.restart();
             field.text = pane.core.query; pane.core.query = "";
+            providers.warmCache();
             providers.refresh();
-            armed = ""; card = null; pinnedId = ""; altHeld = false; stripIndex = -1;
+            armed = ""; card = null; pinnedId = ""; altHeld = false; stripIndex = -1; themeModeFilter = "all";
             appsReader.running = true;
             if (!talker.running) { talk = null; answer.text = ""; }
             list.currentIndex = 0;
@@ -182,6 +221,7 @@ Item {
             if (keepPreview) { keepPreview = false; previewSafety.restart(); } else Theme.endPreview();
         }
     }
+    onBrowsingThemesChanged: if (!browsingThemes && !keepPreview) Theme.endPreview()
     Connections { target: list; function onCurrentIndexChanged() { pane.armed = ""; pane.previewCheck(); } }
     Connections {
         target: providers
@@ -212,6 +252,7 @@ Item {
         if (row && row.header) return;
         if (!row) { if (field.text.trim()) runIntent(field.text.trim()); return; }
         if (row.search) { providers.remember(row.id); field.text = row.search; field.cursorPosition = field.text.length; list.currentIndex = 0; return; }
+        if (row.view) { providers.remember(row.id); pane.core.open_(row.view); return; }
         if (row.converse) { beginTalk(row); return; }
         if (row.card) { openCard(row); return; }
         if (row.interactive || row.terminal) {
@@ -364,7 +405,7 @@ Item {
 
     ListView {
         id: list
-        visible: !pane.card && !pane.browsing
+        visible: !pane.card && !pane.browsing && !pane.browsingThemes && !pane.browsingEmoji
         anchors { left: parent.left; right: parent.right; top: parent.top; bottom: pane.showStrip ? strip.top : planRow.top }
         anchors.margins: Style.space(10)
         anchors.bottomMargin: Style.space(6)
@@ -398,6 +439,18 @@ Item {
             showKey: pane.altHeld
             query: pane.talk ? "" : field.text
             onActivated: pane.talk ? pane.talkEnter() : pane.run(index, false)
+        }
+    }
+
+    // Soft top edge fade whenever the list overflows upward, so rows never clip abruptly in half.
+    Rectangle {
+        visible: list.visible && !list.atYBeginning
+        anchors { left: list.left; right: list.right; top: list.top }
+        height: Style.fadeEdge
+        z: 2
+        gradient: Gradient {
+            GradientStop { position: 0; color: Theme.withAlpha(Theme.surface, 0.96) }
+            GradientStop { position: 1; color: Theme.withAlpha(Theme.surface, 0) }
         }
     }
 
@@ -440,6 +493,97 @@ Item {
         onAppsChanged: currentIndex = apps.length ? 0 : -1
     }
 
+    // "theme" / "look": visual 3-column Theme Gallery with live Sky preview and quick mode/phase pills.
+    Item {
+        id: themeHead
+        visible: pane.browsingThemes
+        anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: Style.space(18); rightMargin: Style.space(18) }
+        height: Style.space(42)
+        Row {
+            anchors { left: parent.left; verticalCenter: parent.verticalCenter }
+            spacing: Style.space(4)
+            Repeater {
+                model: [{ id: "all", label: "All" }, { id: "dark", label: "Dark" }, { id: "light", label: "Light" }]
+                delegate: Pressable {
+                    required property var modelData
+                    readonly property bool activePill: pane.themeModeFilter === modelData.id
+                    width: modeLbl.implicitWidth + Style.space(16); height: Style.space(24); radius: height / 2
+                    accessibleName: "Show " + modelData.label + " themes"
+                    color: activePill ? Theme.accentTint(Style.fillTileOn) : hovered ? Theme.tint(Style.fillHover) : "transparent"
+                    onClicked: pane.themeModeFilter = modelData.id
+                    Label { id: modeLbl; anchors.centerIn: parent; text: modelData.label; font.pixelSize: Style.caption
+                        color: activePill ? Theme.accent : Theme.withAlpha(Theme.foreground, Style.textDim) }
+                }
+            }
+        }
+        Row {
+            anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+            spacing: Style.space(4)
+            Repeater {
+                model: ["auto", "dawn", "day", "dusk", "night"]
+                delegate: Pressable {
+                    required property string modelData
+                    readonly property bool curPhase: modelData === Theme.phase
+                    width: phLbl.implicitWidth + Style.space(14); height: Style.space(24); radius: height / 2
+                    accessibleName: "Phase " + modelData
+                    color: curPhase ? Theme.accentTint(Style.fillTileOn) : hovered ? Theme.tint(Style.fillHover) : "transparent"
+                    onHoveredChanged: if (hovered && modelData !== "auto" && pane.active && pane.browsingThemes) Theme.previewPhase(modelData)
+                    onClicked: { pane.keepPreview = true; pane.launch(["takumi", "phase", "set", modelData]); }
+                    Label { id: phLbl; anchors.centerIn: parent; text: modelData.charAt(0).toUpperCase() + modelData.slice(1); font.pixelSize: Style.caption
+                        color: curPhase ? Theme.accent : Theme.withAlpha(Theme.foreground, Style.textMicro) }
+                }
+            }
+        }
+    }
+    ThemeGrid {
+        id: themeGrid
+        visible: pane.browsingThemes
+        anchors { left: parent.left; right: parent.right; top: themeHead.bottom; bottom: fieldBox.top; leftMargin: Style.space(10); rightMargin: Style.space(10); bottomMargin: Style.space(6) }
+        themes: pane.galleryThemes
+        entering: true
+        onThemesChanged: currentIndex = themes.length ? 0 : -1
+        onPreviewRequested: slug => { if (pane.active && pane.browsingThemes) Theme.preview(slug); }
+        onChosen: row => {
+            if (!row) return;
+            providers.remember(row.id);
+            pane.keepPreview = true;
+            pane.launch(row.run);
+            pane.core.close();
+        }
+    }
+
+    // ":" or "emoji": visual Emoji Grid with the selected emoji's name in a single header line.
+    Item {
+        id: emojiHead
+        visible: pane.browsingEmoji
+        anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: Style.space(22); rightMargin: Style.space(22) }
+        height: Style.space(34)
+        readonly property var curEmoji: pane.emojiItems[emojiGrid.currentIndex] ?? pane.emojiItems[0] ?? null
+        Label {
+            anchors { left: parent.left; bottom: parent.bottom; bottomMargin: Style.space(4) }
+            micro: true; color: Theme.accent
+            text: emojiHead.curEmoji ? emojiHead.curEmoji.title : "Emoji"
+        }
+        Label {
+            anchors { right: parent.right; bottom: parent.bottom; bottomMargin: Style.space(4) }
+            font.pixelSize: Style.caption; dim: Style.textFaint
+            text: "Enter types where you were & copies"
+        }
+    }
+    EmojiGrid {
+        id: emojiGrid
+        visible: pane.browsingEmoji
+        anchors { left: parent.left; right: parent.right; top: emojiHead.bottom; bottom: fieldBox.top; leftMargin: Style.space(10); rightMargin: Style.space(10); bottomMargin: Style.space(6) }
+        items: pane.emojiItems
+        onItemsChanged: currentIndex = items.length ? 0 : -1
+        onChosen: row => {
+            if (!row) return;
+            providers.remember(row.id);
+            pane.launch(row.run);
+            pane.core.close();
+        }
+    }
+
     Card {
         id: cardView
         visible: !!pane.card
@@ -454,7 +598,7 @@ Item {
     Column {
         id: emptyHint
         anchors.centerIn: list
-        visible: list.count === 0 && !pane.card && !pane.browsing && (pane.searching || !pane.showStrip)
+        visible: list.count === 0 && !pane.card && !pane.browsing && !pane.browsingThemes && !pane.browsingEmoji && (pane.searching || !pane.showStrip)
         spacing: Style.space(6)
         Label { anchors.horizontalCenter: parent.horizontalCenter; dim: 0.72; width: Math.min(implicitWidth, pane.width - Style.space(48))
             text: pane.searching ? "No matches for “" + field.text.trim() + "”" : "Type an app, a setting or a question" }
@@ -480,7 +624,7 @@ Item {
                 width: chip.implicitWidth + Style.space(16); height: Style.space(22)
                 radius: Style.space(6); color: "transparent"
                 border.width: 1; border.color: Theme.accentTint(0.45)
-                Label { id: chip; anchors.centerIn: parent; text: modelData; font.family: Style.monoFamily; font.weight: Font.Normal; font.pixelSize: Style.space(11) }
+                Label { id: chip; anchors.centerIn: parent; text: modelData; font.family: Style.monoFamily; font.weight: Font.Normal; font.pixelSize: Style.micro }
             }
         }
     }
@@ -525,21 +669,29 @@ Item {
                 case Qt.Key_Escape: if (pane.card) pane.card = null; else if (field.text) field.text = ""; else pane.core.close(); break;
                 case Qt.Key_Up:                                                                  // results stack upward
                     if (pane.browsing) browse.moveCurrentIndexUp();
+                    else if (pane.browsingThemes) themeGrid.moveCurrentIndexUp();
+                    else if (pane.browsingEmoji) emojiGrid.moveCurrentIndexUp();
                     else if (pane.stripIndex >= 0) pane.stripIndex = -1;
                     else if (!pane.card) pane.move(list.currentIndex + 1);
                     break;
                 case Qt.Key_Down:
                     if (pane.browsing) browse.moveCurrentIndexDown();
+                    else if (pane.browsingThemes) themeGrid.moveCurrentIndexDown();
+                    else if (pane.browsingEmoji) emojiGrid.moveCurrentIndexDown();
                     else if (pane.showStrip && pane.stripIndex < 0 && list.currentIndex <= 0) pane.stripIndex = 0;   // from the nearest row to the apps
                     else if (!pane.card && pane.stripIndex < 0) pane.move(list.currentIndex - 1);
                     break;
                 case Qt.Key_Left:
                     if (pane.browsing) browse.moveCurrentIndexLeft();
+                    else if (pane.browsingThemes) themeGrid.moveCurrentIndexLeft();
+                    else if (pane.browsingEmoji) emojiGrid.moveCurrentIndexLeft();
                     else if (pane.stripIndex >= 0) pane.stripIndex = Math.max(0, pane.stripIndex - 1);
                     else return;
                     break;
                 case Qt.Key_Right:
                     if (pane.browsing) browse.moveCurrentIndexRight();
+                    else if (pane.browsingThemes) themeGrid.moveCurrentIndexRight();
+                    else if (pane.browsingEmoji) emojiGrid.moveCurrentIndexRight();
                     else if (pane.stripIndex >= 0) pane.stripIndex = Math.min(strip.count - 1, pane.stripIndex + 1);
                     else return;
                     break;
@@ -549,6 +701,8 @@ Item {
                     if (pane.card && pane.card.copy && !pane.card.secret) pane.copyCard();
                     else if (pane.card) pane.cardReveal = !pane.cardReveal;
                     else if (pane.browsing) pane.openApp(pane.apps[browse.currentIndex]);
+                    else if (pane.browsingThemes) themeGrid.chosen(pane.galleryThemes[themeGrid.currentIndex]);
+                    else if (pane.browsingEmoji) emojiGrid.chosen(pane.emojiItems[emojiGrid.currentIndex]);
                     else if (pane.stripIndex >= 0) pane.openApp(pane.stripApps[pane.stripIndex]);
                     else pane.run(list.currentIndex, ctrl);
                     break;
@@ -606,7 +760,7 @@ Item {
             width: escLabel.implicitWidth + Style.space(12); height: Style.space(20)
             radius: Style.space(5); color: "transparent"
             border.width: 1; border.color: esc.showHide ? Theme.accentTint(0.45) : Theme.tint(0.16)
-            Label { id: escLabel; anchors.centerIn: parent; micro: true; font.pixelSize: Style.space(10)
+            Label { id: escLabel; anchors.centerIn: parent; micro: true
                 text: esc.showHide ? (pane.reveal ? "Hide" : "Show") : "Esc"; color: esc.showHide ? Theme.accent : Theme.withAlpha(Theme.foreground, Style.textMicro) }
             MouseArea {
                 anchors.fill: parent; anchors.margins: -Style.space(6)

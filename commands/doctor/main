@@ -101,6 +101,15 @@ for b in "${TAKUMI_POWER_SUPPLY:-/sys/class/power_supply}"/BAT*; do
   break
 done
 
+# Unmerged package configuration files (*.pacnew / *.pacsave) left behind by pacman updates.
+etc_dir=${TAKUMI_ETC:-/etc}
+if [[ -d "$etc_dir" ]]; then
+  pac_count=$(find "$etc_dir" -maxdepth 4 \( -name '*.pacnew' -o -name '*.pacsave' \) 2>/dev/null | wc -l | tr -d ' ')
+  if (( pac_count > 0 )); then
+    need "$pac_count system settings file(s) updated (*.pacnew): review with pacdiff"
+  fi
+fi
+
 # This computer's fixes, and firmware the kernel looked for and did not find (docs/hardware.md).
 if [[ -f "$l/hardware.sh" ]] && . "$l/hardware.sh" && declare -F hw_doctor >/dev/null; then
   while IFS=$'\t' read -r kind text; do case "$kind" in ok) ok "$text" ;; needs) need "$text" ;; esac; done < <(hw_doctor 2>/dev/null || true)

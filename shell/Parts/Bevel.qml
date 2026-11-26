@@ -1,28 +1,57 @@
-// The outline of a control: one pixel, lighter along the top than the bottom, so a switch, a level or a
-// field reads as raised from the surface it sits on, and as pressed in when `down` (Windows' controls are
-// drawn the same way: a stroke that varies with elevation and state,
-// https://learn.microsoft.com/windows/apps/design/signature-experiences/layering).
+// GPU-batched optical bevel: crisp 1px perimeter border plus a top hairline catch that softly reflects
+// the pointer position when hovered (restrained glass physics, zero CPU Canvas repaints).
 import QtQuick
 import "../Look"
 
-Canvas {
+Item {
     id: bevel
     property real radius: Style.rowRadius
     property bool down: false
     property bool lit: false               // on, or the selection: the outline takes the accent
+    property real focusX: 0.5              // normalized 0..1 pointer X along the control
+    property bool tracking: false          // pointer is over the control
     readonly property bool light: Theme.mode === "light"
-    readonly property color lightTop: lit ? Theme.accentTint(0.55) : Theme.tint(down ? (light ? 0.16 : 0.04) : (light ? 0.07 : 0.12))
-    readonly property color lightLow: lit ? Theme.accentTint(0.25) : Theme.tint(down ? (light ? 0.07 : 0.10) : (light ? 0.15 : 0.035))
+    readonly property color rimColor: lit ? Theme.accentTint(0.32) : Theme.tint(down ? (light ? 0.14 : 0.08) : (light ? 0.13 : 0.06))
+    readonly property color topColor: lit ? Theme.accentTint(0.62) : Theme.tint(down ? (light ? 0.07 : 0.04) : (light ? 0.08 : 0.16))
+    readonly property color specColor: lit ? Theme.accentTint(0.85) : Theme.tint(light ? 0.18 : 0.34)
+    readonly property bool specular: tracking && Style.glow && !Style.reduceMotion
     anchors.fill: parent
-    onLightTopChanged: requestPaint(); onLightLowChanged: requestPaint(); onRadiusChanged: requestPaint()
-    onWidthChanged: requestPaint(); onHeightChanged: requestPaint()
-    onPaint: {
-        const ctx = getContext("2d"), w = width, h = height, rr = Math.min(radius, h / 2, w / 2);
-        ctx.reset();
-        if (w < 2 || h < 2) return;
-        const g = ctx.createLinearGradient(0, 0, 0, h);
-        g.addColorStop(0, lightTop); g.addColorStop(Math.min(0.5, Style.space(8) / h), lightLow); g.addColorStop(1, lightLow);
-        ctx.strokeStyle = g; ctx.lineWidth = Style.hairline;
-        ctx.beginPath(); ctx.roundedRect(0.5, 0.5, w - 1, h - 1, rr, rr); ctx.stroke();
+
+    // Perimeter 1px hairline border (GPU Scene Graph rounded rect).
+    Rectangle {
+        anchors.fill: parent
+        radius: Math.min(bevel.radius, height / 2, width / 2)
+        color: "transparent"
+        border.width: Style.hairline
+        border.color: bevel.rimColor
+        Behavior on border.color { ColorAnimation { duration: Style.quick } }
+    }
+
+    // Top specular catch along the upper edge; shifts toward pointer X while hovered.
+    Item {
+        readonly property real inset: Math.min(bevel.radius * 0.65, width * 0.25)
+        anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: inset; rightMargin: inset }
+        height: Style.hairline
+        clip: true
+
+        Rectangle {
+            anchors.fill: parent
+            color: bevel.topColor
+            opacity: bevel.specular ? 0.55 : 0.9
+            Behavior on opacity { NumberAnimation { duration: Style.quick } }
+        }
+        Rectangle {
+            visible: bevel.specular
+            width: Math.max(Style.space(48), parent.width * 0.52)
+            height: parent.height
+            x: Math.max(0, Math.min(parent.width - width, parent.width * bevel.focusX - width / 2))
+            Behavior on x { NumberAnimation { duration: Style.quick; easing.type: Easing.OutCubic } }
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: "transparent" }
+                GradientStop { position: 0.5; color: bevel.specColor }
+                GradientStop { position: 1.0; color: "transparent" }
+            }
+        }
     }
 }

@@ -1,0 +1,3 @@
+# aarch64 architecture supplement.
+linux-firmware
+uboot-tools

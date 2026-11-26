@@ -20,10 +20,16 @@ cliphist list 2>/dev/null | awk -F '\t' -v rest="$rest" 'rest == "" || index(tol
   jq -R -c '
     split("\t") as [$id, $text]
     | ($text | test("^\\[\\[ binary data")) as $pic
+    | ($text | gsub("^\\s+|\\s+$"; "")) as $trimmed
+    | ($trimmed | test("^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$")) as $isHex
+    | (if $isHex and ($trimmed | length) == 4 then "#" + ($trimmed[1:2]*2) + ($trimmed[2:3]*2) + ($trimmed[3:4]*2) else $trimmed end) as $hex6
     | {id: ("clip:" + $id),
        title: (if $pic then "A picture" else ($text | gsub("\\s+"; " ") | .[0:90]) end),
-       subtitle: (if $pic then ($text | capture("binary data (?<s>.*) \\]\\]").s // "copied earlier") + " · Enter pastes it" else "Copied earlier · Enter pastes it" end),
+       subtitle: (if $pic then ($text | capture("binary data (?<s>.*) \\]\\]").s // "copied earlier") + " · Enter pastes it"
+                  elif $isHex then "Colour swatch · Enter pastes it"
+                  else "Copied earlier · Enter pastes it" end),
        glyph: (if $pic then "shot" else "edit" end), kind: "Clipboard", steady: true,
-       keywords: "clipboard paste copied history", run: ["takumi", "clipboard", "paste", $id], score: (0.97 - input_line_number * 0.0005)}'
+       keywords: "clipboard paste copied history", run: ["takumi", "clipboard", "paste", $id], score: (0.97 - input_line_number * 0.0005)}
+      + (if $isHex then {swatch: [$hex6]} else {} end)'
 jq -cn '{id: "clip:clear", title: "Clear the clipboard history", subtitle: "Everything copied so far is forgotten", glyph: "cross", kind: "Clipboard",
   keywords: "clipboard paste copied history clear", run: ["takumi", "clipboard", "clear"], risk: 1, score: 0.2}'

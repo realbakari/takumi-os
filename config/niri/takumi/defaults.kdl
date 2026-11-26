@@ -155,7 +155,8 @@ binds {
     Mod+B hotkey-overlay-title="Browser" { spawn "takumi" "app" "open" "browser"; }
     Mod+Q { close-window; }
     Mod+L hotkey-overlay-title="Lock" { spawn "takumi" "lock"; }
-    Mod+Shift+Slash { show-hotkey-overlay; }
+    Mod+K hotkey-overlay-title="Keys" { spawn "qs" "-c" "takumi" "ipc" "call" "core" "keys"; }
+    Mod+Shift+Slash { spawn "qs" "-c" "takumi" "ipc" "call" "core" "keys"; }
     // Notices (docs/notifications.md): Super+Shift+Space acts on the one on show (the app's own action, or
     // Copy for a code); Super+Escape puts them all away.
     Mod+Shift+Space hotkey-overlay-title="Act on the notice" { spawn "qs" "-c" "takumi" "ipc" "call" "notices" "act"; }

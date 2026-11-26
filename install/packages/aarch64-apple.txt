@@ -1,0 +1,2 @@
+# Apple Silicon (aarch64-apple) supplement; expects Asahi kernel & Mesa repos when installed on Mac hardware.
+linux-firmware

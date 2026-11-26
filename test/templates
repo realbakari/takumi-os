@@ -41,6 +41,16 @@ check "no fonts chosen: Inter and JetBrains Mono at 11 points" 'grep -qx "font=J
 # The prompt and Firefox's stylesheet carry the palette, and a file that did not change is not rewritten.
 check "starship's palette is the theme's" 'grep -qx "accent = \"#5ad7ff\"" "$t/solid/starship.toml" && grep -qx "quiet = \"#5c6b7a\"" "$t/solid/starship.toml"'
 check "Firefox's toolbar is the surface" 'grep -q -- "--toolbar-bgcolor: #111821 !important;" "$t/solid/firefox-userChrome.css"'
+check "GtkSourceView 5, Qt6, Ghostty, Kitty, Alacritty, Zed, Helix, VS Code, fcitx5, Lazygit and Tmux render cleanly with no leftover tokens" '
+  for f in gtksourceview.xml qt6ct.conf ghostty.conf kitty.conf alacritty.toml zed-theme.json vscode-theme.json fcitx5-theme.conf lazygit.yml tmux.conf helix.toml; do
+    [[ -s "$t/solid/$f" ]] || exit 1
+    ! grep -qE "\{\{[a-z_]+(:bare)?\}\}" "$t/solid/$f" || exit 1
+  done
+  jq empty "$t/solid/zed-theme.json"
+  jq empty "$t/solid/vscode-theme.json"
+  grep -q "value=\"#5ad7ff\"" "$t/solid/gtksourceview.xml"
+  grep -q "background-opacity = 0.92" "$t/glassy/ghostty.conf"
+'
 touch -t 202001010000 "$t/solid/fontconfig.conf"; before=$(ls -l "$t/solid/fontconfig.conf")
 HOME=$t TAKUMI_RENDER_OUT=$t/solid commands/theme/render ion dusk >/dev/null
 check "an unchanged file is left alone" '[[ "$(ls -l "$t/solid/fontconfig.conf")" == "$before" ]] && grep -q "ff9f6e" "$t/solid/gtk.css"'

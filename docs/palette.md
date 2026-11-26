@@ -90,12 +90,21 @@ search. Enter puts the copy back and pastes it into the app you were in, with
 the paste key `Super+V` sends, which works in the terminal too. "Clear the
 clipboard history" asks first.
 
-`Super+.`, `Super+;` and `Super+Ctrl+Space` open the Core on ":", which lists
-emoji and symbols by name (1,774 of them, from Unicode's own names, the popular
-ones first and answering to everyday words: "lol", "thanks", "party"). Enter
-types the emoji where you were and copies it. Any other search of three
-letters or more shows the three best at the bottom: "fire" finds 🔥 under
-Firefox.
+`Super+.`, `Super+;` and `Super+Ctrl+Space` open the Core on ":", which opens
+the visual Emoji Grid (`EmojiGrid.qml`) over 1,774 emoji and symbols by name
+(the popular ones first and answering to everyday words: "lol", "thanks",
+"party"). Arrow keys move in 2D and Enter types the emoji where you were and
+copies it. Any other search of three letters or more shows the three best at
+the bottom: "fire" finds 🔥 under Firefox.
+
+Typing `theme`, `themes` or `look` (or clicking **Look** in Quick settings)
+opens the visual 3-column 16:9 **Theme Gallery** (`ThemeGrid.qml`), with
+All/Dark/Light filters and live Dawn/Day/Dusk/Night/Auto phase pills. Arrow
+keys or hover preview each theme live on the shell and Sky; Enter applies it.
+
+Pressing `Super+K` (or `Super+Shift+/`) opens the native themed **Keys**
+sheet (`KeysSheet.qml`) inside the Core; typing any letter jumps straight into
+Palette search.
 
 ## Matching and ranking
 
@@ -161,6 +170,7 @@ moment in the first ten minutes.
 
 The Palette is the Core's open state (`shell/Core/Open.qml`): it grows out of
 the capsule rather than appearing as a window. `shell/Core/Providers.qml`
-runs each provider as a `Process`, debounced at 40 ms under a generation
-counter, and merges the rows as they arrive. Sizes, colours and motion are
-in [shell.md](shell.md).
+caches static catalogues (`apps`, `commands`, `keys`, `themes`) in memory per
+session for instant synchronous filtering, gates dynamic topic providers by
+query relevance (debounced at 40 ms under a generation counter), and merges
+rows as they arrive. Sizes, colours and motion are in [shell.md](shell.md).

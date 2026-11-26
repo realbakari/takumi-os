@@ -32,6 +32,7 @@ Singleton {
     readonly property real displayTracking: -0.055 // em, for the lock clock
 
     // Geometry.
+    readonly property int niriGap:        10          // unscaled niri layout gap (defaults.kdl)
     readonly property int gap:            space(10)   // niri's layout gap; the Core floats by this much
     readonly property int hairline:       1
     readonly property int coreHeight:     space(46)   // the Core at rest: a capsule, its radius half of this
@@ -40,6 +41,8 @@ Singleton {
     readonly property int coreOpenWidth:  space(640)
     readonly property int coreOpenMin:    space(200)
     readonly property int coreOpenMax:    space(500)
+    readonly property int keysWidth:      space(680)  // the native shortcut cheat sheet
+    readonly property int fadeEdge:       space(26)   // soft top fade on scrolling lists
     readonly property int corePadLeft:    space(10)   // the emblem sits as far from the edge as from top and bottom
     readonly property int corePadRight:   space(18)
     readonly property int faceSpacing:    space(16)
@@ -55,6 +58,11 @@ Singleton {
     readonly property int appCell:        space(106)   // an app tile on the empty Palette and in the grid of every app
     readonly property int appIcon:        space(44)
     readonly property int appColumns:     6
+    readonly property int themeColumns:   3           // visual Theme gallery grid
+    readonly property int themeCellH:     space(138)
+    readonly property int emojiColumns:   9           // visual Emoji picker grid
+    readonly property int emojiCell:      space(62)
+    readonly property int emojiGlyph:     space(26)
     readonly property int previewSlotWidth: space(50)
     readonly property int slotRadius:     space(8)
     readonly property int icon:           space(18)
@@ -82,6 +90,14 @@ Singleton {
     // Quick settings and Today, the Core's other two open shapes, and the word above the Core at rest.
     readonly property int quickWidth:     space(420)
     readonly property int todayWidth:     space(372)
+    readonly property int soundWidth:     space(440)  // in-Core PipeWire Sound & Media Deck
+    readonly property int displayWidth:   space(460)  // in-Core Spatial Display Studio
+    readonly property int netWidth:       space(440)  // in-Core Network & Bluetooth Deck
+    readonly property int cockpitWidth:   space(540)  // Intent & Agent Cockpit
+    readonly property int canvasHeight:   space(128)  // spatial monitor layout stage
+    readonly property int solarHeight:    space(58)   // Phase Solar Arc strip in Today
+    readonly property int parallaxStep:   space(18)   // Strip-coupled Sky midground shift per column
+    readonly property int parallaxMax:    space(42)
     readonly property int tileHeight:     space(58)   // a switch in Quick settings
     readonly property int tileRadius:     space(16)
     readonly property int tileGap:        space(8)
@@ -158,7 +174,7 @@ Singleton {
     readonly property bool continuousMotion: !reduceMotion && !softwareDrawing
     readonly property bool glow: !softwareDrawing
     readonly property int enter:      duration(167)
-    readonly property int exit:       duration(167)
+    readonly property int exit:       duration(110)
     readonly property int fade:       duration(83)
     readonly property int quick:      duration(83)    // hover and press
     readonly property int morph:      duration(333)
@@ -181,6 +197,22 @@ Singleton {
 
     // Intent shows its plan while you type. Off when the endpoint is hosted and you would rather not pay per keystroke.
     property bool intentPreview: true
+
+    // ~/.config/takumi/clock.toml, watched: shared 12h / 24h setting for Rest, LockFace and Today.
+    property string clockFormat: ""
+    readonly property bool twelveHour: clockFormat !== "" ? clockFormat === "12h"
+        : Qt.locale().timeFormat(Locale.ShortFormat).toLowerCase().includes("ap")
+    function formatTime(d) { return Qt.formatDateTime(d, twelveHour ? "h:mm AP" : "HH:mm"); }
+    property FileView clockConfig: FileView {
+        path: Quickshell.env("HOME") + "/.config/takumi/clock.toml"
+        watchChanges: true
+        printErrors: false
+        onFileChanged: reload()
+        onLoaded: {
+            const m = text().match(/^format\s*=\s*"(12h|24h)"/m);
+            style.clockFormat = m ? m[1] : "";
+        }
+    }
 
     // ~/.config/takumi/shell.toml, watched.
     property FileView config: FileView {

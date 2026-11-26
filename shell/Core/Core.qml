@@ -26,7 +26,14 @@ PanelWindow {
     readonly property string view: open ? core.view : ""
     onApprovingChanged: if (approving) { Qt.callLater(() => approval.focusField()); trace.play(); }
     onViewChanged: if (open || view !== "") trace.play()
-    onOpenChanged: if (open) trace.play()
+    onOpenChanged: {
+        if (open) { focusPriming = true; focusPrimeTimer.restart(); trace.play(); }
+        else { focusPriming = false; focusPrimeTimer.stop(); }
+    }
+    // Brief Exclusive -> OnDemand focus prime: grabs keyboard cleanly on summon without trapping clicks
+    // across multi-monitor setups; password approvals stay Exclusive for security.
+    property bool focusPriming: false
+    Timer { id: focusPrimeTimer; interval: 120; onTriggered: win.focusPriming = false }
     // A theme chosen: the Core's light runs in the new accent as the Sky opens (Sky/SkyCanvas.qml).
     Connections { target: Theme; function onNameChanged() { trace.play(); } }
     // Slide away when the focused column on this output fills the strip (maximized or fullscreen).
@@ -37,7 +44,7 @@ PanelWindow {
         const ws = niri.workspaces.find(x => x.id === w.workspace_id);
         if (!ws || ws.output !== output) return false;
         const size = w.layout?.tile_size;
-        return !!size && size[0] >= width - Style.gap * 2 - 1;
+        return !!size && size[0] >= width - Style.niriGap * 2 - 1;
     }
 
     anchors { left: true; right: true; bottom: true }
@@ -46,7 +53,7 @@ PanelWindow {
     color: "transparent"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.namespace: "takumi-core"
-    WlrLayershell.keyboardFocus: open || approving ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+    WlrLayershell.keyboardFocus: approving || focusPriming ? WlrKeyboardFocus.Exclusive : open ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
     mask: Region { item: capsule }
     // Frosted glass: niri blurs exactly the capsule's shape behind it. Without a GPU nothing is blurred and
     // the body stays nearly opaque (Style.coreFill).
@@ -61,9 +68,15 @@ PanelWindow {
         Behavior on anchors.bottomMargin { NumberAnimation { duration: Style.slide; easing.type: Easing.BezierSpline; easing.bezierCurve: Style.easeOut } }
 
         width: Math.min(win.width - Style.gap * 2,
-                        win.approving ? approval.implicitWidth : win.view === "quick" ? quick.implicitWidth : win.view === "today" ? today.implicitWidth
+                        win.approving ? approval.implicitWidth : win.view === "quick" ? quick.implicitWidth
+                        : win.view === "today" ? today.implicitWidth : win.view === "keys" ? keysSheet.implicitWidth
+                        : win.view === "sound" ? soundDeck.implicitWidth : win.view === "display" ? displayDeck.implicitWidth
+                        : win.view === "network" ? netDeck.implicitWidth : win.view === "cockpit" ? cockpitView.implicitWidth
                         : win.open ? Style.coreOpenWidth : win.noticing ? notice.implicitWidth : rest.implicitWidth)
-        height: win.approving ? approval.implicitHeight : win.view === "quick" ? quick.implicitHeight : win.view === "today" ? today.implicitHeight
+        height: win.approving ? approval.implicitHeight : win.view === "quick" ? quick.implicitHeight
+              : win.view === "today" ? today.implicitHeight : win.view === "keys" ? keysSheet.implicitHeight
+              : win.view === "sound" ? soundDeck.implicitHeight : win.view === "display" ? displayDeck.implicitHeight
+              : win.view === "network" ? netDeck.implicitHeight : win.view === "cockpit" ? cockpitView.implicitHeight
               : win.open ? pane.wantedHeight : Style.coreHeight
         Behavior on width  { NumberAnimation { duration: Style.morph; easing.type: Easing.BezierSpline; easing.bezierCurve: Style.spring } }
         Behavior on height { NumberAnimation { duration: Style.morph; easing.type: Easing.BezierSpline; easing.bezierCurve: Style.spring } }
@@ -176,7 +189,7 @@ PanelWindow {
             }
             Quick {
                 id: quick
-                core: win.core; poll: win.poll
+                core: win.core; poll: win.poll; niri: win.niri
                 active: win.view === "quick"
                 anchors.bottom: parent.bottom
                 anchors.horizontalCenter: parent.horizontalCenter
@@ -196,26 +209,89 @@ PanelWindow {
                 visible: opacity > 0
                 Behavior on opacity { NumberAnimation { duration: today.active ? Style.enter : 90 } }
             }
+            KeysSheet {
+                id: keysSheet
+                core: win.core
+                active: win.view === "keys"
+                anchors.bottom: parent.bottom
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: implicitWidth; height: implicitHeight
+                opacity: active ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { NumberAnimation { duration: keysSheet.active ? Style.enter : 90 } }
+            }
+            SoundDeck {
+                id: soundDeck
+                core: win.core; poll: win.poll; niri: win.niri
+                active: win.view === "sound"
+                anchors.bottom: parent.bottom
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: implicitWidth; height: implicitHeight
+                opacity: active ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { NumberAnimation { duration: soundDeck.active ? Style.enter : 90 } }
+            }
+            DisplayDeck {
+                id: displayDeck
+                core: win.core
+                active: win.view === "display"
+                anchors.bottom: parent.bottom
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: implicitWidth; height: implicitHeight
+                opacity: active ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { NumberAnimation { duration: displayDeck.active ? Style.enter : 90 } }
+            }
+            NetDeck {
+                id: netDeck
+                core: win.core; poll: win.poll
+                active: win.view === "network"
+                anchors.bottom: parent.bottom
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: implicitWidth; height: implicitHeight
+                opacity: active ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { NumberAnimation { duration: netDeck.active ? Style.enter : 90 } }
+            }
+            Cockpit {
+                id: cockpitView
+                core: win.core
+                active: win.view === "cockpit"
+                anchors.bottom: parent.bottom
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: implicitWidth; height: implicitHeight
+                opacity: active ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { NumberAnimation { duration: cockpitView.active ? Style.enter : 90 } }
+            }
         }
 
-        // The rim: one hairline of light, brightest at the top, and the accent while the Core is lit.
-        Canvas {
+        // GPU Scene Graph optical rim: replaces imperative 2D Canvas so 120Hz spring morphs do zero CPU repaints.
+        Item {
             id: rim
             anchors.fill: body
-            property real r: body.radius
-            property color lightTop: capsule.lit ? Theme.accentTint(Style.rimLit) : Theme.tint(Style.rimTop)
-            property color lightMid: Theme.tint(Style.rimMid)
-            property color lightLow: Theme.tint(Style.rimLow)
-            Behavior on lightTop { ColorAnimation { duration: Style.enter } }
-            onRChanged: requestPaint(); onLightTopChanged: requestPaint(); onLightMidChanged: requestPaint()
-            onWidthChanged: requestPaint(); onHeightChanged: requestPaint()
-            onPaint: {
-                const ctx = getContext("2d"), w = width, h = height, rr = Math.min(r, h / 2);
-                ctx.reset();
-                const g = ctx.createLinearGradient(0, 0, 0, h);
-                g.addColorStop(0, lightTop); g.addColorStop(Math.min(0.5, Style.space(28) / Math.max(1, h)), lightMid); g.addColorStop(1, lightLow);
-                ctx.strokeStyle = g; ctx.lineWidth = Style.hairline;
-                ctx.beginPath(); ctx.roundedRect(0.5, 0.5, w - 1, h - 1, rr, rr); ctx.stroke();
+            readonly property color lightTop: capsule.lit ? Theme.accentTint(Style.rimLit) : Theme.tint(Style.rimTop)
+            readonly property color lightMid: capsule.lit ? Theme.accentTint(0.22) : Theme.tint(Style.rimMid)
+            Rectangle {
+                anchors.fill: parent
+                radius: body.radius
+                color: "transparent"
+                border.width: Style.hairline
+                border.color: rim.lightMid
+                Behavior on border.color { ColorAnimation { duration: Style.enter } }
+            }
+            // Upper horizon catch along the top edge.
+            Rectangle {
+                readonly property real inset: Math.min(body.radius * 0.7, parent.width * 0.2)
+                anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: inset; rightMargin: inset }
+                height: Style.hairline
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: "transparent" }
+                    GradientStop { position: 0.25; color: rim.lightTop }
+                    GradientStop { position: 0.75; color: rim.lightTop }
+                    GradientStop { position: 1.0; color: "transparent" }
+                }
             }
         }
         // Opening: the horizon's light runs out along the top edge (Parts/Trace.qml).

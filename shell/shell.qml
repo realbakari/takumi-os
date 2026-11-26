@@ -25,7 +25,7 @@ ShellRoot {
         delegate: Scope {
             id: perScreen
             required property var modelData
-            Sky   { screen: perScreen.modelData }
+            Sky   { screen: perScreen.modelData; niri: niriService; output: perScreen.modelData.name }
             // The output name comes from the screen list, not the window: a window's screen can be unset
             // while it is unmapped, which would feed back into whether it is mapped.
             Scrim { screen: perScreen.modelData; output: perScreen.modelData.name; core: coreState }
@@ -58,6 +58,11 @@ ShellRoot {
         function search(text: string): void { coreState.search(text); }
         function quick(): void { coreState.quick(); }
         function today(): void { coreState.today(); }
+        function keys(): void { coreState.keys(); }
+        function sound(): void { coreState.sound(); }
+        function display(): void { coreState.display(); }
+        function network(): void { coreState.network(); }
+        function cockpit(): void { coreState.cockpit(); }
         function notice(icon: string, title: string, detail: string, value: int): void { coreState.notice(icon, title, detail, value); pollService.refresh(); }
         function announce(icon: string, title: string, detail: string, seconds: int): void { coreState.announce(icon, title, detail, seconds); }
         function offer(icon: string, title: string, detail: string, open: string, seconds: int): void { coreState.offer(icon, title, detail, open, seconds); pollService.refresh(); }

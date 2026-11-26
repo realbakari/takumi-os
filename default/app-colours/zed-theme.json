@@ -1,0 +1,62 @@
+{
+  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
+  "name": "Takumi",
+  "author": "Takumi OS",
+  "themes": [
+    {
+      "name": "Takumi",
+      "appearance": "{{mode}}",
+      "style": {
+        "background": "{{background}}",
+        "surface.background": "{{surface}}",
+        "elevated_surface.background": "{{surface}}",
+        "panel.background": "{{surface}}",
+        "title_bar.background": "{{background}}",
+        "status_bar.background": "{{background}}",
+        "tab_bar.background": "{{background}}",
+        "tab.active_background": "{{surface}}",
+        "tab.inactive_background": "{{background}}",
+        "toolbar.background": "{{background}}",
+        "editor.background": "{{background}}",
+        "editor.gutter.background": "{{background}}",
+        "editor.active_line.background": "{{surface}}",
+        "editor.foreground": "{{foreground}}",
+        "editor.line_number": "{{muted}}",
+        "editor.active_line_number": "{{accent}}",
+        "text": "{{foreground}}",
+        "text.muted": "{{muted}}",
+        "text.accent": "{{accent}}",
+        "border": "{{surface}}",
+        "border.focused": "{{accent}}",
+        "element.selected": "{{surface}}",
+        "terminal.background": "{{background}}",
+        "terminal.foreground": "{{foreground}}",
+        "terminal.ansi.black": "{{background}}",
+        "terminal.ansi.red": "{{red}}",
+        "terminal.ansi.green": "{{green}}",
+        "terminal.ansi.yellow": "{{yellow}}",
+        "terminal.ansi.blue": "{{blue}}",
+        "terminal.ansi.magenta": "{{magenta}}",
+        "terminal.ansi.cyan": "{{cyan}}",
+        "terminal.ansi.white": "{{foreground}}",
+        "terminal.ansi.bright_black": "{{muted}}",
+        "error": "{{red}}",
+        "warning": "{{yellow}}",
+        "success": "{{green}}",
+        "info": "{{cyan}}",
+        "syntax": {
+          "comment": { "color": "{{muted}}", "font_style": "italic" },
+          "keyword": { "color": "{{accent}}" },
+          "function": { "color": "{{blue}}" },
+          "string": { "color": "{{green}}" },
+          "number": { "color": "{{yellow}}" },
+          "constant": { "color": "{{magenta}}" },
+          "type": { "color": "{{yellow}}" },
+          "variable": { "color": "{{foreground}}" },
+          "property": { "color": "{{cyan}}" },
+          "operator": { "color": "{{cyan}}" }
+        }
+      }
+    }
+  ]
+}

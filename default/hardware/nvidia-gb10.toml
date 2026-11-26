@@ -1,0 +1,13 @@
+# NVIDIA GB10 / Grace Blackwell ARM64 desktop workstation.
+title = "NVIDIA GB10 Workstation"
+part = "graphics"
+works = "yes"
+says = "uses NVIDIA open ARM64 modules"
+
+[match]
+pci = ["10de:2e12"]
+arch = ["aarch64"]
+
+[apply]
+packages = ["nvidia-open-dkms", "nvidia-utils"]
+note = "NVIDIA GB10 workstations use the open-source NVIDIA kernel modules (nvidia-open-dkms) and Wayland DRM KMS."

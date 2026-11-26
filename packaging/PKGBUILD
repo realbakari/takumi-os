@@ -1,0 +1,73 @@
+# Maintainer: Takumi OS
+# Split Arch Linux PKGBUILD for Takumi OS.
+# Produces four clean packages so Takumi installs and upgrades natively via pacman without ever blocking
+# standard `pacman -Syu`: takumi-base, takumi-shell, takumi-themes, takumi-hardware.
+
+pkgbase=takumi
+pkgname=('takumi-base' 'takumi-shell' 'takumi-themes' 'takumi-hardware')
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Takumi OS — Atomic Rooms, The Strip, The Core, Harmony, Phase Themes and Safe Intent"
+arch=('any')
+url="https://github.com/takumi-os/takumi"
+license=('MIT')
+makedepends=('bash' 'jq')
+
+_root="${TAKUMI_SRC:-$startdir/..}"
+
+package_takumi-base() {
+  pkgdesc="Takumi OS router, commands, libraries, migrations, default configs and system integration"
+  depends=('bash' 'jq' 'niri' 'keyd' 'foot' 'networkmanager' 'pipewire' 'pipewire-pulse' 'wireplumber' 'btrfs-progs' 'pacman-contrib')
+  optdepends=(
+    'takumi-shell: Quickshell Sky, Core, Lock and Greeter'
+    'takumi-themes: 55 contrast-checked phase themes and skies'
+    'takumi-hardware: declarative hardware profiles and speaker tunings'
+    'cliphist: clipboard history in the Palette'
+    'qalculate: inline calculator in the Palette'
+    'starship: themed terminal prompt'
+  )
+
+  install -Dm755 "$_root/bin/takumi" "$pkgdir/usr/bin/takumi"
+  ln -s takumi "$pkgdir/usr/bin/tk"
+  install -Dm644 "$_root/version" "$pkgdir/usr/share/takumi/version"
+
+  install -d "$pkgdir/usr/lib/takumi/commands" "$pkgdir/usr/share/takumi/lib" \
+             "$pkgdir/usr/share/takumi/config" "$pkgdir/usr/share/takumi/migrations" \
+             "$pkgdir/usr/share/takumi/packages" "$pkgdir/usr/share/takumi/app-colours" \
+             "$pkgdir/usr/share/takumi/default/palette" "$pkgdir/usr/lib/systemd/system" \
+             "$pkgdir/usr/lib/systemd/user" "$pkgdir/etc/polkit-1/rules.d"
+
+  cp -a "$_root/commands/." "$pkgdir/usr/lib/takumi/commands/"
+  cp -a "$_root/lib/." "$pkgdir/usr/share/takumi/lib/"
+  cp -a "$_root/config/." "$pkgdir/usr/share/takumi/config/"
+  cp -a "$_root/migrations/." "$pkgdir/usr/share/takumi/migrations/"
+  cp -a "$_root/install/packages/." "$pkgdir/usr/share/takumi/packages/"
+  cp -a "$_root/default/app-colours/." "$pkgdir/usr/share/takumi/app-colours/"
+  cp -a "$_root/default/palette/." "$pkgdir/usr/share/takumi/default/palette/"
+  cp -a "$_root/default/systemd/system/." "$pkgdir/usr/lib/systemd/system/"
+  cp -a "$_root/default/systemd/user/." "$pkgdir/usr/lib/systemd/user/"
+  cp -a "$_root/etc/polkit-1/rules.d/." "$pkgdir/etc/polkit-1/rules.d/"
+  install -Dm755 "$_root/default/takumi-session" "$pkgdir/usr/bin/takumi-session"
+}
+
+package_takumi-shell() {
+  pkgdesc="Takumi OS Quickshell desktop: Sky, Core, isolated Lock, Greeter and Setup"
+  depends=('takumi-base' 'quickshell' 'inter-font' 'ttf-jetbrains-mono' 'noto-fonts-cjk')
+  install -d "$pkgdir/usr/share/takumi/shell"
+  cp -a "$_root/shell/." "$pkgdir/usr/share/takumi/shell/"
+}
+
+package_takumi-themes() {
+  pkgdesc="Takumi OS 55 contrast-checked 4-phase themes and native skies"
+  depends=('takumi-base')
+  install -d "$pkgdir/usr/share/takumi/themes"
+  cp -a "$_root/themes/." "$pkgdir/usr/share/takumi/themes/"
+}
+
+package_takumi-hardware() {
+  pkgdesc="Takumi OS declarative hardware profiles and laptop speaker tunings"
+  depends=('takumi-base')
+  install -d "$pkgdir/usr/share/takumi/default/hardware" "$pkgdir/usr/share/takumi/default/audio/tunings"
+  cp -a "$_root/default/hardware/." "$pkgdir/usr/share/takumi/default/hardware/"
+  cp -a "$_root/default/audio/tunings/." "$pkgdir/usr/share/takumi/default/audio/tunings/"
+}

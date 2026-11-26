@@ -30,11 +30,16 @@ Sources/Notices.qml   the notification server: apps' messages, written to notice
 Parts/                Label, Icon, SignalIcon, Emblem, Pressable, Arrival, Trace (the light along the Core's top edge as it opens)
 Sky/                  Sky.qml (background layer surface), SkyCanvas.qml (the painting)
 Core/                 Core.qml, Rest.qml, Segment.qml, Notice.qml, Open.qml, ResultRow.qml, Providers.qml, Card.qml, Scrim.qml,
-                      AppGrid.qml (the app row and the grid of every app), Quick.qml with Tile.qml, Level.qml and
-                      NowPlaying.qml (Quick settings), Today.qml, Zoom.qml (the magnifier docked at the top, docs/accessibility.md)
+                      AppGrid.qml (the app row and the grid of every app), ThemeGrid.qml (visual theme gallery with live phase preview),
+                      EmojiGrid.qml (visual emoji grid), KeysSheet.qml (native shortcut cheat sheet), SoundDeck.qml (in-Core
+                      PipeWire output/input switcher and per-app stream mixer), DisplayDeck.qml (spatial monitor layout studio),
+                      NetDeck.qml (in-Core Wi-Fi, VPN and Bluetooth deck), Cockpit.qml (Intent & Agent Cockpit),
+                      Quick.qml with Tile.qml, Level.qml and NowPlaying.qml (Quick settings), Today.qml (with Phase Solar Arc),
+                      Zoom.qml (the magnifier docked at the top, docs/accessibility.md)
 Parts/LockFace.qml    the emblem, time, date and field the Lock and the login screen share
 Parts/Arrival.qml     the login screen's first moment: the boot splash's picture, then the tile rising onto the emblem
 Lock/Lock.qml         session lock and PAM
+lock.qml              isolated standalone session Lock process (launched by `takumi lock`)
 greeter.qml           the login screen (greetd, through commands/greeter/main in cage)
 setup.qml, Setup/     the setup disc's screens ([setup.md](setup.md))
 ```
@@ -53,9 +58,14 @@ another from the field up, and Quick settings' tiles in a wave from the top left
 |---|---|---|
 | **Rest** | emblem · the app you are in and its window's title ("Search" with nothing open) · the strip's columns when there are two or more · workspace numbers when there is more than one · what is playing · date and time · background apps · a recording in progress (red, with its time; a press stops it) · remote help (a person; red while someone is connected; a press offers to stop it) · dictation listening (the microphone, breathing; a press stops it) · a running timer (what is left; a press opens Today) · microphone and camera · the keyboard layout when there is more than one (a press goes to the next) · the modes you turned on (do not disturb, staying awake, the night light) · network (in words when something is in the way) · battery · volume; each part shows only with something to say, lights under the pointer and has a word above it | as wide as its content, 46 tall |
 | **Notice** | an icon, a title, a detail, and a meter, a code to copy or an app's buttons; "3 more" when others wait | as wide as the notice, 46 tall; 1.8 s for Takumi's own, 5 s for a message (8 with buttons) |
-| **Palette** | results stacked upward, Intent's plan, the field | 640 wide, as tall as its content (200 to 440) |
-| **Quick settings** | six switches (Wi-Fi, Bluetooth, do not disturb, night light, stay awake, power mode), the sound and, with a backlight, brightness; what is playing; the lock, and the four ways to stop | 420 wide, as tall as its content |
-| **Today** | the day, the month, what apps said earlier | 372 wide, as tall as its content |
+| **Palette** | results stacked upward (with a soft top fade when scrolling), visual Theme Gallery, Emoji Grid, App Grid, Intent's plan, the field | 640 wide, as tall as its content (200 to 500) |
+| **Quick settings** | balanced 2×4 switches (Wi-Fi, Bluetooth, do not disturb, night light, stay awake, microphone, power mode, Look), full-width Mirror bar when multiple screens are attached, sound and brightness levels, what is playing (click to focus player), capture tools, lock, and the four ways to stop | 420 wide, as tall as its content |
+| **Today** | the day, Phase Solar Arc (live Dawn → Day → Dusk → Night position), interactive month grid (clickable dates with reminder dots and quick "+ Remind"), coming up, what apps said earlier | 372 wide, as tall as its content |
+| **Keys** | native themed shortcut cheat sheet (`Super+K` or `Super+Shift+/`) grouped by Core, Strip, Harmony, Apps/Capture and Sound | 680 wide, as tall as its content |
+| **Sound** | in-Core PipeWire output/input switcher (with Bluetooth codecs), live per-app volume sliders, and media controls | 440 wide, as tall as its content |
+| **Displays** | spatial scaled monitor canvas with inline scale presets and multi-monitor arrangement controls | 460 wide, as tall as its content |
+| **Connections** | in-Core Wi-Fi signal list, one-click Share QR, VPN status pill and paired Bluetooth device toggles | 440 wide, as tall as its content |
+| **Cockpit** | Intent & Agent Cockpit: active engine/model, recent audited `transcript.jsonl` actions, and quick MCP/Doctor actions | 540 wide, as tall as its content |
 
 Rest details:
 
@@ -114,6 +124,11 @@ the night light. The clock opens Today; the power key opens the Palette on
 ```bash
 qs -c takumi ipc --any-display call core quick
 qs -c takumi ipc --any-display call core today
+qs -c takumi ipc --any-display call core keys
+qs -c takumi ipc --any-display call core sound
+qs -c takumi ipc --any-display call core display
+qs -c takumi ipc --any-display call core network
+qs -c takumi ipc --any-display call core cockpit
 qs -c takumi ipc --any-display call core search power
 ```
 
@@ -286,8 +301,10 @@ first start (see [atomic-rooms.md](atomic-rooms.md)).
 
 ## The Lock
 
-`takumi lock` (Super+L) asks the shell to lock with the Wayland session lock
-protocol. Each screen gets the sky and the Lock face (`Parts/LockFace.qml`):
+`takumi lock` (Super+L) launches the isolated standalone session lock process
+(`shell/lock.qml`, decoupled from the Sky/Core shell so a shell restart or crash
+can never strand `ext-session-lock`), falling back to the running shell's IPC
+lock and then `swaylock`. Each screen gets the sky and the Lock face (`Parts/LockFace.qml`):
 the emblem, the time at up to 150 px, the date, one field, and the user name, in front of 匠 drawn as a faint
 outline most of the screen tall. As it appears, a thin mark draws out from each corner of the screen; inside the
 top left one, how the computer is connected (Wi-Fi, Wired or Offline, "no internet", the VPN). Typing goes
@@ -345,11 +362,14 @@ Wi-Fi mark are its colour at 0.22.
 
 ## Motion
 
-Entrances and exits 167 ms on a decelerating curve, hover and press 83 ms,
-things already on screen moving point to point in 167 to 333 ms (the values in
-`Look/Style.qml`, after Windows' motion guidance:
-https://learn.microsoft.com/windows/apps/design/signature-experiences/motion).
-The Core's morph is 333 ms on a slight spring. Retints are 1.5 s.
+Entrances take 167 ms on a decelerating curve and exits take 110 ms (faster
+exits than entrances), hover and press 83 ms, things already on screen moving
+point to point in 167 to 333 ms (the values in `Look/Style.qml`). The Core's
+rim and control bevels (`Parts/Bevel.qml`) are GPU Scene Graph surfaces (zero
+CPU Canvas repaints on 120 Hz morphs) with a restrained pointer-reactive
+specular highlight along hovered edges, and the Sky shifts with subtle
+Strip-coupled depth parallax as you move across columns. The Core's morph is
+333 ms on a slight spring. Retints are 1.5 s.
 Press scale is 0.975, and the hit area counter-scales so a press near an edge
 still lands. Something in progress breathes (a row's rail, 760 ms each way)
 or sweeps (the field's line, 1.1 s a pass).

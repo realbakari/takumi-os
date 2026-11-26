@@ -14,6 +14,7 @@ FocusScope {
     id: quick
     required property var core
     required property var poll
+    property var niri: null
     property bool active: false
     implicitWidth: Style.quickWidth
     implicitHeight: column.implicitHeight + Style.space(32)
@@ -124,6 +125,13 @@ FocusScope {
                 spacing: Style.space(6)
                 Pressable {
                     width: Style.space(36); height: width; radius: width / 2
+                    accessibleName: "Intent Cockpit"; raised: true
+                    color: pressed ? Theme.tint(Style.fillPressed) : hovered ? Theme.tint(0.11) : Theme.tint(0.06)
+                    onClicked: quick.core.cockpit()
+                    Icon { anchors.centerIn: parent; name: "quote"; size: Style.iconSmall; color: Theme.withAlpha(Theme.foreground, 0.85) }
+                }
+                Pressable {
+                    width: Style.space(36); height: width; radius: width / 2
                     accessibleName: "Lock"; raised: true
                     color: pressed ? Theme.tint(Style.fillPressed) : hovered ? Theme.tint(0.11) : Theme.tint(0.06)
                     onClicked: { Quickshell.execDetached(["takumi", "lock"]); quick.core.close(); }
@@ -155,7 +163,7 @@ FocusScope {
                 detail: quick.st.wifi === undefined ? "" : !available ? "Not available" : quick.st.wifi === "off" ? "Off" : (quick.st.ssid || "Not connected")
                 more: true
                 onToggled: quick.change({ wifi: on ? "off" : "on", ssid: on ? "" : quick.st.ssid }, ["takumi", "switch", "wifi"])
-                onMoreRequested: quick.core.search("wifi")
+                onMoreRequested: quick.core.network()
             }
             Tile {
                 width: parent.cell
@@ -166,7 +174,7 @@ FocusScope {
                       : (quick.st.btCount ?? 0) > 1 ? quick.st.btDevice + " and " + (quick.st.btCount - 1) + " more" : (quick.st.btDevice || "On")
                 more: available
                 onToggled: quick.change({ bt: on ? "off" : "on" }, ["takumi", "switch", "bluetooth"])
-                onMoreRequested: quick.core.search("bluetooth")
+                onMoreRequested: quick.core.network()
             }
             Tile {
                 width: parent.cell
@@ -205,14 +213,6 @@ FocusScope {
             }
             Tile {
                 width: parent.cell
-                visible: (quick.st.screens ?? 1) > 1
-                icon: "display"; label: "Mirror"
-                on: quick.st.mirror === "on"
-                detail: on ? "The projector shows this screen" : "Each screen its own"
-                onToggled: quick.change({ mirror: on ? "off" : "on" }, ["takumi", "display", "mirror", "toggle"])
-            }
-            Tile {
-                width: parent.cell
                 icon: quick.st.profile === "power-saver" ? "leaf" : "bolt"; label: "Power mode"
                 available: quick.st.profiles === undefined || quick.st.profiles.length > 0
                 on: !!quick.st.profile && quick.st.profile !== "balanced"
@@ -221,22 +221,56 @@ FocusScope {
                 onToggled: { const p = quick.nextProfile(); if (p) quick.change({ profile: p }, ["takumi", "power", "profile", p]); }
                 onMoreRequested: quick.core.search("power")
             }
+            Tile {
+                width: parent.cell
+                icon: "sun"; label: "Look"
+                on: false
+                detail: (Theme.name ? Theme.name.charAt(0).toUpperCase() + Theme.name.slice(1) : "Ion") + " · " + Theme.phase
+                more: true
+                onToggled: quick.core.search("theme")
+                onMoreRequested: quick.core.search("theme")
+            }
+        }
+
+        // Projector mirroring sits full-width beneath the 2x4 grid when more than one screen is attached,
+        // so single-screen and multi-screen layouts both stay balanced with no orphan tile.
+        Tile {
+            visible: !quick.stopping && (quick.st.screens ?? 1) > 1
+            width: parent.width
+            icon: "display"; label: "Mirror"
+            on: quick.st.mirror === "on"
+            detail: on ? "The projector shows this screen" : "Each screen its own"
+            more: true
+            onToggled: quick.change({ mirror: on ? "off" : "on" }, ["takumi", "display", "mirror", "toggle"])
+            onMoreRequested: quick.core.display()
         }
 
         Column {
             visible: !quick.stopping
             width: parent.width
             spacing: Style.tileGap
-            Level {
+            Row {
                 width: parent.width
                 visible: quick.poll.volume >= 0
-                icon: quick.poll.muted || quick.poll.volume === 0 ? "mute" : "vol"
-                iconAction: true
-                label: "Volume"
-                value: quick.poll.volume
-                detail: quick.poll.muted ? "Muted" : (quick.st.output ?? "")
-                onMoved: v => { quick.wantVolume = v; if (!levelTimer.running) levelTimer.start(); }
-                onIconClicked: { Quickshell.execDetached(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]); pollSoon.restart(); }
+                spacing: Style.tileGap
+                Level {
+                    width: parent.width - soundMore.width - parent.spacing
+                    icon: quick.poll.muted || quick.poll.volume === 0 ? "mute" : "vol"
+                    iconAction: true
+                    label: "Volume"
+                    value: quick.poll.volume
+                    detail: quick.poll.muted ? "Muted" : (quick.st.output ?? "")
+                    onMoved: v => { quick.wantVolume = v; if (!levelTimer.running) levelTimer.start(); }
+                    onIconClicked: { Quickshell.execDetached(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]); pollSoon.restart(); }
+                }
+                Pressable {
+                    id: soundMore
+                    width: Style.levelHeight; height: Style.levelHeight; radius: height / 2
+                    accessibleName: "Sound outputs and app volumes"; raised: true
+                    color: pressed ? Theme.tint(Style.fillPressed) : hovered ? Theme.tint(Style.fillTile + Style.fillHover) : Theme.tint(Style.fillTile)
+                    onClicked: quick.core.sound()
+                    Icon { anchors.centerIn: parent; name: "chevron"; size: Style.iconSmall; color: Theme.withAlpha(Theme.foreground, Style.textDim) }
+                }
             }
             Level {
                 width: parent.width
@@ -253,6 +287,8 @@ FocusScope {
             visible: !quick.stopping && player !== null
             width: parent.width
             active: quick.active
+            niri: quick.niri
+            core: quick.core
         }
 
         // The four ways to stop. The three that close your apps ask for a second press.

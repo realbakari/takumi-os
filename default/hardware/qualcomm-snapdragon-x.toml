@@ -1,0 +1,13 @@
+# Qualcomm Snapdragon X Elite & X Plus ARM64 laptops (device tree match).
+title = "Qualcomm Snapdragon X Laptop"
+part = "computer"
+works = "partly"
+says = "mainline ARM64; camera varies"
+
+[match]
+dt_compatible = ["lenovo,thinkpad-t14s-gen6*", "lenovo,yoga-slim7x*", "dell,xps13-9345*", "asus,vivobook-s15*", "hp,omnibook-x14*", "qcom,x1p42100*"]
+arch = ["aarch64"]
+
+[apply]
+packages = ["linux-firmware"]
+note = "Snapdragon X laptops run mainline ARM64 Linux with display, Wi-Fi and audio working on supported device trees; camera and S3/s2idle support vary by model."

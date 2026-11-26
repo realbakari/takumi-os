@@ -1,0 +1,12 @@
+# Qualcomm FastConnect 7800 (WCN7850 / QCNCM865) Wi-Fi 7 adapter (ath12k).
+title = "Qualcomm FastConnect 7800 Wi-Fi 7"
+part = "wifi"
+works = "yes"
+says = "uses Qualcomm ath12k Wi-Fi 7 firmware"
+
+[match]
+pci = ["17cb:1107"]
+
+[apply]
+packages = ["linux-firmware"]
+note = "Qualcomm FastConnect 7800 (WCN7850) runs on the in-kernel ath12k driver with current linux-firmware."

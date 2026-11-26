@@ -87,8 +87,32 @@ QtObject {
             }
         }
     }
+    // Event-driven watchers for PipeWire/PulseAudio and NetworkManager: triggers an immediate debounced
+    // refresh on volume, mute, sink, microphone or link changes, allowing the fallback poll to relax to 30 s.
+    property bool reactiveAudio: false
+    property bool reactiveNet: false
+    property Timer eventDebounce: Timer { interval: 150; onTriggered: poll.refresh() }
+    property Process audioWatch: Process {
+        running: poll.active
+        command: ["sh", "-c", "command -v pactl >/dev/null && exec pactl subscribe 2>/dev/null"]
+        onStarted: poll.reactiveAudio = true
+        onExited: poll.reactiveAudio = false
+        stdout: SplitParser {
+            onRead: line => {
+                if (/on (sink|source|server)/.test(line)) poll.eventDebounce.restart();
+            }
+        }
+    }
+    property Process netWatch: Process {
+        running: poll.active
+        command: ["sh", "-c", "command -v nmcli >/dev/null && exec nmcli monitor 2>/dev/null"]
+        onStarted: poll.reactiveNet = true
+        onExited: poll.reactiveNet = false
+        stdout: SplitParser { onRead: line => { if (line.trim()) poll.eventDebounce.restart(); } }
+    }
     property Timer timer: Timer {
-        interval: 10000; running: poll.active; repeat: true; triggeredOnStart: true
+        interval: (poll.reactiveAudio || poll.reactiveNet) ? 30000 : 10000
+        running: poll.active; repeat: true; triggeredOnStart: true
         onTriggered: poll.refresh()
     }
     function refresh() { if (!proc.running) proc.running = true; }

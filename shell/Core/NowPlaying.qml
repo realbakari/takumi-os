@@ -10,9 +10,21 @@ import "../Parts"
 Rectangle {
     id: card
     property bool active: false            // Quick settings is open: keep the progress line moving
+    property var niri: null
+    property var core: null
     readonly property var player: {
         const ps = Mpris.players.values;
         return ps.find(p => p.isPlaying) ?? ps.find(p => (p.trackTitle ?? "") !== "") ?? null;
+    }
+    function focusPlayer() {
+        if (!niri || !player) return;
+        const entry = String(player.desktopEntry ?? "").toLowerCase();
+        const ident = String(player.identity ?? "").toLowerCase();
+        const w = (niri.windows ?? []).find(x => {
+            const aid = String(x.app_id ?? "").toLowerCase(), t = String(x.title ?? "").toLowerCase();
+            return (entry && aid.includes(entry)) || (ident && (aid.includes(ident) || t.includes(ident)));
+        });
+        if (w) { niri.focusWindow(w.id); if (core) core.close(); }
     }
     visible: player !== null
     implicitHeight: visible ? Style.space(72) : 0
@@ -26,6 +38,13 @@ Rectangle {
         interval: 1000; repeat: true
         running: card.active && card.visible && !!card.player?.isPlaying && !!card.player?.positionSupported
         onTriggered: card.player.positionChanged()
+    }
+
+    MouseArea {
+        anchors { left: parent.left; top: parent.top; bottom: parent.bottom; right: controls.left }
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: card.focusPlayer()
     }
 
     Rectangle {

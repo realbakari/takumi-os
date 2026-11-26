@@ -13,6 +13,31 @@ pkill -SIGUSR1 -x foot 2>/dev/null || true                        # foot re-read
 command -v niri >/dev/null && niri msg action load-config-file >/dev/null 2>&1 || true
 mode=$(sed -n 's/^mode = "\(.*\)"/\1/p' "$look/palette.toml")
 command -v gsettings >/dev/null && gsettings set org.gnome.desktop.interface color-scheme "prefer-${mode:-dark}" 2>/dev/null || true
+# GtkSourceView 5 (GNOME Text Editor): keep the style scheme linked and selected so editors match the theme.
+if [[ -f "$look/gtksourceview.xml" ]]; then
+  mkdir -p "$HOME/.local/share/gtksourceview-5/styles"
+  ln -sfn "$look/gtksourceview.xml" "$HOME/.local/share/gtksourceview-5/styles/takumi.xml"
+  command -v gsettings >/dev/null && gsettings set org.gnome.TextEditor style-scheme takumi 2>/dev/null || true
+fi
+# Qt6 (qt6ct) and Zed: keep rendered theme links up to date when their folders exist (or qt6ct is installed).
+if [[ -f "$look/qt6ct.conf" ]] && { [[ -d "$HOME/.config/qt6ct" ]] || command -v qt6ct >/dev/null; }; then
+  mkdir -p "$HOME/.config/qt6ct/colors"
+  ln -sfn "$look/qt6ct.conf" "$HOME/.config/qt6ct/colors/takumi.conf"
+fi
+if [[ -f "$look/zed-theme.json" ]] && { [[ -d "$HOME/.config/zed" ]] || command -v zeditor >/dev/null || command -v zed >/dev/null; }; then
+  mkdir -p "$HOME/.config/zed/themes"
+  ln -sfn "$look/zed-theme.json" "$HOME/.config/zed/themes/takumi.json"
+fi
+if [[ -f "$look/helix.toml" ]] && { [[ -d "$HOME/.config/helix" ]] || command -v hx >/dev/null || command -v helix >/dev/null; }; then
+  mkdir -p "$HOME/.config/helix/themes"
+  ln -sfn "$look/helix.toml" "$HOME/.config/helix/themes/takumi.toml"
+fi
+if [[ -f "$look/fcitx5-theme.conf" ]] && { [[ -d "$HOME/.config/fcitx5" ]] || command -v fcitx5 >/dev/null; }; then
+  mkdir -p "$HOME/.local/share/fcitx5/themes/takumi"
+  ln -sfn "$look/fcitx5-theme.conf" "$HOME/.local/share/fcitx5/themes/takumi/theme.conf"
+fi
+pkill -SIGUSR1 -x kitty 2>/dev/null || true
+pkill -SIGUSR2 -x ghostty 2>/dev/null || true
 command -v qs >/dev/null && qs -c takumi ipc --any-display call theme reload >/dev/null 2>&1 || true
 theme_toml_file=""
 if declare -F theme_find >/dev/null && dir=$(theme_find "$name"); then theme_toml_file="$dir/theme.toml"; fi

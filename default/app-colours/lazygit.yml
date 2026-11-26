@@ -1,0 +1,27 @@
+# Rendered by takumi theme render for Lazygit.
+gui:
+  theme:
+    activeBorderColor:
+      - "{{accent}}"
+      - bold
+    inactiveBorderColor:
+      - "{{muted}}"
+    searchingActiveBorderColor:
+      - "{{yellow}}"
+      - bold
+    optionsTextColor:
+      - "{{blue}}"
+    selectedLineBgColor:
+      - "{{surface}}"
+    cherryPickedCommitFgColor:
+      - "{{accent}}"
+    cherryPickedCommitBgColor:
+      - "{{surface}}"
+    markedBaseCommitFgColor:
+      - "{{blue}}"
+    markedBaseCommitBgColor:
+      - "{{yellow}}"
+    unstagedChangesColor:
+      - "{{red}}"
+    defaultFgColor:
+      - "{{foreground}}"

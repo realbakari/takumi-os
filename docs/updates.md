@@ -157,25 +157,11 @@ takumi update clean                     free up space
 
 ## Not yet
 
-- **The build unit and its permission are not in this tree.**
-  `takumi-update-build.service` (a system unit that runs
-  `/usr/bin/takumi update prepare build`) and a polkit rule that lets the person
-  at the computer start and stop that one unit without a password
-  (`etc/polkit-1/rules.d/50-takumi-update.rules`) are missing. Until they are,
-  "Prepare updates on the charger" shows no row and
-  `takumi update prepare on` says "This computer cannot prepare updates by
-  itself yet".
-- **Changes made after a system was prepared do not reach it.** Staging copies
-  Wi-Fi networks, Bluetooth pairings, passwords, the time zone and printers
-  into the new system when it is staged, as `takumi update` does. A network
-  joined or a password changed between then and the restart is not carried.
-  Copying them again at shutdown would close this for both.
-- **`takumi update` does not know a system is already prepared**: run by hand,
-  it builds another.
-- **No mark in the resting Core** while updates wait; `updates.json` holds what
-  one would show.
 - **The daily look starts only once the session starts its timer**
   (`takumi-update-check.timer`).
+- **Automated `.pacnew` interactive merge inside the Core** (`takumi doctor`
+  detects unmerged `*.pacnew` / `*.pacsave` files in `/etc` and points to
+  `pacdiff`).
 
 ## Testing
 

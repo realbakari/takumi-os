@@ -80,5 +80,14 @@ for f in $qml; do
   grep -q '^import Quickshell.Io' "$f" || { echo "$f uses Quickshell.Io types without importing Quickshell.Io"; status=1; }
 done
 
+# Hot-path Core morph surfaces stay GPU-native (no imperative 2D Canvas repaints in Core.qml or Bevel.qml),
+# and standalone shell/lock.qml stays isolated from Core and Sky.
+if grep -qE '^\s*Canvas\s*\{' shell/Core/Core.qml shell/Parts/Bevel.qml; then
+  echo "hot-path rim/bevel uses CPU Canvas instead of GPU Scene Graph"; status=1
+fi
+if [[ ! -f shell/lock.qml ]] || grep -qE 'import "(Core|Sky)"' shell/lock.qml; then
+  echo "shell/lock.qml is missing or not isolated from Core/Sky"; status=1
+fi
+
 echo "   $(echo "$qml" | wc -l | tr -d ' ') shell files, $(echo "$used" | wc -w | tr -d ' ') icons, $(echo "$glyphs" | wc -w | tr -d ' ') row glyphs, tokens checked"
 exit $status

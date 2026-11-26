@@ -50,12 +50,35 @@ Pressable {
     readonly property bool busy: modelData.tone === "busy"
     readonly property bool hasBars: modelData.bars !== undefined
     function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+    function fold(s) { return String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase(); }
     readonly property string titleMarkup: {
         const t = modelData.title ?? "", q = query.trim();
         if (modelData.kind === "Intent") return "“" + esc(t) + "”";
-        const i = q ? t.toLowerCase().indexOf(q.toLowerCase()) : -1;
-        if (i < 0) return esc(t);
-        return esc(t.slice(0, i)) + "<font color=\"" + Theme.hex(Theme.accent) + "\">" + esc(t.slice(i, i + q.length)) + "</font>" + esc(t.slice(i + q.length));
+        if (!q) return esc(t);
+        // Map each code unit of the folded title back to the original string so diacritics ("Rosé") and
+        // multi-word queries ("theme rose pine") highlight every matched word cleanly.
+        const chars = Array.from(t), folded = [], offsets = [];
+        for (let i = 0; i < chars.length; i++) {
+            const f = fold(chars[i]);
+            for (let k = 0; k < f.length; k++) { folded.push(f[k]); offsets.push(i); }
+        }
+        const hay = folded.join(""), words = fold(q).split(/[\s-]+/).filter(w => w.length > 0);
+        const lit = new Array(chars.length).fill(false);
+        for (const w of words) {
+            let pos = hay.indexOf(w);
+            if (pos >= 0) {
+                for (let k = pos; k < pos + w.length && k < offsets.length; k++) lit[offsets[k]] = true;
+            }
+        }
+        let out = "", inLit = false;
+        const accentHex = Theme.hex(Theme.accent);
+        for (let i = 0; i < chars.length; i++) {
+            if (lit[i] && !inLit) { out += "<font color=\"" + accentHex + "\">"; inLit = true; }
+            else if (!lit[i] && inLit) { out += "</font>"; inLit = false; }
+            out += esc(chars[i]);
+        }
+        if (inLit) out += "</font>";
+        return out;
     }
 
     Label {

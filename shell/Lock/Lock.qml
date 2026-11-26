@@ -28,6 +28,7 @@ Scope {
     property int fingerMisses: 0
     property bool fingerMissed: false      // the last finger was wrong: the mark shakes and says so
     property int fingerRetries: 0
+    signal finished()
 
     function lock() {
         secret = ""; failed = false; busy = false; locked = true;
@@ -40,6 +41,7 @@ Scope {
         if (finger.active) finger.abort();
         fingerOn = false; retry.stop();
         locked = false;
+        finished();
     }
 
     PamContext {

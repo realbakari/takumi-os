@@ -56,7 +56,14 @@ Rectangle {
         else if (event.key === Qt.Key_Right && tile.more) { tile.moreRequested(); event.accepted = true; }
     }
 
-    Bevel { radius: tile.radius; down: area.pressed; lit: tile.on && tile.available; visible: tile.available }
+    Bevel {
+        radius: tile.radius
+        down: area.pressed
+        lit: tile.on && tile.available
+        visible: tile.available
+        tracking: area.containsMouse
+        focusX: tile.width > 0 ? Math.max(0, Math.min(1, area.mouseX / tile.width)) : 0.5
+    }
 
     // Keyboard focus: a ring in the accent, just outside the tile.
     Rectangle {

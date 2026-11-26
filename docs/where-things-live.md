@@ -20,6 +20,7 @@ packages yet: the installer's steps copy the files ([install-process.md](install
 | `install/` | the installer: `fetch.sh`, `run.sh`, `steps/`, `packages/`, the Shelf's apps (`shelf.tsv`), the setup disc's builder (`iso/`) and the VM's provisioner (`vm/`) | the checkout in `~/.local/share/takumi`; the package lists at `/usr/share/takumi/packages/`, read by every update; the Shelf at `/usr/share/takumi/shelf.tsv` |
 | `guide/` | the guide for people coming from a Mac or Windows | the checkout; rendered to HTML at `/usr/share/takumi/guide/` for the Palette's Help row |
 | `docs/` | how Takumi works, for people changing it | the checkout |
+| `packaging/` | split Arch `PKGBUILD` (`takumi-base`, `takumi-shell`, `takumi-themes`, `takumi-hardware`) | build input for pacman packages |
 | `preview/` | a picture of the design in a browser | nowhere |
 | `test/` | the checks (`./test/run`), and `test/vm`, the desktop in QEMU on a Mac | nowhere |
 | `version` | the version | `/usr/share/takumi/version` |
@@ -95,10 +96,14 @@ such folder, an install step you can read sets it and says so.
   niri/takumi/accessibility.kdl the screen reader at login and the pointer's size
   environment.d/60-takumi-pointer.conf   the pointer's size for apps
   fontconfig/conf.d/60-takumi-fonts.conf the fonts you chose, for every app
+  qt6ct/colors/takumi.conf        Qt6 colour scheme, linked when qt6ct is present
+  zed/themes/takumi.json          Zed theme, linked when Zed is present
+  helix/themes/takumi.toml        Helix theme, linked when Helix is present
   starship.toml                 a link to the prompt in the theme's colours
   pipewire/pipewire.conf.d/60-takumi-quality.conf   studio or balanced sound
   fcitx5/                       the input method's profile, when one is set up
 ~/.local/share/applications/    Terminal and System monitor by those names (a migration writes them)
+~/.local/share/gtksourceview-5/styles/takumi.xml   GNOME Text Editor style scheme, following the theme
 ~/.config/rclone/rclone.conf    the clouds you signed in to (backups, and OneDrive, Google Drive, Dropbox as folders)
 ~/.config/gtk-3.0/bookmarks     Files' sidebar; the cloud folders are added here
 ~/.cache/takumi/cloud/<cloud>   what a cloud folder keeps on this computer

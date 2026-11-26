@@ -260,7 +260,7 @@ Item {
             onClicked: rest.todayRequested()
             SystemClock { id: clock; precision: SystemClock.Minutes }
             Label { text: Qt.formatDateTime(clock.date, "ddd d MMM"); dim: Style.textDim; font.pixelSize: Style.restText; anchors.baseline: time.baseline }
-            Label { id: time; anchors.verticalCenter: parent.verticalCenter; text: Qt.formatDateTime(clock.date, "HH:mm"); font.weight: Font.DemiBold; font.pixelSize: Style.restTime }
+            Label { id: time; anchors.verticalCenter: parent.verticalCenter; text: Style.formatTime(clock.date); font.weight: Font.DemiBold; font.pixelSize: Style.restTime }
         }
 
         Item { width: Style.space(4); height: 1 }
@@ -324,8 +324,7 @@ Item {
             Icon { anchors.verticalCenter: parent.verticalCenter; name: "person"; size: Style.restIcon
                    color: rest.poll.remote > 1 ? Theme.red : Theme.withAlpha(Theme.foreground, Style.textDim) }
         }
-        // Dictation is listening (takumi voice): the microphone in the accent, breathing. A press stops it and
-        // types what was said.
+        // Dictation is listening (takumi voice): live accent micro-waveform (static mic under reduced motion).
         Segment {
             id: dictSeg
             visible: rest.poll.dictating
@@ -334,13 +333,30 @@ Item {
             onHoveredChanged: rest.hover(dictSeg, hovered)
             onClicked: Quickshell.execDetached(["takumi", "voice", "stop"])
             Icon {
-                id: dictMark
+                visible: !Style.continuousMotion
                 anchors.verticalCenter: parent.verticalCenter; name: "mic"; size: Style.restIcon; color: Theme.accent
-                SequentialAnimation on opacity {
-                    running: rest.poll.dictating && Style.continuousMotion; loops: Animation.Infinite
-                    NumberAnimation { to: 0.4; duration: Style.breathe; easing.type: Easing.InOutSine }
-                    NumberAnimation { to: 1; duration: Style.breathe; easing.type: Easing.InOutSine }
-                    onStopped: dictMark.opacity = 1
+            }
+            Row {
+                visible: Style.continuousMotion
+                anchors.verticalCenter: parent.verticalCenter
+                height: Style.space(14)
+                spacing: Style.space(2)
+                Repeater {
+                    model: [0.45, 0.95, 0.65, 0.85]
+                    delegate: Rectangle {
+                        required property real modelData
+                        required property int index
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(2.5); radius: width / 2
+                        height: parent.height * modelData
+                        color: Theme.accent
+                        SequentialAnimation on height {
+                            running: rest.poll.dictating && Style.continuousMotion
+                            loops: Animation.Infinite
+                            NumberAnimation { to: Style.space(14) * (0.25 + 0.15 * index); duration: 220 + index * 65; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: Style.space(14) * (1.0 - 0.1 * index); duration: 240 + index * 55; easing.type: Easing.InOutSine }
+                        }
+                    }
                 }
             }
         }

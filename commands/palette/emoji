@@ -27,5 +27,5 @@ grep -v '^#' "$data" | awk -F '\t' -v q="$q" '
   head -n "$limit" |
   jq -R -c --argjson s "$score" '
     split("\t") as [$ch, $name, $more]
-    | {id: ("emoji:" + $ch), title: $name, subtitle: "Enter types " + $ch + " where you were, and copies it", char: $ch, kind: "Emoji",
+    | {id: ("emoji:" + $ch), title: $name, subtitle: ("Type " + $ch + " & copy"), char: $ch, kind: "Emoji",
        keywords: ("emoji " + ($more // "")), run: ["takumi", "clipboard", "type", $ch], score: $s}'

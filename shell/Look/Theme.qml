@@ -47,13 +47,24 @@ Singleton {
     }
     function reload() { previewing = ""; previewWallpaper = ""; file.reload(); }
 
-    // A look at another theme before choosing it: the Palette calls preview(name) while a theme row is
-    // selected, and endPreview() when you move on or close. Both the shell colours and the Sky (or the
-    // theme's wallpaper image) change live; apps are recoloured only when you choose it (takumi theme set).
+    // A look at another theme or phase before choosing it: the Palette calls preview(name) or
+    // previewPhase(phase) while browsing, and endPreview() when leaving. Both shell colours and the Sky
+    // change live; apps are recoloured only when chosen.
     property string previewing: ""
+    property string previewingPhase: ""
     function preview(targetName) {
-        if (!/^[a-z0-9-]+$/.test(targetName) || targetName === previewing) return;
+        if (!/^[a-z0-9-]+$/.test(targetName) || (targetName === previewing && previewingPhase === "")) return;
         previewing = targetName;
+        runPeek(targetName, previewingPhase || theme.phase);
+    }
+    function previewPhase(targetPhase) {
+        if (!["dawn", "day", "dusk", "night"].includes(targetPhase)) return;
+        const target = previewing !== "" ? previewing : theme.name;
+        previewing = target;
+        previewingPhase = targetPhase;
+        runPeek(target, targetPhase);
+    }
+    function runPeek(targetName, targetPhase) {
         peek.command = [
             "sh", "-c",
             't=""; for d in "$HOME/.config/takumi/themes" /usr/share/takumi/themes "$3"; do [ -f "$d/$1/theme.toml" ] && { t="$d/$1"; break; }; done; ' +
@@ -61,15 +72,16 @@ Singleton {
             'bg=""; for cand in "$t/skies/$2".* "$t/skies/default".*; do [ -f "$cand" ] || continue; ' +
             'case "$cand" in *.[Pp][Nn][Gg]|*.[Jj][Pp][Gg]|*.[Jj][Pp][Ee][Gg]|*.[Ww][Ee][Bb][Pp]|*.[Bb][Mm][Pp]) bg=$cand; break ;; esac; done; ' +
             'printf "__TAKUMI_WP__=%s\\n" "$bg"; cat "$t/theme.toml"',
-            "_", targetName, theme.phase, theme.repoThemesDir
+            "_", targetName, targetPhase, theme.repoThemesDir
         ];
         peek.running = true;
     }
-    function endPreview() { if (previewing === "") return; previewing = ""; previewWallpaper = ""; file.reload(); }
+    function endPreview() { if (previewing === "" && previewingPhase === "") return; previewing = ""; previewingPhase = ""; previewWallpaper = ""; file.reload(); }
     property Process peek: Process {
         stdout: StdioCollector {
             onStreamFinished: {
                 if (theme.previewing === "") return;
+                const activePhase = theme.previewingPhase || theme.phase;
                 const out = {}; let sect = "", wp = "";
                 for (const line of this.text.split("\n")) {
                     if (line.startsWith("__TAKUMI_WP__=")) { wp = line.slice(14).trim(); continue; }
@@ -78,9 +90,10 @@ Singleton {
                     const m = line.match(/^([a-z_]+)\s*=\s*"([^"]*)"/);
                     if (!m) continue;
                     if (sect === "palette" && !(m[1] in out)) out[m[1]] = m[2];
-                    else if (sect === "phase." + theme.phase) out[m[1]] = m[2];
+                    else if (sect === "phase." + activePhase) out[m[1]] = m[2];
                     else if (sect === "meta" && m[1] === "mode") out.mode = m[2];
                 }
+                if (theme.previewingPhase) out.phase = theme.previewingPhase;
                 theme.previewWallpaper = wp;
                 // Phase keys win over the palette whichever comes first in the file.
                 theme.apply(Object.keys(out).map(k => k + ' = "' + out[k] + '"').join("\n"), true);
@@ -112,7 +125,7 @@ Singleton {
         if (ok(next.blue))       blue = next.blue;
         if (ok(next.magenta))    magenta = next.magenta;
         if (next.mode)  mode = next.mode;
-        if (next.phase && !isPreview) phase = next.phase;
+        if (next.phase && (!isPreview || previewingPhase !== "")) phase = next.phase;
         if (next.name && !isPreview)  name = next.name;
         revision++;
     }

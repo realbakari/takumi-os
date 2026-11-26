@@ -1,0 +1,12 @@
+# Intel Wi-Fi 7 BE200 / BE202 adapters (iwlwifi / iwlmlme).
+title = "Intel Wi-Fi 7 (BE200)"
+part = "wifi"
+works = "yes"
+says = "uses Intel Wi-Fi 7 firmware"
+
+[match]
+pci = ["8086:272b", "8086:272c"]
+
+[apply]
+packages = ["linux-firmware"]
+note = "Intel Wi-Fi 7 (BE200 / BE202) runs on the in-kernel iwlwifi driver with current linux-firmware."

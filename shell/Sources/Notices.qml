@@ -14,6 +14,12 @@ QtObject {
     onDndChanged: notices.core.quiet = dnd
     property var recent: []             // newest first: { app, icon, summary, body, at }
 
+    // Redact detected one-time verification codes before persisting to notices.jsonl or keeping in Today.
+    function scrubCode(text, code) {
+        if (!code || !text) return text;
+        return String(text).split(code).join("•".repeat(code.length));
+    }
+
     property NotificationServer server: NotificationServer {
         bodySupported: true
         actionsSupported: true
@@ -21,11 +27,14 @@ QtObject {
         keepOnReload: false
         onNotification: n => {
             n.tracked = true;
-            notices.recent = [{ app: n.appName, icon: n.appIcon, summary: n.summary, body: n.body, at: Date.now() }]
+            const code = notices.core.codeIn(n);
+            const safeSummary = notices.scrubCode(n.summary ?? "", code);
+            const safeBody = notices.scrubCode(String(n.body ?? "").replace(/<[^>]*>/g, ""), code);
+            notices.recent = [{ app: n.appName, icon: n.appIcon, summary: safeSummary, body: safeBody, at: Date.now() }]
                 .concat(notices.recent).slice(0, 50);
             const urgent = n.urgency === NotificationUrgency.Critical;
-            if (!n.transient) notices.keep({ ts: Math.floor(Date.now() / 1000), app: n.appName ?? "", icon: notices.iconName(n), summary: n.summary ?? "",
-                                             body: String(n.body ?? "").replace(/<[^>]*>/g, ""), urgency: urgent ? "critical" : n.urgency === NotificationUrgency.Low ? "low" : "normal" });
+            if (!n.transient) notices.keep({ ts: Math.floor(Date.now() / 1000), app: n.appName ?? "", icon: notices.iconName(n), summary: safeSummary,
+                                             body: safeBody, urgency: urgent ? "critical" : n.urgency === NotificationUrgency.Low ? "low" : "normal" });
             notices.core.message(n);
         }
     }

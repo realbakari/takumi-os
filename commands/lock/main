@@ -8,6 +8,17 @@ words: lock away
 glyph: lock
 ABOUT
 set -euo pipefail
-# The shell's lock (shell/Lock). Falls back to swaylock if the shell is not answering.
-if command -v qs >/dev/null && qs -c takumi ipc --any-display call lock lock >/dev/null 2>&1; then exit 0; fi
+# Prefer the isolated standalone Lock process (shell/lock.qml) so a Core/Sky crash can never strand
+# ext-session-lock. Falls back to the running shell's IPC lock, then swaylock.
+here=$(dirname "$(readlink -f "$0")")
+if command -v qs >/dev/null; then
+  lock_qml=""
+  for cand in /usr/share/takumi/shell/lock.qml "$here/../../shell/lock.qml"; do
+    [[ -f "$cand" ]] && { lock_qml="$cand"; break; }
+  done
+  if [[ -n "$lock_qml" ]]; then
+    exec qs -p "$lock_qml"
+  fi
+  if qs -c takumi ipc --any-display call lock lock >/dev/null 2>&1; then exit 0; fi
+fi
 exec swaylock -f

@@ -48,14 +48,15 @@ dimmed values beside bright ones. Numbers are tabular so nothing jitters.
 
 ## One material
 
-Every surface the shell draws is the same material: the theme's surface at
-0.94 (0.985 once the Core opens over windows, so their edges never show
-through), a hairline rim brightest along the top, a faint sheen down from the
-top, and a deep soft shadow. While the Core is open, asking or saying
-something, a soft light in the accent surrounds it. No blur, no gradients on
-controls. The accent is spent in a few places only: the focused window's
-ring, the selected row's rail, a switch that is on, today in the month, the
-disc in the sky.
+Every surface the shell draws is the same material: frosted glass over niri's
+background blur (`0.72` at rest, `0.84` open) when a GPU is present, falling
+back cleanly to the theme's surface at `0.94` (`0.985` open) without a GPU so
+window edges never show through. Each surface carries a hairline rim brightest
+along the top, a faint sheen and sky tint down from the top, subtle fine grain,
+and a deep soft shadow. While the Core is open, asking or saying something, a
+soft light in the accent surrounds it. No gradients on individual controls. The
+accent is spent in a few places only: the focused window's ring, the selected
+row's rail, a switch that is on, today in the month, the disc in the sky.
 
 ## Motion that explains
 

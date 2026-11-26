@@ -151,6 +151,18 @@ zsh's and fish's start files when you use them. A `starship.toml` of your own
 is kept as `starship.toml.before-takumi` and comes back when it is turned
 off. The prompt follows every theme and phase.
 
+**Editors, terminals, IME and TUIs.** Alongside GTK, foot, btop, Neovim and
+starship, `takumi theme render` renders matching theme files in
+`~/.local/state/takumi/look/` for **GtkSourceView 5** (`gtksourceview.xml`,
+linked automatically for GNOME Text Editor), **Qt6/Qt5** (`qt6ct.conf`, linked
+for `qt6ct`), **Ghostty** (`ghostty.conf`), **Kitty** (`kitty.conf`),
+**Alacritty** (`alacritty.toml`), **Zed** (`zed-theme.json`, linked when Zed
+is present), **Helix** (`helix.toml`, linked when Helix is present), **VS Code**
+(`vscode-theme.json`), **fcitx5** (`fcitx5-theme.conf`, linked when fcitx5 is
+present), **Lazygit** (`lazygit.yml`) and **Tmux** (`tmux.conf`).
+`takumi theme apply` reloads running foot, Kitty and Ghostty instances
+automatically.
+
 ## About this computer
 
 "About this computer" opens a card in the Core: the model as its title, then
@@ -211,8 +223,6 @@ For scripts, each says how it ended in its exit status and its last line:
 
 - Running foot terminals and Qt apps keep their font until they start again;
   Firefox reads its stylesheet only at start.
-- Qt apps take the families from fontconfig but not the size or the colours;
-  those need a Qt platform theme.
 - Chromium's colour is set when you choose the row, not at each theme change,
   because its policy needs your password.
 - Video backgrounds, several pictures per theme, and themes shared between

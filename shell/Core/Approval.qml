@@ -81,7 +81,7 @@ Item {
                 width: chipLabel.implicitWidth + Style.space(12); height: Style.space(20)
                 radius: Style.space(5); color: "transparent"
                 border.width: 1; border.color: Theme.accentTint(0.45)
-                Label { id: chipLabel; anchors.centerIn: parent; micro: true; font.pixelSize: Style.space(10); color: Theme.accent
+                Label { id: chipLabel; anchors.centerIn: parent; micro: true; color: Theme.accent
                     text: face.reveal ? "Hide" : "Show" }
                 MouseArea { anchors.fill: parent; anchors.margins: -Style.space(6); cursorShape: Qt.PointingHandCursor
                     onClicked: { face.reveal = !face.reveal; secret.forceActiveFocus(); } }

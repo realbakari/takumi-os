@@ -14,7 +14,7 @@ Item {
     property real strength: 1
     readonly property real r: Math.floor(Math.min(radius, width / 2, height / 2))
     readonly property url tile: Qt.resolvedUrl("../Look/grain.png")
-    opacity: (Theme.mode === "light" ? 0.05 : 0.06) * strength
+    opacity: (Theme.mode === "light" ? 0.024 : 0.028) * (Style.glow ? 0.65 : 1) * strength
     Image { x: 0; y: root.r; width: root.width; height: Math.max(0, root.height - root.r * 2); source: root.tile; fillMode: Image.Tile; smooth: false }
     Image { x: root.r; y: 0; width: Math.max(0, root.width - root.r * 2); height: root.r; source: root.tile; fillMode: Image.Tile; smooth: false }
     Image { x: root.r; y: root.height - root.r; width: Math.max(0, root.width - root.r * 2); height: root.r; source: root.tile; fillMode: Image.Tile; smooth: false }

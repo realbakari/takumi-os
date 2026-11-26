@@ -1,0 +1,6 @@
+# Qualcomm Snapdragon X (aarch64-qualcomm) supplement.
+linux-firmware
+pd-mapper
+qrtr
+rmtfs
+tqftpserv

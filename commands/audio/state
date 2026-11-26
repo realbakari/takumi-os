@@ -1,15 +1,30 @@
 #!/usr/bin/env bash
 : <<'ABOUT'
 summary: One line for the resting Core: volume, muted, the output's name, microphone in use
-usage: [--marks]
+usage: [--marks|--json]
 risk: 0
 hidden: yes
 ABOUT
 set -euo pipefail
 for l in /usr/share/takumi/lib "$(dirname "$(readlink -f "$0")")/../../lib"; do [[ -f "$l/audio.sh" ]] && { . "$l/audio.sh"; break; }; done
 if ! declare -F audio_state >/dev/null; then
-  if [[ "${1:-}" == --marks ]]; then echo "no no no"; else echo "-1 no No output no"; fi
+  if [[ "${1:-}" == --marks ]]; then echo "no no no"
+  elif [[ "${1:-}" == --json ]]; then echo '{"outputs":[],"inputs":[],"streams":[]}'
+  else echo "-1 no No output no"; fi
   exit 0
 fi
 # --marks: <microphone in use> <camera in use> <microphone muted>, for the privacy marks.
-if [[ "${1:-}" == --marks ]]; then audio_marks; else audio_state; fi
+# --json: outputs, inputs and running app streams for the in-Core Sound deck.
+if [[ "${1:-}" == --marks ]]; then
+  audio_marks
+elif [[ "${1:-}" == --json ]]; then
+  command -v jq >/dev/null || { echo '{"outputs":[],"inputs":[],"streams":[]}'; exit 0; }
+  dump=$(audio_dump 2>/dev/null || true)
+  [[ -n "$dump" ]] || { echo '{"outputs":[],"inputs":[],"streams":[]}'; exit 0; }
+  devs=$(audio_devices <<< "$dump" | jq -sc '.')
+  strs=$(audio_streams <<< "$dump" | jq -sc '[.[] | select(.dir == "out" and .running)]')
+  jq -cn --argjson devs "${devs:-[]}" --argjson strs "${strs:-[]}" \
+    '{outputs: [$devs[] | select(.dir == "out")], inputs: [$devs[] | select(.dir == "in")], streams: $strs}'
+else
+  audio_state
+fi

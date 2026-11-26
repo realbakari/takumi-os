@@ -11,8 +11,22 @@ import "../Look/Sky.js" as SkyPaint
 
 Item {
     id: sky
+    property var niri: null
+    property string output: ""
     readonly property string wallpaperPath: Quickshell.env("TAKUMI_WALLPAPER") || (Quickshell.env("HOME") + "/.local/state/takumi/look/sky")
     readonly property string effectiveTheme: Theme.previewing !== "" ? Theme.previewing : Theme.name
+    // Strip-coupled subtle depth parallax: shifts midground smoothly as you glide along niri's columns.
+    // Pure GPU transform (zero Canvas repaints, zero GPU cost when idle).
+    readonly property bool parallaxActive: !!niri && output !== "" && Style.continuousMotion
+    readonly property real parallaxOffset: {
+        if (!parallaxActive) return 0;
+        const cols = niri.columnsOn(output);
+        if (cols.length < 2) return 0;
+        const idx = cols.findIndex(c => c.focused);
+        if (idx < 0) return 0;
+        const centered = idx - (cols.length - 1) / 2;
+        return Math.max(-Style.parallaxMax, Math.min(Style.parallaxMax, -centered * Style.parallaxStep));
+    }
     property var sched: ({ dawn: 330, day: 480, dusk: 1050, night: 1230 })
     property var grab: null             // keeps the captured image alive while it fades
     property bool drawn: false          // the first painting (or the theme's picture) is on screen
@@ -65,6 +79,11 @@ Item {
     Item {
         id: stage
         anchors.fill: parent
+        scale: sky.parallaxActive ? 1.05 : 1.0
+        transform: Translate {
+            x: sky.parallaxOffset
+            Behavior on x { NumberAnimation { duration: Style.slide; easing.type: Easing.BezierSpline; easing.bezierCurve: Style.easeOut } }
+        }
 
         Image {
             id: wallpaper

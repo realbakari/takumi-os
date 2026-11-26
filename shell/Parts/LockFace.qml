@@ -117,7 +117,7 @@ Item {
             Label {
                 readonly property real size: Math.min(Style.space(150), face.height * 0.15)
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: Qt.formatDateTime(clock.date, "HH:mm")
+                text: Style.formatTime(clock.date)
                 font.pixelSize: size
                 font.weight: Font.Light
                 font.letterSpacing: size * Style.displayTracking

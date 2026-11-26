@@ -11,17 +11,22 @@ QtObject {
     required property var niri
     property string openOn: ""             // output name, or "" when closed
     property string query: ""              // what the field starts with when it opens (a topic: "wifi", "power")
-    property string view: ""               // "" the Palette, "quick" Quick settings, "today" the date
+    property string view: ""               // "" Palette, "quick", "today", "keys", "sound", "display", "network", "cockpit"
 
     function target() { return niri.focusedOutput || (Quickshell.screens.length ? Quickshell.screens[0].name : ""); }
     function toggle() { if (openOn) openOn = ""; else { view = ""; openOn = target(); } }
     function show() { view = ""; openOn = target(); }
     function close() { openOn = ""; }
     function search(text) { query = text || ""; view = ""; openOn = target(); }
-    // Quick settings and Today: pressing the same door again closes the Core, like the key that opened it.
+    // Quick settings, Today, Keys, Sound, Display, Network and Cockpit: pressing the same door closes the Core.
     function open_(shape) { if (openOn && view === shape) { openOn = ""; return; } view = shape; openOn = target(); }
     function quick() { open_("quick"); }
     function today() { open_("today"); }
+    function keys() { open_("keys"); }
+    function sound() { open_("sound"); }
+    function display() { open_("display"); }
+    function network() { open_("network"); }
+    function cockpit() { open_("cockpit"); }
 
     // Notices (docs/notifications.md). Two kinds share the capsule. Takumi's own is a flash (volume, a theme,
     // a command that ran, a screenshot): the newest replaces the last and it leaves after a moment. Messages

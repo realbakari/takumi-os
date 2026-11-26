@@ -21,7 +21,22 @@ FocusScope {
 
     SystemClock { id: clock; precision: SystemClock.Minutes }
     property int offset: 0                       // months away from this one
-    onActiveChanged: if (active) { offset = 0; nowMs = Date.now(); clockFile.reload(); read(); Qt.callLater(() => today.forceActiveFocus()); }
+    property string selectedDayKey: ""           // YYYY-M-D when a day in the month is clicked
+    onActiveChanged: if (active) { offset = 0; selectedDayKey = ""; nowMs = Date.now(); clockFile.reload(); read(); Qt.callLater(() => today.forceActiveFocus()); }
+
+    function dateKey(d) { return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate(); }
+    readonly property var eventDayKeys: {
+        const set = {};
+        for (const c of (info.coming ?? [])) {
+            if (!c.at) continue;
+            set[dateKey(new Date(c.at * 1000))] = true;
+        }
+        return set;
+    }
+    readonly property var selectedDayEvents: {
+        if (!selectedDayKey) return [];
+        return (info.coming ?? []).filter(c => c.at && dateKey(new Date(c.at * 1000)) === selectedDayKey).slice(0, 3);
+    }
 
     readonly property var now: clock.date
     readonly property var month: new Date(now.getFullYear(), now.getMonth() + offset, 1)
@@ -32,7 +47,9 @@ FocusScope {
         const out = [];
         for (let i = 0; i < 42; i++) {
             const d = new Date(y, m, 1 - lead + i);
-            out.push({ n: d.getDate(), inMonth: d.getMonth() === m, isToday: d.toDateString() === now.toDateString(),
+            const key = dateKey(d);
+            out.push({ n: d.getDate(), key: key, label: Qt.formatDate(d, "ddd d MMM"), inMonth: d.getMonth() === m,
+                       isToday: d.toDateString() === now.toDateString(), hasEvent: !!eventDayKeys[key],
                        weekend: d.getDay() === 0 || d.getDay() === 6 });
         }
         return out;
@@ -119,7 +136,7 @@ FocusScope {
     readonly property int earlierRow: Style.space(40)
     readonly property int earlierGap: Style.space(6)
     readonly property int earlierRows: {
-        const shown = [dayLine, clocksRow, nav, monthGrid, rule, comingCol].filter(i => i.visible);
+        const shown = [dayLine, solarArc, clocksRow, nav, monthGrid, pickedBar, rule, comingCol].filter(i => i.visible);
         const used = shown.reduce((sum, i) => sum + i.height, 0) + column.spacing * shown.length;
         const room = Style.coreSurface - Style.space(32) - used - earlierLabel.implicitHeight;
         return Math.max(0, Math.min(3, Math.floor(room / (earlierRow + earlierGap))));
@@ -131,7 +148,7 @@ FocusScope {
         case Qt.Key_Escape: core.close(); break;
         case Qt.Key_Left: case Qt.Key_PageUp: offset--; break;
         case Qt.Key_Right: case Qt.Key_PageDown: offset++; break;
-        case Qt.Key_Home: offset = 0; break;
+        case Qt.Key_Home: offset = 0; selectedDayKey = ""; break;
         default:
             if (event.text.length === 1 && event.text > " " && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))) { core.search(event.text); break; }
             return;
@@ -174,6 +191,61 @@ FocusScope {
                 font.pixelSize: Style.space(26); font.weight: Font.Light; font.letterSpacing: -0.4
             }
             Label { anchors { right: parent.right; baseline: date.baseline } text: "Week " + today.week(today.now); font.pixelSize: Style.caption; dim: Style.textFaint }
+        }
+
+        // Phase Solar Arc: live visual position across Dawn -> Day -> Dusk -> Night; click opens Theme Studio.
+        Pressable {
+            id: solarArc
+            width: parent.width; height: Style.solarHeight; radius: Style.rowRadius; raised: true
+            accessibleName: "Phase " + Theme.phase + ". Open theme studio"
+            color: pressed ? Theme.tint(Style.fillPressed) : hovered ? Theme.tint(Style.fillTile + Style.fillHover) : Theme.tint(Style.fillTile)
+            onClicked: today.core.search("theme")
+            readonly property real dayFrac: (today.now.getHours() * 60 + today.now.getMinutes()) / 1440
+            Item {
+                anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: Style.space(12); rightMargin: Style.space(12); topMargin: Style.space(8) }
+                height: Style.space(16)
+                Label { anchors.left: parent.left; micro: true; text: "Solar phase" }
+                Label {
+                    anchors.right: parent.right; font.pixelSize: Style.caption; color: Theme.accent
+                    text: Theme.phase.charAt(0).toUpperCase() + Theme.phase.slice(1) + " · " + Theme.name
+                }
+            }
+            Item {
+                id: track
+                anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: Style.space(12); rightMargin: Style.space(12); bottomMargin: Style.space(10) }
+                height: Style.space(20)
+                Rectangle {
+                    anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter }
+                    height: 2; radius: 1
+                    gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop { position: 0.0; color: Theme.tint(0.14) }
+                        GradientStop { position: 0.25; color: Theme.accentTint(0.55) }
+                        GradientStop { position: 0.50; color: Theme.accent }
+                        GradientStop { position: 0.75; color: Theme.accentTint(0.55) }
+                        GradientStop { position: 1.0; color: Theme.tint(0.14) }
+                    }
+                }
+                // Luminous phase orb positioned along the 24h cycle.
+                Rectangle {
+                    width: Style.space(10); height: width; radius: width / 2
+                    color: Theme.accent
+                    x: Math.max(0, Math.min(parent.width - width, parent.width * solarArc.dayFrac - width / 2))
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+                Row {
+                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                    Repeater {
+                        model: ["Night", "Dawn", "Day", "Dusk"]
+                        delegate: Label {
+                            required property string modelData
+                            width: track.width / 4
+                            horizontalAlignment: index === 0 ? Text.AlignLeft : index === 3 ? Text.AlignRight : Text.AlignHCenter
+                            text: modelData; font.pixelSize: Style.micro; dim: Style.textFaint
+                        }
+                    }
+                }
+            }
         }
 
         // Clocks for other cities, three at most: the city, its time, how far ahead or behind. A press opens the
@@ -230,10 +302,10 @@ FocusScope {
                 anchors { right: parent.right; verticalCenter: parent.verticalCenter }
                 spacing: Style.space(4)
                 Pressable {
-                    visible: today.offset !== 0
+                    visible: today.offset !== 0 || today.selectedDayKey !== ""
                     width: back.implicitWidth + Style.space(18); height: Style.space(28); radius: height / 2
-                    accessibleName: "Back to this month"
-                    onClicked: today.offset = 0
+                    accessibleName: "Back to today"
+                    onClicked: { today.offset = 0; today.selectedDayKey = ""; }
                     Label { id: back; anchors.centerIn: parent; text: "Today"; font.pixelSize: Style.caption; color: Theme.accent }
                 }
                 Pressable {
@@ -269,23 +341,67 @@ FocusScope {
                 columns: 7
                 Repeater {
                     model: today.days
-                    delegate: Item {
+                    delegate: Pressable {
+                        id: dayCell
                         required property var modelData
+                        readonly property bool picked: today.selectedDayKey === modelData.key
                         width: column.width / 7; height: Style.dayCell
+                        radius: height / 2
+                        accessibleName: modelData.label + (modelData.isToday ? ", today" : "")
+                        color: "transparent"
+                        onClicked: today.selectedDayKey = picked ? "" : modelData.key
                         Rectangle {
                             anchors.centerIn: parent
                             width: Style.dayCell - Style.space(4); height: width; radius: width / 2
-                            color: modelData.isToday ? Theme.accent : "transparent"
+                            color: dayCell.modelData.isToday ? Theme.accent
+                                 : dayCell.picked ? Theme.accentTint(Style.fillTileOn)
+                                 : dayCell.hovered ? Theme.tint(Style.fillHover * 2) : "transparent"
+                            border.width: dayCell.picked && !dayCell.modelData.isToday ? Style.hairline : 0
+                            border.color: Theme.accentTint(Style.rimLit)
                         }
                         Label {
                             anchors.centerIn: parent
-                            text: modelData.n
-                            font.weight: modelData.isToday ? Font.DemiBold : Font.Medium
-                            color: modelData.isToday ? Theme.background
-                                 : Theme.withAlpha(Theme.foreground, !modelData.inMonth ? 0.26 : modelData.weekend ? Style.textDim : 0.92)
+                            text: dayCell.modelData.n
+                            font.weight: dayCell.modelData.isToday || dayCell.picked ? Font.DemiBold : Font.Medium
+                            color: dayCell.modelData.isToday ? Theme.background
+                                 : dayCell.picked ? Theme.accent
+                                 : Theme.withAlpha(Theme.foreground, !dayCell.modelData.inMonth ? 0.26 : dayCell.modelData.weekend ? Style.textDim : 0.92)
+                        }
+                        Rectangle {
+                            visible: dayCell.modelData.hasEvent && !dayCell.modelData.isToday
+                            anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: Style.space(3) }
+                            width: Style.space(4); height: width; radius: width / 2
+                            color: Theme.accent
                         }
                     }
                 }
+            }
+        }
+
+        // Selected day quick-agenda bar: shows that date's reminders or a one-click "Add reminder".
+        Row {
+            id: pickedBar
+            visible: today.selectedDayKey !== ""
+            width: parent.width
+            spacing: Style.space(8)
+            readonly property var pickedDay: today.days.find(d => d.key === today.selectedDayKey) ?? null
+            Label {
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - addRem.width - parent.spacing
+                font.pixelSize: Style.caption; dim: Style.textDim
+                text: {
+                    const lbl = pickedBar.pickedDay ? pickedBar.pickedDay.label : "";
+                    const ev = today.selectedDayEvents;
+                    return ev.length > 0 ? lbl + " · " + ev.map(e => e.text || "Timer").join(", ") : lbl + " · Nothing scheduled";
+                }
+            }
+            Pressable {
+                id: addRem
+                width: addRemLbl.implicitWidth + Style.space(16); height: Style.space(24); radius: height / 2
+                accessibleName: "Add reminder"
+                color: pressed ? Theme.tint(Style.fillPressed) : hovered ? Theme.accentTint(0.24) : Theme.accentTint(0.14)
+                onClicked: today.core.search("remind ")
+                Label { id: addRemLbl; anchors.centerIn: parent; text: "+ Remind"; font.pixelSize: Style.caption; color: Theme.accent }
             }
         }
 

@@ -1,0 +1,39 @@
+# Rendered by takumi theme render for Alacritty.
+[window]
+opacity = {{opacity}}
+
+[font]
+size = {{font_pt}}
+normal = { family = "{{font_mono}}" }
+
+[colors.primary]
+background = "{{background}}"
+foreground = "{{foreground}}"
+
+[colors.cursor]
+text = "{{background}}"
+cursor = "{{accent}}"
+
+[colors.selection]
+text = "{{foreground}}"
+background = "{{surface}}"
+
+[colors.normal]
+black = "{{background}}"
+red = "{{red}}"
+green = "{{green}}"
+yellow = "{{yellow}}"
+blue = "{{blue}}"
+magenta = "{{magenta}}"
+cyan = "{{cyan}}"
+white = "{{foreground}}"
+
+[colors.bright]
+black = "{{muted}}"
+red = "{{red}}"
+green = "{{green}}"
+yellow = "{{yellow}}"
+blue = "{{blue}}"
+magenta = "{{magenta}}"
+cyan = "{{cyan}}"
+white = "{{foreground}}"

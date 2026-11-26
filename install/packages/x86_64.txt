@@ -1,0 +1,4 @@
+# x86_64 architecture supplement (CPU microcode & platform firmware).
+amd-ucode
+intel-ucode
+fwupd

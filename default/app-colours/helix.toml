@@ -1,0 +1,31 @@
+# Rendered by takumi theme render for Helix (~/.config/helix/themes/takumi.toml).
+"ui.background" = { bg = "{{background}}" }
+"ui.text" = { fg = "{{foreground}}" }
+"ui.text.focus" = { fg = "{{accent}}", modifiers = ["bold"] }
+"ui.cursor" = { fg = "{{background}}", bg = "{{accent}}" }
+"ui.cursor.match" = { fg = "{{background}}", bg = "{{yellow}}" }
+"ui.cursorline.primary" = { bg = "{{surface}}" }
+"ui.selection" = { bg = "{{surface}}" }
+"ui.linenr" = { fg = "{{muted}}" }
+"ui.linenr.selected" = { fg = "{{accent}}", modifiers = ["bold"] }
+"ui.statusline" = { fg = "{{foreground}}", bg = "{{surface}}" }
+"ui.statusline.inactive" = { fg = "{{muted}}", bg = "{{background}}" }
+"ui.popup" = { fg = "{{foreground}}", bg = "{{surface}}" }
+"ui.menu" = { fg = "{{foreground}}", bg = "{{surface}}" }
+"ui.menu.selected" = { fg = "{{background}}", bg = "{{accent}}" }
+"ui.window" = { fg = "{{muted}}" }
+"comment" = { fg = "{{muted}}", modifiers = ["italic"] }
+"keyword" = { fg = "{{accent}}" }
+"function" = { fg = "{{blue}}" }
+"string" = { fg = "{{green}}" }
+"constant" = { fg = "{{magenta}}" }
+"constant.numeric" = { fg = "{{yellow}}" }
+"type" = { fg = "{{yellow}}" }
+"variable" = { fg = "{{foreground}}" }
+"operator" = { fg = "{{cyan}}" }
+"diagnostic.error" = { underline = { color = "{{red}}", style = "curl" } }
+"diagnostic.warning" = { underline = { color = "{{yellow}}", style = "curl" } }
+"error" = "{{red}}"
+"warning" = "{{yellow}}"
+"info" = "{{cyan}}"
+"hint" = "{{muted}}"
