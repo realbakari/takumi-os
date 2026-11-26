@@ -35,7 +35,7 @@ GridView {
         required property var modelData
         required property int index
         readonly property bool current: grid.selecting && index === grid.currentIndex
-        readonly property string iconPath: modelData.icon ? Quickshell.iconPath(modelData.icon, true) : ""
+        readonly property string iconPath: !modelData.icon ? "" : modelData.icon.startsWith("/") ? ("file://" + modelData.icon) : Quickshell.iconPath(modelData.icon, true)
         width: grid.cellWidth; height: grid.cellHeight
         radius: Style.tileRadius
         accessibleName: modelData.title
@@ -68,6 +68,7 @@ GridView {
                 source: tile.iconPath
                 fillMode: Image.PreserveAspectFit
                 sourceSize: Qt.size(width * 2, height * 2)
+                cache: !tile.iconPath.startsWith("file://")
                 asynchronous: true
                 smooth: true
             }

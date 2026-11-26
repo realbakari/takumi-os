@@ -288,14 +288,54 @@ theme_folder_colour() {
   }'
 }
 
-# theme_folders <accent> <dark|light>: make the Takumi icon theme for that accent; prints the colour's
-# name. Nothing is written when the colour and mode are what it already holds. Returns 1 without Papirus.
+# theme_folders <accent> <dark|light> [surface] [background] [foreground]: build the Takumi icon theme with
+# accent-matched Papirus folders AND bespoke Takumi squircle SVG icons for core bundled apps (Terminal,
+# Monitor, Files, Text Editor, Image Viewer, Document Viewer, Disk Usage, Celluloid). Nothing is rewritten
+# when the stamp matches. Returns 1 without Papirus.
+theme_app_svg() {  # <out.svg> <surface> <bg> <accent> <fg> <light:0|1> <glyph-path-svg>
+  local out=$1 sf=$2 bg=$3 ac=$4 fg=$5 light=$6 glyph=$7
+  local rim_op="0.16" spec_op="0.28"
+  [[ "$light" == 1 ]] && rim_op="0.14" spec_op="0.55"
+  cat > "$out" <<SVG
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="$sf"/>
+      <stop offset="1" stop-color="$bg"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="$ac" stop-opacity="0.22"/>
+      <stop offset="0.55" stop-color="$ac" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="$ac" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="top" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="$fg" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="$fg" stop-opacity="$spec_op"/>
+      <stop offset="1" stop-color="$fg" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="15" fill="url(#bg)"/>
+  <rect x="4" y="4" width="56" height="56" rx="15" fill="url(#glow)"/>
+  <rect x="4.5" y="4.5" width="55" height="55" rx="14.5" fill="none" stroke="$fg" stroke-opacity="$rim_op" stroke-width="1"/>
+  <line x1="18" y1="5" x2="46" y2="5" stroke="url(#top)" stroke-width="1"/>
+  <g transform="translate(16 16) scale(1.3333)" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.65">
+    $glyph
+  </g>
+</svg>
+SVG
+}
 theme_folders() {
   local colour inherit stamp new d size f base found dirs="" sections=""
-  colour=$(theme_folder_colour "$1") || return 1
-  inherit=Papirus-Dark; [[ "$2" == light ]] && inherit=Papirus-Light
-  stamp="$colour $inherit"
+  local accent=$1 mode=$2 sf=${3:-} bg=${4:-} fg=${5:-} light=0
+  [[ "$mode" == light ]] && light=1
+  [[ -n "$sf" ]] || sf=$([[ "$light" == 1 ]] && echo "#ebe4da" || echo "#151c26")
+  [[ -n "$bg" ]] || bg=$([[ "$light" == 1 ]] && echo "#f6f1ea" || echo "#0b0f14")
+  [[ -n "$fg" ]] || fg=$([[ "$light" == 1 ]] && echo "#26201c" || echo "#d9e2ec")
+  colour=$(theme_folder_colour "$accent") || return 1
+  inherit=Papirus-Dark; [[ "$mode" == light ]] && inherit=Papirus-Light
+  stamp="$colour $inherit $accent $sf $bg $fg v2"
   if [[ "$(cat "$theme_icon_dir/.takumi" 2>/dev/null)" == "$stamp" ]]; then printf '%s\n' "$colour"; return 0; fi
+  mkdir -p "$(dirname "$theme_icon_dir")"
   new="$theme_icon_dir.new"; rm -rf "$new"; mkdir -p "$new"
   for d in "$theme_icons_root/Papirus"/*x*/places; do
     size=${d%/places}; size=${size##*/}
@@ -311,7 +351,34 @@ theme_folders() {
     sections+=$(printf '\n\n[%s/places]\nContext=Places\nSize=%s\nType=Fixed' "$size" "${size%%x*}")
   done
   [[ -n "$dirs" ]] || { rm -rf "$new"; return 1; }
-  printf '[Icon Theme]\nName=Takumi\nComment=Papirus, with folders in the theme'"'"'s colour (takumi theme apply)\nInherits=%s,Papirus,hicolor\nDirectories=%s%s\n' \
+  # Bespoke Takumi squircle app icons for core bundled utilities so All apps speaks one design language.
+  mkdir -p "$new/scalable/apps"
+  theme_app_svg "$new/scalable/apps/foot.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
+    "<rect x='3' y='4.5' width='18' height='15' rx='3' stroke='$fg' stroke-opacity='0.78'/><path d='M7.5 9.5l3 2.5-3 2.5' stroke='$accent'/><path d='M12.5 15h4' stroke='$accent'/>"
+  ln -sfn foot.svg "$new/scalable/apps/utilities-terminal.svg"
+  theme_app_svg "$new/scalable/apps/btop.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
+    "<path d='M3 12h4l2.5-6 4 12 2.5-6H21' stroke='$accent'/><path d='M4 18.5h16' stroke='$fg' stroke-opacity='0.35'/>"
+  ln -sfn btop.svg "$new/scalable/apps/utilities-system-monitor.svg"
+  theme_app_svg "$new/scalable/apps/org.gnome.Nautilus.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
+    "<path d='M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z' stroke='$accent' fill='$accent' fill-opacity='0.18'/>"
+  ln -sfn org.gnome.Nautilus.svg "$new/scalable/apps/system-file-manager.svg"
+  theme_app_svg "$new/scalable/apps/org.gnome.TextEditor.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
+    "<path d='M6.5 4h8l4 4v11.5a1.5 1.5 0 0 1-1.5 1.5h-10.5A1.5 1.5 0 0 1 5 19.5v-14A1.5 1.5 0 0 1 6.5 4z' stroke='$fg' stroke-opacity='0.82'/><path d='M8.5 11.5h7M8.5 15.5h4.5' stroke='$accent'/>"
+  ln -sfn org.gnome.TextEditor.svg "$new/scalable/apps/accessories-text-editor.svg"
+  theme_app_svg "$new/scalable/apps/org.gnome.Loupe.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
+    "<rect x='3.5' y='5' width='17' height='14' rx='2.5' stroke='$fg' stroke-opacity='0.78'/><circle cx='9' cy='10' r='1.7' stroke='$accent'/><path d='M20 15.5l-4.8-4.8-8.7 8.3' stroke='$accent'/>"
+  ln -sfn org.gnome.Loupe.svg "$new/scalable/apps/loupe.svg"
+  theme_app_svg "$new/scalable/apps/org.gnome.Evince.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
+    "<path d='M7 3.5h6.5L18 8v11a1.5 1.5 0 0 1-1.5 1.5h-9.5A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5z' stroke='$fg' stroke-opacity='0.82'/><path d='M13.5 3.5V8H18' stroke='$fg' stroke-opacity='0.55'/><path d='M8.5 12.5h7M8.5 16h5' stroke='$accent'/>"
+  ln -sfn org.gnome.Evince.svg "$new/scalable/apps/org.gnome.Papers.svg"
+  theme_app_svg "$new/scalable/apps/org.gnome.baobab.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
+    "<circle cx='12' cy='12' r='8.5' stroke='$fg' stroke-opacity='0.35'/><path d='M12 3.5A8.5 8.5 0 1 1 5.2 17.1' stroke='$accent'/><circle cx='12' cy='12' r='3' stroke='$fg' stroke-opacity='0.8'/>"
+  theme_app_svg "$new/scalable/apps/io.github.celluloid_player.Celluloid.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
+    "<rect x='3.5' y='5' width='17' height='14' rx='3' stroke='$fg' stroke-opacity='0.78'/><path d='M10 9.2l5.6 2.8-5.6 2.8z' stroke='$accent' fill='$accent' fill-opacity='0.24'/>"
+  ln -sfn io.github.celluloid_player.Celluloid.svg "$new/scalable/apps/celluloid.svg"
+  dirs="scalable/apps,$dirs"
+  sections=$(printf '\n\n[scalable/apps]\nContext=Applications\nSize=64\nMinSize=16\nMaxSize=256\nType=Scalable%s' "$sections")
+  printf '[Icon Theme]\nName=Takumi\nComment=Takumi squircle app icons and themed folders (takumi theme apply)\nInherits=%s,Papirus,hicolor\nDirectories=%s%s\n' \
     "$inherit" "$dirs" "$sections" > "$new/index.theme"
   printf '%s\n' "$stamp" > "$new/.takumi"
   rm -rf "$theme_icon_dir.old"

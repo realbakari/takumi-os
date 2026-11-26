@@ -45,7 +45,7 @@ Pressable {
     color: hovered && !current && !isName ? Theme.tint(Style.fillHover) : "transparent"
     onClicked: activated()
 
-    readonly property string appPath: modelData.appIcon ? Quickshell.iconPath(modelData.appIcon, true) : ""
+    readonly property string appPath: !modelData.appIcon ? "" : modelData.appIcon.startsWith("/") ? ("file://" + modelData.appIcon) : Quickshell.iconPath(modelData.appIcon, true)
     readonly property string previewPath: modelData.preview ?? ""
     readonly property bool busy: modelData.tone === "busy"
     readonly property bool hasBars: modelData.bars !== undefined
@@ -124,6 +124,7 @@ Pressable {
             width: Style.space(26); height: width
             source: row.appPath
             sourceSize: Qt.size(width * 2, height * 2)
+            cache: !row.appPath.startsWith("file://")
             asynchronous: true
         }
         Label {

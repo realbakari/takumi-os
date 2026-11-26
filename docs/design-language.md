@@ -11,9 +11,10 @@ is a pixel your work does not get, so the shell earns each one.
 ## One theme recolours everything
 
 A theme is not a wallpaper and an accent. It is the terminal, the editor's
-syntax, the system monitor's graphs, the file manager's folders, GTK, the
-focus ring and the sky, all from one `theme.toml`, all changing together.
-When something does not follow the theme, that is a bug.
+syntax, the system monitor's graphs, the bundled apps' bespoke squircle icons
+and file manager's folders, GTK chrome and controls, Firefox tabs and address
+bar, the focus ring and the sky, all from one `theme.toml`, all changing
+together. When something does not follow the theme, that is a bug.
 
 ## The sky belongs to the theme
 

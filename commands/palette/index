@@ -39,10 +39,17 @@ case "$provider" in
       seen="$seen$id "
       grep -q '^NoDisplay=true' "$f" && continue
       grep -q '^Hidden=true' "$f" && continue
-      # Helper entries some packages ship for other programs, never for a person to open. mpv is the engine
-      # under Celluloid, the video player people open.
-      case "$id" in foot-server|footclient|avahi-discover|bssh|bvnc|qv4l2|qvidcap|lstopo|cups|org.gnome.Sushi|nvim|mpv) continue ;; esac
+      # Helper and niche sub-launcher entries that clutter All apps (Writer, Calc and Impress stay; startcenter/base/math/draw stay hidden unless launched directly).
+      case "$id" in foot-server|footclient|avahi-discover|bssh|bvnc|qv4l2|qvidcap|lstopo|cups|org.gnome.Sushi|nvim|mpv|libreoffice-startcenter|libreoffice-base|libreoffice-math|libreoffice-draw) continue ;; esac
       name=$(sed -n 's/^Name=//p' "$f" | head -n 1); icon=$(sed -n 's/^Icon=//p' "$f" | head -n 1)
+      # Prefer Takumi's bespoke themed squircle app icons when generated, bypassing Qt's startup icon-theme cache.
+      if [[ -n "$icon" && "$icon" != /* ]]; then
+        if [[ -f "$HOME/.local/share/icons/Takumi/scalable/apps/$icon.svg" ]]; then
+          icon="$HOME/.local/share/icons/Takumi/scalable/apps/$icon.svg"
+        elif [[ -f "$HOME/.local/share/icons/Takumi/scalable/apps/$id.svg" ]]; then
+          icon="$HOME/.local/share/icons/Takumi/scalable/apps/$id.svg"
+        fi
+      fi
       comment=$(sed -n 's/^Comment=//p' "$f" | head -n 1)
       words="$(sed -n 's/^GenericName=//p' "$f" | head -n 1) $(sed -n 's/^Keywords=//p' "$f" | head -n 1 | tr ';' ' ')"
       jq -cn --arg id "app:$(basename "$f" .desktop)" --arg t "$name" --arg s "$comment" --arg i "$icon" --arg f "$f" --arg w "$words" \

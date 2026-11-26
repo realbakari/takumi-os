@@ -28,7 +28,7 @@ guide_html() {   # <page.md>: the page as HTML on stdout
       while (match(s, /\*\*[^*]+\*\*/)) { out = out substr(s, 1, RSTART - 1) "<strong>" substr(s, RSTART + 2, RLENGTH - 4) "</strong>"; s = substr(s, RSTART + RLENGTH) }
       return out s
     }
-    # Between backticks is code or a keyboard shortcut (<kbd> for Super/Cmd/Ctrl/Win/Alt/Esc/Enter), kept as-is.
+    # Between backticks is code; keyboard shortcuts get the .kbd class while staying valid <code> tags.
     function inline(s,   n, parts, i, out, tok) {
       n = split(esc(s), parts, "`"); out = ""
       for (i = 1; i <= n; i++) {
@@ -36,7 +36,7 @@ guide_html() {   # <page.md>: the page as HTML on stdout
         else {
           tok = parts[i]
           if (tok ~ /^(Super|Cmd|Ctrl|Win|Alt|Shift|Esc|Enter|Tab|Return)(\+|$)/ || tok ~ /^[A-Z0-9←→↑↓]$/)
-            out = out "<kbd>" tok "</kbd>"
+            out = out "<kbd><code>" tok "</code></kbd>"
           else
             out = out "<code>" tok "</code>"
         }
@@ -82,7 +82,7 @@ guide_html() {   # <page.md>: the page as HTML on stdout
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title:-Takumi} · Takumi OS Guide</title>
+<title>${title:-Takumi} · Takumi guide</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -149,6 +149,7 @@ guide_html() {   # <page.md>: the page as HTML on stdout
     border-radius: 6px; padding: 0.1em 0.45em; vertical-align: 0.04em;
     box-shadow: 0 1px 2px var(--shadow);
   }
+  kbd code { background: none; padding: 0; font: inherit; color: inherit; }
   pre {
     margin: 1.25rem 0; border-radius: 14px; background: var(--surface);
     border: 1px solid var(--line); overflow-x: auto; box-shadow: 0 8px 24px var(--shadow);

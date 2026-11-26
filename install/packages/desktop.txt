@@ -60,6 +60,7 @@ inter-font
 noto-fonts
 noto-fonts-emoji
 papirus-icon-theme
+breeze-cursors  # crisp vector pointer instead of stock X11 Adwaita triangle
 libsecret            # secret-tool: the assistant's keys in the login keyring (takumi intent setup)
 python-gobject     # the login keyring's password follows yours (takumi password, docs/security.md)
 swh-plugins        # the speaker tuning's limiter (takumi audio tuning)

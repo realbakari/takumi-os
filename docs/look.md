@@ -105,12 +105,17 @@ fits any computer Takumi runs on (they are `any` packages):
 
 ## Apps in the theme
 
-**Folders.** Papirus draws its folders in two dozen colours. Whenever the
-theme changes, Takumi points a small icon theme of its own,
-`~/.local/share/icons/Takumi`, at the Papirus colour nearest the theme's
-accent (folders, their Documents, Downloads and other faces, and the home
-folder) and inherits everything else from Papirus, dark or light with the
-theme. GTK uses it unless you chose another icon theme yourself. Papirus's
+**Icons and folders.** Papirus draws its folders in two dozen colours. Whenever
+the theme changes, Takumi builds a small icon theme of its own,
+`~/.local/share/icons/Takumi`, with bespoke Takumi squircle SVG app icons
+(`scalable/apps/`) painted in the active theme's surface, background, text and
+accent for the bundled utilities (Terminal, System monitor, Files, Text Editor,
+Image Viewer, Document Viewer, Disk Usage Analyzer and Celluloid), alongside
+Papirus folders in the colour nearest the theme's accent (folders, their
+Documents, Downloads and other faces, and the home folder), inheriting
+everything else from Papirus dark or light with the theme. GTK uses `Takumi`
+(and `breeze_cursors` when installed, with a single `:close` window button on
+headerbars) unless you chose another icon or cursor theme yourself. Papirus's
 own files are never touched, so this needs no password; `papirus-folders`,
 which changes them, is not in Arch's repositories.
 

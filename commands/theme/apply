@@ -42,11 +42,24 @@ command -v qs >/dev/null && qs -c takumi ipc --any-display call theme reload >/d
 theme_toml_file=""
 if declare -F theme_find >/dev/null && dir=$(theme_find "$name"); then theme_toml_file="$dir/theme.toml"; fi
 # Folders in the accent: Takumi's icon theme points at the Papirus folder colour nearest the theme's day
-# accent (lib/theme.sh), and GTK uses it unless you chose another icon theme yourself.
-if [[ -n "$theme_toml_file" ]] && accent=$(theme_merged "$theme_toml_file" day | sed -n 's/^accent=//p') && \
-   theme_folders "$accent" "${mode:-dark}" >/dev/null 2>&1 && command -v gsettings >/dev/null; then
+# Folder and bespoke Takumi app icons: rebuild the Takumi icon theme with the theme's palette so core apps
+# share one visual language instead of clashing upstream icons.
+if [[ -n "$theme_toml_file" ]] && day_pal=$(theme_merged "$theme_toml_file" day) &&
+   accent=$(sed -n 's/^accent=//p' <<< "$day_pal") &&
+   sf=$(sed -n 's/^surface=//p' <<< "$day_pal") &&
+   bg=$(sed -n 's/^background=//p' <<< "$day_pal") &&
+   fg=$(sed -n 's/^foreground=//p' <<< "$day_pal") &&
+   theme_folders "$accent" "${mode:-dark}" "$sf" "$bg" "$fg" >/dev/null 2>&1 && command -v gsettings >/dev/null; then
   icons=$(gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null | tr -d "'" || true)
   case "$icons" in ''|Adwaita|hicolor|Papirus|Papirus-Dark|Papirus-Light) gsettings set org.gnome.desktop.interface icon-theme Takumi 2>/dev/null || true ;; esac
+fi
+# Clean window chrome & modern pointer: inside niri's Strip, apps only need close (Super+M/R sizes them).
+if command -v gsettings >/dev/null; then
+  gsettings set org.gnome.desktop.wm.preferences button-layout ':close' 2>/dev/null || true
+  if [[ -d /usr/share/icons/breeze_cursors ]]; then
+    cur_ptr=$(gsettings get org.gnome.desktop.interface cursor-theme 2>/dev/null | tr -d "'" || true)
+    case "$cur_ptr" in ''|Adwaita|default) gsettings set org.gnome.desktop.interface cursor-theme breeze_cursors 2>/dev/null || true ;; esac
+  fi
 fi
 # The browsers, when you asked them to wear the theme (takumi theme browsers): a Firefox profile made since
 # gets the stylesheet, and Chromium's dark mode follows the theme's mode.
