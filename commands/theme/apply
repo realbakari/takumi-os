@@ -9,7 +9,30 @@ here=$(dirname "$(readlink -f "$0")")
 for l in /usr/share/takumi/lib "$here/../../lib"; do [[ -f "$l/theme.sh" ]] && { . "$l/theme.sh"; break; }; done
 look="$HOME/.local/state/takumi/look"
 name=$(cat "$HOME/.config/takumi/theme" 2>/dev/null || echo ion)
-pkill -SIGUSR1 -x foot 2>/dev/null || true                        # foot re-reads its config
+# foot reads its config once, when it starts (its signals only switch between the two themes it read then:
+# foot(1), SIGNALS). Open terminals take the new colours as the escape sequences every terminal answers to
+# (OSC 4, 10, 11, 17; foot-ctlseqs(7)), written to each foot's terminals; new ones read the file.
+foot_live() {
+  local ini="$look/foot-theme.ini" seq="" k v pid tty
+  [[ -f "$ini" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ "$v" =~ ^[0-9a-fA-F]{6}$ ]] || continue
+    case "$k" in
+      foreground)           seq+=$(printf '\033]10;#%s\033\\' "$v") ;;
+      background)           seq+=$(printf '\033]11;#%s\033\\' "$v") ;;
+      selection-background) seq+=$(printf '\033]17;#%s\033\\' "$v") ;;
+      regular[0-7])         seq+=$(printf '\033]4;%d;#%s\033\\' "${k#regular}" "$v") ;;
+      bright[0-7])          seq+=$(printf '\033]4;%d;#%s\033\\' "$(( ${k#bright} + 8 ))" "$v") ;;
+    esac
+  done < "$ini"
+  [[ -n "$seq" ]] || return 0
+  for pid in $(pgrep -x foot 2>/dev/null || true); do
+    for tty in $(ps -o tty= --ppid "$pid" 2>/dev/null | sort -u); do
+      [[ "$tty" == pts/* && -w "/dev/$tty" ]] && printf '%s' "$seq" > "/dev/$tty" || true
+    done
+  done
+}
+foot_live
 command -v niri >/dev/null && niri msg action load-config-file >/dev/null 2>&1 || true
 mode=$(sed -n 's/^mode = "\(.*\)"/\1/p' "$look/palette.toml")
 command -v gsettings >/dev/null && gsettings set org.gnome.desktop.interface color-scheme "prefer-${mode:-dark}" 2>/dev/null || true

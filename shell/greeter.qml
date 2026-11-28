@@ -66,6 +66,9 @@ ShellRoot {
             emblemShown: arrival.landed
             reveal: arrival.reveal
             onSubmitted: s => root.submit(s)
+            // logind lets the person at the screen stop the computer without a password.
+            canStop: true
+            onStopRequested: how => Quickshell.execDetached(["systemctl", how === "restart" ? "reboot" : "poweroff"])
         }
         Arrival {
             id: arrival

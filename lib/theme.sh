@@ -318,7 +318,7 @@ theme_app_svg() {  # <out.svg> <surface> <bg> <accent> <fg> <light:0|1> <glyph-p
   <rect x="4" y="4" width="56" height="56" rx="15" fill="url(#glow)"/>
   <rect x="4.5" y="4.5" width="55" height="55" rx="14.5" fill="none" stroke="$fg" stroke-opacity="$rim_op" stroke-width="1"/>
   <line x1="18" y1="5" x2="46" y2="5" stroke="url(#top)" stroke-width="1"/>
-  <g transform="translate(16 16) scale(1.3333)" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.65">
+  <g transform="translate(14 14) scale(1.5)" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5">
     $glyph
   </g>
 </svg>
@@ -333,7 +333,7 @@ theme_folders() {
   [[ -n "$fg" ]] || fg=$([[ "$light" == 1 ]] && echo "#26201c" || echo "#d9e2ec")
   colour=$(theme_folder_colour "$accent") || return 1
   inherit=Papirus-Dark; [[ "$mode" == light ]] && inherit=Papirus-Light
-  stamp="$colour $inherit $accent $sf $bg $fg v2"
+  stamp="$colour $inherit $accent $sf $bg $fg v4"
   if [[ "$(cat "$theme_icon_dir/.takumi" 2>/dev/null)" == "$stamp" ]]; then printf '%s\n' "$colour"; return 0; fi
   mkdir -p "$(dirname "$theme_icon_dir")"
   new="$theme_icon_dir.new"; rm -rf "$new"; mkdir -p "$new"
@@ -351,32 +351,43 @@ theme_folders() {
     sections+=$(printf '\n\n[%s/places]\nContext=Places\nSize=%s\nType=Fixed' "$size" "${size%%x*}")
   done
   [[ -n "$dirs" ]] || { rm -rf "$new"; return 1; }
-  # Bespoke Takumi squircle app icons for core bundled utilities so All apps speaks one design language.
+  # Takumi's squircle app icons for the bundled utilities, so All apps speaks one design language. Each
+  # glyph is a shape from Hugeicons' free Stroke Rounded set (MIT: shell/Look/Icons.LICENSE.md), in the accent.
   mkdir -p "$new/scalable/apps"
   theme_app_svg "$new/scalable/apps/foot.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
-    "<rect x='3' y='4.5' width='18' height='15' rx='3' stroke='$fg' stroke-opacity='0.78'/><path d='M7.5 9.5l3 2.5-3 2.5' stroke='$accent'/><path d='M12.5 15h4' stroke='$accent'/>"
+    "<path d='M7.5 7.5L8.72654 8.55719C9.24218 9.00163 9.5 9.22386 9.5 9.5C9.5 9.77614 9.24218 9.99836 8.72654 10.4428L7.5 11.5 M11.5 12.5H15.5 M12 21C15.7497 21 17.6246 21 18.9389 20.0451C19.3634 19.7367 19.7367 19.3634 20.0451 18.9389C21 17.6246 21 15.7497 21 12C21 8.25027 21 6.3754 20.0451 5.06107C19.7367 4.6366 19.3634 4.26331 18.9389 3.95491C17.6246 3 15.7497 3 12 3C8.25027 3 6.3754 3 5.06107 3.95491C4.6366 4.26331 4.26331 4.6366 3.95491 5.06107C3 6.3754 3 8.25027 3 12C3 15.7497 3 17.6246 3.95491 18.9389C4.26331 19.3634 4.6366 19.7367 5.06107 20.0451C6.3754 21 8.25027 21 12 21Z' stroke='$accent'/>"
   ln -sfn foot.svg "$new/scalable/apps/utilities-terminal.svg"
   theme_app_svg "$new/scalable/apps/btop.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
-    "<path d='M3 12h4l2.5-6 4 12 2.5-6H21' stroke='$accent'/><path d='M4 18.5h16' stroke='$fg' stroke-opacity='0.35'/>"
+    "<path d='M12 21C7.75736 21 5.63604 21 4.31802 19.682C3 18.364 3 16.2426 3 12C3 7.75736 3 5.63604 4.31802 4.31802C5.63604 3 7.75736 3 12 3C16.2426 3 18.364 3 19.682 4.31802C21 5.63604 21 7.75736 21 12C21 16.2426 21 18.364 19.682 19.682C18.364 21 16.2426 21 12 21Z M7 14L9 12C9.40894 11.5911 9.61341 11.3866 9.83398 11.2773C10.2536 11.0693 10.7464 11.0693 11.166 11.2773C11.3866 11.3866 11.5911 11.5911 12 12L12 12C12.4089 12.4089 12.6134 12.6134 12.834 12.7227C13.2536 12.9307 13.7464 12.9307 14.166 12.7227C14.3866 12.6134 14.5911 12.4089 15 12L17 10' stroke='$accent'/>"
   ln -sfn btop.svg "$new/scalable/apps/utilities-system-monitor.svg"
   theme_app_svg "$new/scalable/apps/org.gnome.Nautilus.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
-    "<path d='M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z' stroke='$accent' fill='$accent' fill-opacity='0.18'/>"
+    "<path d='M13.6656 6.49446H16C18.8284 6.49446 20.2426 6.49446 21.1213 7.37314C22 8.25182 22 9.66603 22 12.4945V14.5C22 17.3284 22 18.7426 21.1213 19.6213C20.2426 20.5 18.8284 20.5 16 20.5H8C5.17157 20.5 3.75736 20.5 2.87868 19.6213C2 18.7426 2 17.3284 2 14.5V8.99183C2 6.65409 2 5.48521 2.61604 4.67881C2.7778 4.46706 2.96706 4.2778 3.17881 4.11604C3.98521 3.5 5.15409 3.5 7.49183 3.5C8.16633 3.5 8.50358 3.5 8.81392 3.60442C8.8976 3.63257 8.97932 3.66623 9.05854 3.70518C9.35239 3.84965 9.59179 4.08719 10.0706 4.56227L10.8483 5.33389C11.4254 5.9066 11.714 6.19295 12.08 6.3437C12.446 6.49446 12.8525 6.49446 13.6656 6.49446Z' stroke='$accent'/>"
   ln -sfn org.gnome.Nautilus.svg "$new/scalable/apps/system-file-manager.svg"
   theme_app_svg "$new/scalable/apps/org.gnome.TextEditor.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
-    "<path d='M6.5 4h8l4 4v11.5a1.5 1.5 0 0 1-1.5 1.5h-10.5A1.5 1.5 0 0 1 5 19.5v-14A1.5 1.5 0 0 1 6.5 4z' stroke='$fg' stroke-opacity='0.82'/><path d='M8.5 11.5h7M8.5 15.5h4.5' stroke='$accent'/>"
+    "<path d='M15.5 2V5M6.5 2V5M11 2V5 M19 12V10.5C19 7.20017 19 5.55025 17.9749 4.52512C16.9497 3.5 15.2998 3.5 12 3.5H10C6.70017 3.5 5.05025 3.5 4.02513 4.52513C3 5.55025 3 7.20017 3 10.5V15C3 18.2998 3 19.9497 4.02513 20.9749C5.05025 22 6.70017 22 10 22H11 M7 15H11M7 11H15 M15.7367 21.6527L14 22L14.3473 20.2633C14.4179 19.9106 14.5913 19.5866 14.8456 19.3323L18.9111 15.2668C19.2668 14.9111 19.8437 14.9111 20.1995 15.2668L20.7332 15.8005C21.0889 16.1563 21.0889 16.7332 20.7332 17.0889L16.6677 21.1544C16.4134 21.4087 16.0894 21.5821 15.7367 21.6527Z' stroke='$accent'/>"
   ln -sfn org.gnome.TextEditor.svg "$new/scalable/apps/accessories-text-editor.svg"
   theme_app_svg "$new/scalable/apps/org.gnome.Loupe.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
-    "<rect x='3.5' y='5' width='17' height='14' rx='2.5' stroke='$fg' stroke-opacity='0.78'/><circle cx='9' cy='10' r='1.7' stroke='$accent'/><path d='M20 15.5l-4.8-4.8-8.7 8.3' stroke='$accent'/>"
+    "<path d='M6 7.5a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0 M2.5 12C2.5 7.52166 2.5 5.28249 3.89124 3.89124C5.28249 2.5 7.52166 2.5 12 2.5C16.4783 2.5 18.7175 2.5 20.1088 3.89124C21.5 5.28249 21.5 7.52166 21.5 12C21.5 16.4783 21.5 18.7175 20.1088 20.1088C18.7175 21.5 16.4783 21.5 12 21.5C7.52166 21.5 5.28249 21.5 3.89124 20.1088C2.5 18.7175 2.5 16.4783 2.5 12Z M5 21C9.37246 15.775 14.2741 8.88406 21.4975 13.5424' stroke='$accent'/>"
   ln -sfn org.gnome.Loupe.svg "$new/scalable/apps/loupe.svg"
   theme_app_svg "$new/scalable/apps/org.gnome.Evince.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
-    "<path d='M7 3.5h6.5L18 8v11a1.5 1.5 0 0 1-1.5 1.5h-9.5A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5z' stroke='$fg' stroke-opacity='0.82'/><path d='M13.5 3.5V8H18' stroke='$fg' stroke-opacity='0.55'/><path d='M8.5 12.5h7M8.5 16h5' stroke='$accent'/>"
+    "<path d='M20 13V10.6569C20 9.83935 20 9.4306 19.8478 9.06306C19.6955 8.69552 19.4065 8.40649 18.8284 7.82843L14.0919 3.09188C13.593 2.593 13.3436 2.34355 13.0345 2.19575C12.9702 2.165 12.9044 2.13772 12.8372 2.11401C12.5141 2 12.1614 2 11.4558 2C8.21082 2 6.58831 2 5.48933 2.88607C5.26731 3.06508 5.06508 3.26731 4.88607 3.48933C4 4.58831 4 6.21082 4 9.45584V13M13 2.5V3C13 5.82843 13 7.24264 13.8787 8.12132C14.7574 9 16.1716 9 19 9H19.5 M19.75 16H17.25C16.6977 16 16.25 16.4477 16.25 17V19M16.25 19V22M16.25 19H19.25M4.25 22V19.5M4.25 19.5V16H6C6.9665 16 7.75 16.7835 7.75 17.75C7.75 18.7165 6.9665 19.5 6 19.5H4.25ZM10.25 16H11.75C12.8546 16 13.75 16.8954 13.75 18V20C13.75 21.1046 12.8546 22 11.75 22H10.25V16Z' stroke='$accent'/>"
   ln -sfn org.gnome.Evince.svg "$new/scalable/apps/org.gnome.Papers.svg"
   theme_app_svg "$new/scalable/apps/org.gnome.baobab.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
-    "<circle cx='12' cy='12' r='8.5' stroke='$fg' stroke-opacity='0.35'/><path d='M12 3.5A8.5 8.5 0 1 1 5.2 17.1' stroke='$accent'/><circle cx='12' cy='12' r='3' stroke='$fg' stroke-opacity='0.8'/>"
+    "<path d='M8.05653 3.5C2.04493 6.12883 0.629484 14.3347 5.20143 18.8641C9.86407 23.4835 17.9985 21.756 20.5 15.8278 M20.9063 8.60378C20.3946 7.36853 19.6447 6.24615 18.6993 5.30073C17.7538 4.35531 16.6315 3.60536 15.3962 3.0937C14.034 2.52946 13.3529 2.24733 12.4664 2.79477C12.4333 2.81523 12.3766 2.85309 12.345 2.87587C11.5 3.4854 11.5 4.42922 11.5 6.31686V8.42748C11.5 10.3473 11.5 11.3072 12.0964 11.9036C12.6928 12.5 13.6527 12.5 15.5725 12.5H17.6831C19.5708 12.5 20.5146 12.5 21.1241 11.655C21.1469 11.6234 21.1848 11.5667 21.2052 11.5336C21.7527 10.6471 21.4705 9.966 20.9063 8.60378Z' stroke='$accent'/>"
   theme_app_svg "$new/scalable/apps/io.github.celluloid_player.Celluloid.svg" "$sf" "$bg" "$accent" "$fg" "$light" \
-    "<rect x='3.5' y='5' width='17' height='14' rx='3' stroke='$fg' stroke-opacity='0.78'/><path d='M10 9.2l5.6 2.8-5.6 2.8z' stroke='$accent' fill='$accent' fill-opacity='0.24'/>"
+    "<path d='M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0 M15.9453 12.3948C15.7686 13.0215 14.9333 13.4644 13.2629 14.3502C11.648 15.2064 10.8406 15.6346 10.1899 15.4625C9.9209 15.3913 9.6758 15.2562 9.47812 15.0701C9 14.6198 9 13.7465 9 12C9 10.2535 9 9.38018 9.47812 8.92995C9.6758 8.74381 9.9209 8.60868 10.1899 8.53753C10.8406 8.36544 11.648 8.79357 13.2629 9.64983C14.9333 10.5356 15.7686 10.9785 15.9453 11.6052C16.0182 11.8639 16.0182 12.1361 15.9453 12.3948Z' stroke='$accent'/>"
   ln -sfn io.github.celluloid_player.Celluloid.svg "$new/scalable/apps/celluloid.svg"
   dirs="scalable/apps,$dirs"
+  # The icons inside apps (home, back, search, trash, the star): Takumi's own under the names every GTK app
+  # asks for, the same strokes as the shell's (default/app-icons, Hugeicons shapes). They are drawn as
+  # strokes in the classes GTK recolours ("foreground-stroke transparent-fill"); a plain stroke is filled in.
+  for d in /usr/share/takumi/app-icons "$theme_lib_dir/../default/app-icons"; do
+    [[ -d "$d" ]] || continue
+    mkdir -p "$new/symbolic"; ln -sfn "$(cd "$d" && pwd)" "$new/symbolic/actions"
+    dirs="symbolic/actions,$dirs"
+    sections=$(printf '\n\n[symbolic/actions]\nContext=Actions\nSize=16\nMinSize=8\nMaxSize=512\nType=Scalable%s' "$sections")
+    break
+  done
   sections=$(printf '\n\n[scalable/apps]\nContext=Applications\nSize=64\nMinSize=16\nMaxSize=256\nType=Scalable%s' "$sections")
   printf '[Icon Theme]\nName=Takumi\nComment=Takumi squircle app icons and themed folders (takumi theme apply)\nInherits=%s,Papirus,hicolor\nDirectories=%s%s\n' \
     "$inherit" "$dirs" "$sections" > "$new/index.theme"

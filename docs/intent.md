@@ -21,7 +21,10 @@ Enter on "Ask Intent", or Enter when nothing matches, asks it as a
 conversation in the Core:
 
 1. The row says what is happening: "Thinking…", then each command as it
-   starts, "takumi switch bluetooth…".
+   starts, "takumi switch bluetooth…". Each step it leaves behind joins a
+   thread above the row, the last five, joined by a line that runs down into
+   the row. Close the Core and it carries on: the Core at rest shows a
+   turning ring and the step it is on, and a press brings the thread back.
 2. Risk 0 commands run at once, and the model reads what they print. One
    that asks something asks you right there, as it would from the Palette:
    "Keep this?" after the screen changes, or a Wi-Fi password, which the

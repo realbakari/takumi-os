@@ -29,6 +29,7 @@ packages yet: the installer's steps copy the files ([install-process.md](install
 
 ```
 default/app-colours/            /usr/share/takumi/app-colours/              templates that colour apps from the theme
+default/app-icons/              /usr/share/takumi/app-icons/                the icons inside apps (home, back, search, trash): Hugeicons shapes, MIT
 default/palette/emoji.tsv       /usr/share/takumi/default/palette/          the Palette's emoji
 default/coding-agents/takumi/   /usr/share/takumi/coding-agents/takumi/     the skill Claude Code reads (linked into ~/.claude/skills)
 default/keyd/default.conf       /usr/share/takumi/default/keyd/             Harmony's layer, for turning it back on

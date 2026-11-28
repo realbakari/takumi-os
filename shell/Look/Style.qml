@@ -49,6 +49,9 @@ Singleton {
     readonly property int field:          space(52)
     readonly property int fieldRadius:    space(14)   // concentric with coreOpenRadius (24) at 10 px inset
     readonly property int planRow:        space(36)
+    readonly property int threadRow:      space(24)   // a step a conversation has taken, above its row
+    readonly property int threadSteps:    5           // as many as the thread keeps; older ones leave
+    readonly property int threadNode:     space(7)
     readonly property int rowHeight:      space(44)
     readonly property int rowHeightCompact: space(38) // a row while browsing: its title alone
     readonly property int rowGap:         space(2)
@@ -58,6 +61,11 @@ Singleton {
     readonly property int appCell:        space(106)  // an app tile on the empty Palette and in the grid of every app
     readonly property int appIcon:        space(44)
     readonly property int appColumns:     6
+    // Another maker's icon on Takumi's squircle: the plate's margin, its corner and how far in the icon
+    // sits, as shares of the icon's box. The plate matches the one drawn into Takumi's own app icons.
+    readonly property real platePad:      0.0625
+    readonly property real plateRadius:   0.234
+    readonly property real plateInset:    0.23
     readonly property int themeColumns:   3           // visual Theme gallery grid
     readonly property int themeCellH:     space(138)
     readonly property int emojiColumns:   9           // visual Emoji picker grid
@@ -84,7 +92,8 @@ Singleton {
     readonly property real emblemGlyph:   0.74   // the glyph's height as a share of the tile
     readonly property int mapUnit:        space(56)   // a full-width column on the strip minimap
     readonly property int lockAvatar:     space(68)   // circular profile picture on the Lock and login screen
-    readonly property int lockField:      space(240)
+    readonly property int lockField:      space(280)
+    readonly property int lockDots:       12          // as many dots as the field holds beside its arrow; a longer password shows no more
     readonly property int cardHeight:     space(196)  // a card in the open Core (sharing Wi-Fi)
     readonly property int approvalWidth:  space(520)  // the Core asking for your password
     readonly property int qrTile:         space(168)
@@ -97,10 +106,14 @@ Singleton {
     readonly property int netWidth:       space(440)  // in-Core Network & Bluetooth Deck
     readonly property int cockpitWidth:   space(540)  // Intent & Agent Cockpit
     readonly property int canvasHeight:   space(128)  // spatial monitor layout stage
-    readonly property int solarHeight:    space(72)   // Phase Solar Arc strip in Today (header + rail + labels)
+    readonly property int solarHeight:    space(132)  // the day's arc in Today: its heading, the arc, the two times under it
+    readonly property int solarPath:      space(74)   // the arc alone: the sun's path over and under the horizon
+    readonly property int solarOrb:       space(11)
     readonly property int parallaxStep:   space(18)   // Strip-coupled Sky midground shift per column
     readonly property int parallaxMax:    space(42)
-    readonly property int tileHeight:     space(58)   // a switch in Quick settings
+    readonly property int switchColumns:  4           // Quick settings' switches: two rows of four discs
+    readonly property int switchDisc:     space(48)
+    readonly property int switchCell:     space(92)   // the disc, its name and what it is doing
     readonly property int tileRadius:     space(14)   // harmonised concentrically inside coreOpenRadius (24)
     readonly property int tileGap:        space(8)
     readonly property int iconDisc:       space(34)   // the round field a switch's icon sits in
@@ -163,7 +176,7 @@ Singleton {
     readonly property real auraAlpha:     0.26
     readonly property real skyTint:       0.07   // the accent along the top of the Core, the sky showing through
     readonly property real lockGlass:     0.55   // the lock's field over the sky
-    readonly property real lockGhost:     0.07   // the outline of the great 匠 behind the Lock's clock
+    readonly property real lockGhost:     0.035  // the shade of the great 匠 behind the Lock's clock
     readonly property real lockCorner:    0.30   // the marks at the Lock's corners
     readonly property real fillTile:      0.055  // a switch that is off
     readonly property real fillTileOn:    0.17   // a switch that is on, of the accent

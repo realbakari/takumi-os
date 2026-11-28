@@ -3,6 +3,7 @@
 // can press is a segment that lights under the pointer and gives a little when pressed. See docs/shell.md.
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Quickshell.Widgets
 import Quickshell.Services.Mpris
 import Quickshell.Services.SystemTray
@@ -16,6 +17,10 @@ Item {
     required property string output
     required property real screenWidth
     property var core: null                // for the messages held back while do not disturb is on
+    // A conversation working while the Core is closed (Open.qml): what it is doing now, and whose it is.
+    property string working: ""
+    property string workingTitle: ""
+    property string workingIcon: "cmd"
     signal openRequested()
     signal searchRequested(string text)
     signal quickRequested()
@@ -32,6 +37,30 @@ Item {
     readonly property var window: workspace && workspace.active_window_id != null
         ? niri.windows.find(w => w.id === workspace.active_window_id) ?? null : null
     readonly property var app: window ? (DesktopEntries.byId(window.app_id ?? "") ?? DesktopEntries.heuristicLookup(window.app_id ?? "")) : null
+    // Takumi's own app icons (lib/theme.sh draws them into icons/Takumi): the Core at rest shows the same
+    // one the Palette does. Qt reads its icon theme once at start, so the files are named here directly;
+    // the list is read again whenever the theme is applied, which redraws them.
+    readonly property string ownIconDir: Quickshell.env("HOME") + "/.local/share/icons/Takumi/scalable/apps"
+    property var ownIcons: ({})
+    Process {
+        id: ownIconList
+        running: true
+        command: ["ls", rest.ownIconDir]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const found = {};
+                for (const f of this.text.split("\n")) if (f.endsWith(".svg")) found[f.slice(0, -4)] = true;
+                rest.ownIcons = found;
+            }
+        }
+    }
+    Connections { target: Theme; function onRevisionChanged() { if (!ownIconList.running) ownIconList.running = true; } }
+    readonly property string appIconSource: {
+        const names = [app?.icon ?? "", window?.app_id ?? ""];
+        // The theme's revision rides along so a redrawn icon is read again, not taken from the picture cache.
+        for (const n of names) if (n && ownIcons[n]) return "file://" + ownIconDir + "/" + n + ".svg#" + Theme.revision;
+        return app?.icon ? Quickshell.iconPath(app.icon, true) : "";
+    }
     // Takumi's own word for an app it ships whose name means nothing to a newcomer.
     readonly property var ownNames: ({ "foot": "Terminal", "footclient": "Terminal" })
     readonly property string appName: ownNames[window?.app_id ?? ""] ?? app?.name ?? window?.app_id ?? ""
@@ -128,7 +157,7 @@ Item {
             IconImage {
                 anchors.verticalCenter: parent.verticalCenter
                 implicitSize: Style.restAppIcon
-                source: rest.app?.icon ? Quickshell.iconPath(rest.app.icon, true) : ""
+                source: rest.appIconSource
                 visible: source != ""
             }
             Label { anchors.verticalCenter: parent.verticalCenter; font.pixelSize: Style.restText; text: rest.appName; font.weight: Font.DemiBold }
@@ -323,6 +352,31 @@ Item {
             onClicked: rest.searchRequested("stop remote help")
             Icon { anchors.verticalCenter: parent.verticalCenter; name: "person"; size: Style.restIcon
                    color: rest.poll.remote > 1 ? Theme.red : Theme.withAlpha(Theme.foreground, Style.textDim) }
+        }
+        // Intent, or any command that talks, still working after the Core was closed: a ring that turns, whose
+        // it is and what it is doing now. A press opens the Core on it.
+        Segment {
+            id: workSeg
+            visible: rest.working !== ""
+            hint: (rest.workingTitle ? rest.workingTitle + " · " : "") + rest.working + " · press to see"
+            onHoveredChanged: rest.hover(workSeg, hovered)
+            onClicked: rest.openRequested()
+            Item {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.restIcon; height: width
+                Rectangle {
+                    anchors.fill: parent; radius: width / 2
+                    color: "transparent"; border.width: Style.space(1.5); border.color: Theme.accentTint(0.28)
+                }
+                // The lit part of the ring: a dot riding it (still, under reduced motion or without 3D).
+                Item {
+                    anchors.fill: parent
+                    Rectangle { anchors.horizontalCenter: parent.horizontalCenter; y: -height / 2 + Style.space(0.75); width: Style.space(5); height: width; radius: width / 2; color: Theme.accent }
+                    RotationAnimation on rotation { running: workSeg.visible && Style.continuousMotion; from: 0; to: 360; duration: Style.sweep; loops: Animation.Infinite }
+                }
+            }
+            Label { anchors.verticalCenter: parent.verticalCenter; visible: rest.workingTitle !== ""; text: rest.workingTitle; font.pixelSize: Style.restText; font.weight: Font.DemiBold; width: Math.min(implicitWidth, Style.space(140)) }
+            Label { anchors.verticalCenter: parent.verticalCenter; text: rest.working; font.pixelSize: Style.restText; dim: Style.textDim; width: Math.min(implicitWidth, Style.restMedia) }
         }
         // Dictation is listening (takumi voice): live accent micro-waveform (static mic under reduced motion).
         Segment {

@@ -21,7 +21,7 @@ it are in [design-language.md](design-language.md).
 shell.qml             creates the services once and hands them to every screen
 Look/Style.qml        every size, alpha and duration; nothing else holds a number
 Look/Theme.qml        the colour roles, read from the rendered theme
-Look/Icons.js         one stroke icon set, 24 grid, paths only
+Look/Icons.js         one stroke icon set, 24 grid, paths only: Hugeicons' free Stroke Rounded shapes (MIT, Look/Icons.LICENSE.md)
 Look/Sky.js           the sky painter (the preview paints the same scene)
 Sources/Niri.qml      one `niri msg --json event-stream`: workspaces, windows, layouts, focus
 Sources/Poll.qml      battery, volume, network (link, signal, sign-in pages), the modes and what is running (dictation, a timer, remote help) every 10 s, never overlapping
@@ -34,7 +34,8 @@ Core/                 Core.qml, Rest.qml, Segment.qml, Notice.qml, Open.qml, Res
                       EmojiGrid.qml (visual emoji grid), KeysSheet.qml (native shortcut cheat sheet), SoundDeck.qml (in-Core
                       PipeWire output/input switcher and per-app stream mixer), DisplayDeck.qml (spatial monitor layout studio),
                       NetDeck.qml (in-Core Wi-Fi, VPN and Bluetooth deck), Cockpit.qml (Intent & Agent Cockpit),
-                      Quick.qml with Tile.qml, Level.qml and NowPlaying.qml (Quick settings), Today.qml (with Phase Solar Arc),
+                      Thread.qml (the steps a conversation has taken, above its row),
+                      Quick.qml with Tile.qml (a disc switch), Level.qml (and LevelReading.qml, its words) and NowPlaying.qml (Quick settings), Today.qml (with Phase Solar Arc),
                       Zoom.qml (the magnifier docked at the top, docs/accessibility.md)
 Parts/LockFace.qml    the emblem, time, date and field the Lock and the login screen share
 Parts/Arrival.qml     the login screen's first moment: the boot splash's picture, then the tile rising onto the emblem
@@ -56,11 +57,11 @@ another from the field up, and Quick settings' tiles in a wave from the top left
 
 | State | Shows | Size |
 |---|---|---|
-| **Rest** | emblem · the app you are in and its window's title ("Search" with nothing open) · the strip's columns when there are two or more · workspace numbers when there is more than one · what is playing · date and time · background apps · a recording in progress (red, with its time; a press stops it) · remote help (a person; red while someone is connected; a press offers to stop it) · dictation listening (the microphone, breathing; a press stops it) · a running timer (what is left; a press opens Today) · microphone and camera · the keyboard layout when there is more than one (a press goes to the next) · the modes you turned on (do not disturb, staying awake, the night light) · network (in words when something is in the way) · battery · volume; each part shows only with something to say, lights under the pointer and has a word above it | as wide as its content, 46 tall |
+| **Rest** | emblem · the app you are in and its window's title ("Search" with nothing open) · the strip's columns when there are two or more · workspace numbers when there is more than one · what is playing · date and time · background apps · a conversation still working after the Core was closed (a turning ring, whose it is and what it is doing now; a press opens the Core on it, and the Core's rim stays lit meanwhile) · a recording in progress (red, with its time; a press stops it) · remote help (a person; red while someone is connected; a press offers to stop it) · dictation listening (the microphone, breathing; a press stops it) · a running timer (what is left; a press opens Today) · microphone and camera · the keyboard layout when there is more than one (a press goes to the next) · the modes you turned on (do not disturb, staying awake, the night light) · network (in words when something is in the way) · battery · volume; each part shows only with something to say, lights under the pointer and has a word above it | as wide as its content, 46 tall |
 | **Notice** | an icon, a title, a detail, and a meter, a code to copy or an app's buttons; "3 more" when others wait | as wide as the notice, 46 tall; 1.8 s for Takumi's own, 5 s for a message (8 with buttons) |
 | **Palette** | results stacked upward (with a soft top fade when scrolling), visual Theme Gallery, Emoji Grid, App Grid, Intent's plan, the field | 640 wide, as tall as its content (200 to 500) |
-| **Quick settings** | balanced 2×4 switches (Wi-Fi, Bluetooth, do not disturb, night light, stay awake, microphone, power mode, Look), full-width Mirror bar when multiple screens are attached, sound and brightness levels, what is playing (click to focus player), capture tools, lock, and the four ways to stop | 420 wide, as tall as its content |
-| **Today** | the day, Phase Solar Arc (live Dawn → Day → Dusk → Night position), interactive month grid (clickable dates with reminder dots and quick "+ Remind"), coming up, what apps said earlier | 372 wide, as tall as its content |
+| **Quick settings** | two rows of four disc switches (Wi-Fi, or Network on a computer with no Wi-Fi card that is on a cable, Bluetooth, do not disturb, night light, stay awake, microphone, power mode, Look): a disc fills with the accent while on and a ring leaves it when it changes; a press on the disc switches it, a press on its words opens its topic, a ninth switch, Mirror, when more than one screen is attached, sound and brightness levels, what is playing (click to focus player), capture tools, lock, and the four ways to stop | 420 wide, as tall as its content |
+| **Today** | the day, the day's arc (the sun's path over the horizon from when dawn starts to when night does, and under it through the night, by the hours in `phase.toml`; the part already travelled in the accent; an orb where the clock is, a disc by day and a ring by night), interactive month grid of whole weeks (clickable dates with reminder dots and quick "+ Remind"), coming up, what apps said earlier | 372 wide, as tall as its content |
 | **Keys** | native themed shortcut cheat sheet (`Super+K` or `Super+Shift+/`) grouped by Core, Strip, Harmony, Apps/Capture and Sound | 680 wide, as tall as its content |
 | **Sound** | in-Core PipeWire output/input switcher (with Bluetooth codecs), live per-app volume sliders, and media controls | 440 wide, as tall as its content |
 | **Displays** | spatial scaled monitor canvas with inline scale presets and multi-monitor arrangement controls | 460 wide, as tall as its content |
@@ -309,7 +310,8 @@ the date, a 68 px circular profile picture (from `~/.config/takumi/avatar`,
 `~/.face`, `/var/lib/AccountsService/icons/<user>`, or `/var/lib/takumi/greeter/avatar`,
 falling back to a frosted-glass initial monogram when none is set via
 `takumi settings avatar`), the user name, and one password field, in front of 匠
-drawn as a faint outline most of the screen tall. As it appears, a thin mark
+as a faint shade most of the screen tall. Once something is typed the field
+shows an arrow at its end, which does what Enter does. As it appears, a thin mark
 draws out from each corner of the screen; inside the top left one, how the
 computer is connected (Wi-Fi, Wired or Offline, "no internet", the VPN). Typing
 goes straight to the field.
@@ -318,6 +320,10 @@ the bottom: what is playing, with play and pause, and at the right the keyboard 
 than one; a press goes to the next, so the password goes in the layout it was made in) and the battery.
 PAM checks it through `/etc/pam.d/takumi-lock` (the `login` stack). A wrong
 password shakes the field and outlines it in red.
+
+The login screen adds **Restart** and **Shut down** at the bottom left
+(`canStop` on the face): nobody is logged in, so nothing is open to lose, and
+logind lets the person at the screen stop the computer without a password.
 
 If the shell dies while locked, niri keeps the session locked. Switch to a
 TTY, run `systemctl --user restart takumi-shell`, then lock again from the

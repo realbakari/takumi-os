@@ -224,18 +224,25 @@ QtObject {
         Process { property var buf: []; stdout: SplitParser { onRead: line => { try { buf.push(JSON.parse(line)); } catch (e) {} } } }
     }
 
-    // Boosts: the query starts the title or a word of it (0.5), starts a search word (0.45), or every word
-    // of a longer query is in the title, hyphens ignored (0.4: "wifi off"), or the title holds it (0.3).
+    // Boosts: the query starts the title or a word of it (0.5), is one of the search words (0.5) or starts
+    // one (0.25 to 0.45, by how much of the word it is: "power" is half of "powerpoint"), or every word of a
+    // longer query is in the title, hyphens ignored (0.4: "wifi off"), or the title holds it (0.3). A query
+    // that names a row's kind ("power", "bluetooth", "wifi") lifts that kind's rows by 0.35 more, so the
+    // word for a subject finds the subject before an app that mentions it.
     // Intent's row is the query itself, so it never takes a boost: it stays the fallback.
     function rank(list) {
-        const l = fold(query.trim()), qw = l.replace(/-/g, "").split(/\s+/).filter(w => w);
+        const l = fold(query.trim()), ln = l.replace(/-/g, ""), qw = ln.split(/\s+/).filter(w => w);
         const scored = list.map(r => {
             const t = fold(r.title ?? ""), tn = t.replace(/-/g, ""), words = fold(r.keywords ?? "").split(/\s+/);
-            const boost = !l || r.kind === "Intent" ? 0
+            const part = words.reduce((best, w) => w && w.startsWith(l) ? Math.max(best, l.length / w.length) : best, 0);
+            const kind = fold(r.kind ?? "").replace(/-/g, "");
+            const match = !l || r.kind === "Intent" ? 0
                         : (t.startsWith(l) || t.split(/[\s·]+/).some(w => w.startsWith(l))) ? 0.5
-                        : words.some(w => w && w.startsWith(l)) ? 0.45
+                        : part === 1 ? 0.5
+                        : part > 0 ? 0.25 + 0.2 * part
                         : qw.length > 1 && qw.every(w => tn.includes(w)) ? 0.4
                         : t.includes(l) ? 0.3 : 0;
+            const boost = match + (ln.length >= 2 && r.kind !== "Intent" && (kind === ln || kind + "s" === ln) ? 0.35 : 0);
             // A steady row keeps its provider's order: the network you are on stays first, however often
             // you picked another.
             return Object.assign({}, r, { score: r.score + boost + (r.steady ? 0 : (history[r.id] ?? 0) * 0.05) });

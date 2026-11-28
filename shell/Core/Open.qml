@@ -139,6 +139,10 @@ Item {
         for (const n of order) { for (const r of byName[n]) out.push(Object.assign({}, r, { kindShown: false })); out.push(head(n)); }
         return out;
     }
+    // What a conversation is doing, in a line, for the Core at rest while it works with the Core closed.
+    readonly property string workingLine: !talk || talk.ended ? "" : talk.step ? talk.step.prompt : (talk.note || "Working…")
+    readonly property string workingTitle: talk ? (talk.row.kind === "Intent" ? "Intent" : (talk.row.title ?? "")) : ""
+    readonly property string workingIcon: talk ? (talk.row.icon ?? "cmd") : "cmd"
     readonly property int sectionCount: shownRows.filter(r => r.header).length
     property int secondsLeft: 0
     function talkLine() {
@@ -176,7 +180,7 @@ Item {
         if (browsingEmoji) return Math.min(Style.coreOpenMax, Style.space(16) + emojiHead.height + Math.max(1, Math.ceil(emojiItems.length / Style.emojiColumns)) * Style.emojiCell + Style.field + Style.gap);
         const n = list.count, plan = planRow.visible, stripHeight = showStrip ? Style.appCell + Style.space(6) : 0;
         if (n === 0) return Math.max(Style.coreOpenMin, Style.space(16) + stripHeight + (emptyHint.visible ? emptyHint.implicitHeight + Style.space(36) : 0) + Style.field + Style.gap);
-        const rowsHeight = talk ? talkRowHeight + Style.rowGap
+        const rowsHeight = talk ? talkRowHeight + Style.rowGap + (thread.visible ? thread.height + Style.space(4) : 0)
                          : shownRows.reduce((sum, r) => sum + pane.rowHeightOf(r) + Style.rowGap, 0);
         const h = Style.space(16) + rowsHeight + stripHeight + (plan ? Style.planRow : 0) + Style.field + Style.gap;
         return Math.min(Style.coreOpenMax, h);
@@ -277,7 +281,7 @@ Item {
     // at a time. One at a time: a row chosen while the last command is still ending starts after it.
     function beginTalk(row) {
         if (talker.running) { queued = row; return; }
-        talk = { row: row, step: null, note: "", tone: "busy", done: "", lastLine: "", ended: false };
+        talk = { row: row, step: null, note: "", tone: "busy", done: "", lastLine: "", ended: false, trail: [] };
         reveal = false; answer.text = "";
         talker.command = row.run;
         talker.running = true;
@@ -288,6 +292,9 @@ Item {
         if (!t) return;
         const sp = line.indexOf(" "), word = sp < 0 ? line : line.slice(0, sp);
         let rest = sp < 0 ? "" : line.slice(sp + 1);
+        // What it was doing until now joins the thread above the row (Thread.qml): the steps so far, in order.
+        if (["ask", "secret", "confirm", "note", "done"].includes(word) && t.note && t.tone === "busy" && t.note !== rest)
+            t.trail = (t.trail ?? []).concat([t.note]).slice(-Style.threadSteps);
         switch (word) {
         case "ask": case "secret": case "confirm": {
             let deadline = 0;
@@ -440,6 +447,16 @@ Item {
             query: pane.talk ? "" : field.text
             onActivated: pane.talk ? pane.talkEnter() : pane.run(index, false)
         }
+    }
+
+    // The steps a conversation has taken, oldest at the top, joined by a line that runs down into the row
+    // that says what it is doing now.
+    Thread {
+        id: thread
+        visible: !!pane.talk && !pane.card && steps.length > 0
+        steps: pane.talk ? (pane.talk.trail ?? []) : []
+        live: pane.working
+        anchors { left: list.left; right: list.right; bottom: list.bottom; bottomMargin: pane.talkRowHeight + Style.rowGap + Style.space(4) }
     }
 
     // The apps you open most, between the rows and the field; the last tile opens the grid of every app.

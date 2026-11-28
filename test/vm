@@ -118,7 +118,7 @@ PY
       sudo systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || true
       takumi phase tick --force >/dev/null
       # Quickshell reloads changed QML in place, which strands a login screen in the middle of a login.
-      [ -n \"\$(loginctl list-sessions --no-legend | awk '\\\$4 == \"seat0\" && \\\$3 != \"greeter\"')\" ] || sudo systemctl restart greetd
+      [ -n \"\$(loginctl list-sessions --no-legend | awk '\$4 == \"seat0\" && \$3 != \"greeter\"')\" ] || sudo systemctl restart greetd
       echo synced"
     exit $? ;;
   wifi)

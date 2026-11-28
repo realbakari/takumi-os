@@ -1,16 +1,18 @@
-/* The theme's colours for GTK 3 and 4 (libadwaita's named colours). The window, view, header and sidebar
-   backgrounds are a little see-through when the theme asks for glass; {{opacity}} is 1.0 otherwise. */
+/* The theme's colours for GTK 3 and 4 (libadwaita's named colours). Three depths, as in the Core: the
+   header is a band of the surface, the sidebar sits halfway, and the page (the view) is the background,
+   the deepest, so what you work on is never the brightest thing in the window. They are a little
+   see-through when the theme asks for glass; {{opacity}} is 1.0 otherwise. */
 @define-color accent_color {{accent}};
 @define-color accent_bg_color {{accent}};
 @define-color accent_fg_color {{background}};
 @define-color window_bg_color alpha({{background}}, {{opacity}});
 @define-color window_fg_color {{foreground}};
-@define-color view_bg_color alpha({{surface}}, {{opacity}});
+@define-color view_bg_color alpha({{background}}, {{opacity}});
 @define-color view_fg_color {{foreground}};
 @define-color headerbar_bg_color alpha({{surface}}, {{opacity}});
 @define-color headerbar_fg_color {{foreground}};
 @define-color headerbar_backdrop_color {{background}};
-@define-color sidebar_bg_color alpha({{surface}}, {{opacity}});
+@define-color sidebar_bg_color alpha(mix({{background}}, {{surface}}, 0.55), {{opacity}});
 @define-color sidebar_fg_color {{foreground}};
 @define-color secondary_sidebar_bg_color {{background}};
 @define-color secondary_sidebar_fg_color {{muted}};
@@ -24,11 +26,38 @@
 @define-color warning_color {{yellow}};
 @define-color success_color {{green}};
 
+/* libadwaita takes its sidebar and its backdrop (a window that is not focused) from variables, not from
+   the names above, so the same three depths are said again here. GTK 3 has no variables and skips this. */
+:root {
+  --sidebar-bg-color: alpha(mix({{background}}, {{surface}}, 0.55), {{opacity}});
+  --sidebar-backdrop-color: alpha(mix({{background}}, {{surface}}, 0.55), {{opacity}});
+  --sidebar-fg-color: {{foreground}};
+  --sidebar-border-color: alpha({{foreground}}, 0.07);
+  --secondary-sidebar-bg-color: {{background}};
+  --secondary-sidebar-backdrop-color: {{background}};
+  --headerbar-backdrop-color: alpha({{surface}}, {{opacity}});
+}
+
 /* Takumi optical surface craft for GTK 3 & 4 / libadwaita apps: quiet hairline headerbars,
    concentric radii matching the Core, subtle pill scrollbars, and restrained accent focus rings. */
 headerbar, .titlebar {
   box-shadow: none;
-  border-bottom: 1px solid alpha(@window_fg_color, 0.08);
+  border-bottom: 1px solid alpha(@window_fg_color, 0.09);
+  min-height: 46px;            /* the Core's own height: a window's band and the Core are one measure */
+}
+/* The sidebar ends in a hairline, and its current row is the accent's tint, as a current row is in the Palette. */
+.sidebar-pane, .navigation-sidebar, placessidebar {
+  border-right: 1px solid alpha(@window_fg_color, 0.07);
+}
+.navigation-sidebar row:selected, placessidebar row:selected {
+  background-color: alpha(@accent_color, 0.16);
+}
+/* The window's own buttons stay quiet until the pointer is on them. */
+windowcontrols button image {
+  background-color: alpha(@window_fg_color, 0.07);
+}
+windowcontrols button:hover image {
+  background-color: alpha(@window_fg_color, 0.16);
 }
 popover.background > contents, menu, .context-menu {
   border-radius: 14px;
@@ -47,7 +76,244 @@ scrollbar slider {
 scrollbar slider:hover {
   background-color: alpha(@window_fg_color, 0.42);
 }
-*:focus-visible {
+/* Controls only: on every node, the ring also drew around the panes that merely contain the focus. */
+button:focus-visible, entry:focus-visible, row:focus-visible, switch:focus-visible, checkbutton:focus-visible,
+radiobutton:focus-visible, scale:focus-visible, spinbutton:focus-visible, dropdown:focus-visible,
+tabbutton:focus-visible, tab:focus-visible, link:focus-visible, expander:focus-visible {
   outline: 1.5px solid alpha(@accent_color, 0.65);
   outline-offset: 1px;
+}
+
+/* Header buttons that hold only an icon are discs, as the Core's are. */
+headerbar button.image-button, headerbar menubutton > button.image-button, headerbar splitbutton > button {
+  border-radius: 999px;
+}
+
+/* Files (Nautilus), in the Core's shapes. The class names are Files' own.
+   The path is a capsule; the folder you are in is said in a firmer weight. */
+.nautilus-pathbar {
+  border-radius: 999px;
+  background-color: alpha(@window_fg_color, 0.06);
+  box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.07);
+  padding: 0 4px;
+}
+.nautilus-pathbar:focus-within {
+  box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.55);
+}
+.nautilus-path-button {
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.nautilus-path-button:hover {
+  background-color: alpha(@window_fg_color, 0.08);
+}
+.nautilus-path-button.current-dir label {
+  font-weight: 600;
+}
+/* A file as a tile: the Palette's row, squared. Under the pointer it lifts a little; chosen, it takes the
+   accent's tint and a hairline of the accent. */
+.nautilus-grid-view gridview {
+  padding: 10px;
+}
+.nautilus-grid-view gridview > child {
+  border-radius: 14px;
+  margin: 3px;
+  padding: 8px 6px;
+  transition: background-color 83ms ease-out;
+}
+.nautilus-grid-view gridview > child:hover {
+  background-color: alpha(@window_fg_color, 0.05);
+}
+.nautilus-grid-view gridview > child:selected {
+  background-color: alpha(@accent_color, 0.16);
+  box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.38);
+}
+/* The list: rows as pills with room to breathe, column names as small quiet labels. */
+.nautilus-list-view columnview > header > button {
+  font-size: 12px;
+  font-weight: 600;
+  color: alpha(@window_fg_color, 0.78);
+}
+.nautilus-list-view columnview > listview {
+  padding: 4px 8px;
+}
+.nautilus-list-view columnview > listview > row {
+  border-radius: 12px;
+  min-height: 40px;
+  transition: background-color 83ms ease-out;
+}
+.nautilus-list-view columnview > listview > row:hover {
+  background-color: alpha(@window_fg_color, 0.05);
+}
+.nautilus-list-view columnview > listview > row:selected {
+  background-color: alpha(@accent_color, 0.16);
+  box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.38);
+}
+/* A picture's own preview keeps a fine edge, so a pale image does not bleed into a pale page. */
+.nautilus-grid-view .thumbnail, .nautilus-list-view .thumbnail {
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px alpha(@window_fg_color, 0.10);
+}
+/* The line that says what is selected, and the search field: capsules, like the word over the Core. */
+.floating-bar {
+  border-radius: 999px;
+  margin: 10px;
+  padding: 4px 14px;
+  background-color: @headerbar_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.11);
+  box-shadow: 0 6px 18px alpha(#000000, 0.28);
+}
+.nautilus-query-editor, .nautilus-query-editor > text {
+  border-radius: 999px;
+}
+/* Dragging out a selection: the accent, faintly. */
+.nautilus-grid-view rubberband, .nautilus-list-view rubberband {
+  border-radius: 8px;
+  background-color: alpha(@accent_color, 0.12);
+  border: 1px solid alpha(@accent_color, 0.5);
+}
+/* In Files the chosen row or tile already says where the keyboard is, so the outline every other control
+   gets is not drawn twice here; a row the keyboard is on but has not chosen takes the hairline alone. */
+.nautilus-list-view:focus-visible, .nautilus-list-view *:focus-visible,
+.nautilus-grid-view:focus-visible, .nautilus-grid-view *:focus-visible {
+  outline: none;
+}
+.nautilus-list-view columnview > listview > row:focus-visible:not(:selected),
+.nautilus-grid-view gridview > child:focus-visible:not(:selected) {
+  box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.38);
+}
+
+/* The parts every app is built from (Text Editor, Image Viewer, Document Viewer, Disk Usage Analyzer,
+   Celluloid and whatever you add), in the Core's shapes: capsules and discs, the accent's tint for what is
+   chosen, a hairline for every edge. The names are GTK 4's and libadwaita's own; GTK 3 skips what it lacks. */
+
+/* Tabs: capsules on a quiet rail; the one you are on takes the accent's tint. */
+tabbar tab {
+  border-radius: 999px;
+  min-height: 30px;
+  margin: 2px 2px;
+  transition: background-color 83ms ease-out;
+}
+tabbar tab:hover {
+  background-color: alpha(@window_fg_color, 0.06);
+}
+tabbar tab:selected {
+  background-color: alpha(@accent_color, 0.16);
+  box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.32);
+}
+tabbar tab:selected label {
+  font-weight: 600;
+}
+tabbar tab button {
+  border-radius: 999px;
+}
+
+/* Buttons that say something in a header, and the ones that confirm or destroy: capsules. */
+headerbar button.text-button, headerbar menubutton > button.text-button, headerbar button.image-text-button,
+headerbar menubutton > button.image-text-button, button.suggested-action, button.destructive-action, button.pill {
+  border-radius: 999px;
+  padding-left: 14px;
+  padding-right: 14px;
+}
+
+/* Find, in any app: a band under the header with a capsule to type in. */
+searchbar > revealer > box {
+  padding: 8px 10px;
+  border-bottom: 1px solid alpha(@window_fg_color, 0.09);
+}
+entry.search, searchbar entry, searchbar text, .search-bar entry {
+  border-radius: 999px;
+  min-height: 34px;
+}
+
+/* A level is a capsule that fills with the accent, as the sound and brightness are in the Core. */
+scale > trough {
+  min-height: 8px;
+  min-width: 8px;
+  border-radius: 999px;
+  background-color: alpha(@window_fg_color, 0.10);
+}
+scale > trough > highlight {
+  border-radius: 999px;
+  background-color: @accent_color;
+}
+scale > trough > slider {
+  min-height: 16px;
+  min-width: 16px;
+  margin: -5px;
+  border-radius: 999px;
+  background-color: @window_fg_color;
+  box-shadow: 0 1px 4px alpha(#000000, 0.35), 0 0 0 1px alpha(#000000, 0.12);
+}
+progressbar > trough {
+  min-height: 6px;
+  border-radius: 999px;
+  background-color: alpha(@window_fg_color, 0.10);
+}
+progressbar > trough > progress {
+  min-height: 6px;
+  border-radius: 999px;
+  background-color: @accent_color;
+}
+
+/* Menus: rows as pills, with room for a finger. */
+popover.menu modelbutton, popover modelbutton {
+  border-radius: 10px;
+  min-height: 34px;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+popover.menu modelbutton:hover, popover modelbutton:hover {
+  background-color: alpha(@window_fg_color, 0.07);
+}
+
+/* Controls that float over a picture or a film: one glass capsule, like the Core at rest. */
+.osd.toolbar, toolbar.osd, .osd > box.toolbar, box.osd.toolbar, .osd.linked {
+  border-radius: 23px;
+  padding: 4px 6px;
+  background-color: alpha(@headerbar_bg_color, 0.86);
+  border: 1px solid alpha(@window_fg_color, 0.12);
+  box-shadow: 0 10px 28px alpha(#000000, 0.38);
+  color: @window_fg_color;
+}
+.osd button, button.osd {
+  border-radius: 999px;
+}
+button.osd {
+  background-color: alpha(@headerbar_bg_color, 0.86);
+  border: 1px solid alpha(@window_fg_color, 0.12);
+  color: @window_fg_color;
+}
+
+/* What an app says in passing, and the word under the pointer: capsules, like the word over the Core. */
+toast {
+  border-radius: 999px;
+  padding: 2px 6px;
+  background-color: @headerbar_bg_color;
+  color: @window_fg_color;
+  border: 1px solid alpha(@window_fg_color, 0.12);
+  box-shadow: 0 10px 28px alpha(#000000, 0.38);
+}
+tooltip, tooltip.background {
+  border-radius: 999px;
+  padding: 4px 10px;
+  background-color: @headerbar_bg_color;
+  color: @window_fg_color;
+  border: 1px solid alpha(@window_fg_color, 0.12);
+}
+
+/* Lists of settings and cards: the Core's tile, a 14 px corner and a hairline, no drop shadow. */
+.card, list.boxed-list, list.boxed-list-separate > row {
+  border-radius: 14px;
+  box-shadow: 0 0 0 1px alpha(@window_fg_color, 0.09);
+}
+/* A sheet or a question an app raises: the open Core's corner. */
+floating-sheet > sheet, dialog.alert sheet, window.dialog.message {
+  border-radius: 24px;
+}
+/* The line along the bottom of an editor: small and quiet. */
+.statusbar, box.statusbar {
+  font-size: 12px;
+  color: alpha(@window_fg_color, 0.72);
+  border-top: 1px solid alpha(@window_fg_color, 0.07);
 }

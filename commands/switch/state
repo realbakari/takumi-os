@@ -15,7 +15,8 @@ done
 command -v jq >/dev/null || exit 0
 
 wifi="" ssid=""
-if command -v nmcli >/dev/null; then
+# A computer with no Wi-Fi card reports "": its radio switch reads "enabled" all the same.
+if command -v nmcli >/dev/null && grep -qx wifi <<< "$(nmcli -t -f TYPE device 2>/dev/null || true)"; then
   wifi=$([[ "$(nmcli radio wifi 2>/dev/null || true)" == enabled ]] && echo on || echo off)
   ssid=$( (nmcli -t -f ACTIVE,SSID device wifi list --rescan no 2>/dev/null || true) | sed -n 's/^yes://p' | head -n 1)
 fi

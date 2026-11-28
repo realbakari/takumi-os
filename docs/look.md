@@ -121,7 +121,32 @@ which changes them, is not in Arch's repositories.
 
 **Glass.** A theme that says `glass = true` in its `[meta]` makes foot and
 GTK windows slightly see-through (0.92), so the sky shows behind them; every
-other theme stays solid. niri draws the focus ring as a ring around each
+other theme stays solid.
+
+**The icons inside apps.** Home, back, search, trash, the star and about
+a hundred others are Takumi's, under the names every GTK app asks for
+(`default/app-icons/`, linked into the Takumi icon theme as
+`symbolic/actions`). They are Hugeicons' free Stroke Rounded shapes (MIT, the
+licence beside them), the same strokes as the shell's. An icon Takumi does not
+have falls back to the stock one.
+
+**Every app's parts.** The rendered `gtk.css` also skins the parts all apps
+are built from, so Text Editor, Image Viewer, Document Viewer, Disk Usage
+Analyzer, Celluloid and anything you add take the Core's shapes without a
+skin of their own: tabs are capsules and the one you are on takes the accent's
+tint; header buttons that say something, and the ones that confirm or destroy,
+are capsules; the find bar holds a capsule to type in; a slider is a capsule
+that fills with the accent; menu rows are pills; controls floating over a
+picture or a film are one glass capsule; toasts and tooltips are capsules;
+cards and lists of settings have a 14 px corner and a hairline. Image Viewer
+paints the space around a picture itself, so that stays its own grey.
+
+**Files.** The rendered `gtk.css` ends with a skin for Files (Nautilus), in the
+Core's shapes and under Files' own class names: the path is a capsule, a file
+in the grid is a tile with a 14 px corner, a row in the list is a pill 40 px
+tall, a chosen one takes the accent's tint and a hairline of it, the column
+names are small quiet labels, and the line that says what is selected floats
+as a capsule. It changes how Files looks, not what it holds or where. niri draws the focus ring as a ring around each
 window rather than a plate behind it, so the sky, not the ring's colour, is
 what shows through. Themes made from a picture ask for it; set it to
 `false` in the theme's `theme.toml` to keep yours solid.
@@ -165,8 +190,9 @@ for `qt6ct`), **Ghostty** (`ghostty.conf`), **Kitty** (`kitty.conf`),
 is present), **Helix** (`helix.toml`, linked when Helix is present), **VS Code**
 (`vscode-theme.json`), **fcitx5** (`fcitx5-theme.conf`, linked when fcitx5 is
 present), **Lazygit** (`lazygit.yml`) and **Tmux** (`tmux.conf`).
-`takumi theme apply` reloads running foot, Kitty and Ghostty instances
-automatically.
+`takumi theme apply` recolours open foot terminals in place (foot reads its
+config only when it starts, so the colours are sent to each terminal as the
+escape sequences it answers to) and reloads running Kitty and Ghostty.
 
 ## About this computer
 

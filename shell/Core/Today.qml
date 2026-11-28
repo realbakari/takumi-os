@@ -45,7 +45,9 @@ FocusScope {
         const y = month.getFullYear(), m = month.getMonth();
         const lead = (new Date(y, m, 1).getDay() - firstDay + 7) % 7;
         const out = [];
-        for (let i = 0; i < 42; i++) {
+        // Whole weeks, as many as the month touches: no last row of next month's days alone.
+        const cells = Math.ceil((lead + new Date(y, m + 1, 0).getDate()) / 7) * 7;
+        for (let i = 0; i < cells; i++) {
             const d = new Date(y, m, 1 - lead + i);
             const key = dateKey(d);
             out.push({ n: d.getDate(), key: key, label: Qt.formatDate(d, "ddd d MMM"), inMonth: d.getMonth() === m,
@@ -83,6 +85,22 @@ FocusScope {
         printErrors: false
         onFileChanged: reload()
         onLoaded: { const m = text().match(/^format\s*=\s*"(12h|24h)"/m); today.fileFormat = m ? m[1] : ""; }
+    }
+    // When each phase starts, in minutes after midnight: [schedule] in phase.toml, as takumi phase current reads it.
+    property var phaseStarts: [330, 480, 1050, 1230]
+    FileView {
+        path: Quickshell.env("HOME") + "/.config/takumi/phase.toml"
+        watchChanges: true
+        printErrors: false
+        onFileChanged: reload()
+        onLoaded: {
+            const t = text(), next = today.phaseStarts.slice();
+            ["dawn", "day", "dusk", "night"].forEach((name, i) => {
+                const m = t.match(new RegExp("^" + name + "\\s*=\\s*\"(\\d{1,2}):(\\d{2})\"", "m"));
+                if (m) next[i] = Number(m[1]) * 60 + Number(m[2]);
+            });
+            today.phaseStarts = next;
+        }
     }
     readonly property bool twelve: fileFormat !== "" ? fileFormat === "12h"
         : info.format ? info.format === "12h" : Qt.locale().timeFormat(Locale.ShortFormat).toLowerCase().includes("ap")
@@ -193,65 +211,106 @@ FocusScope {
             Label { anchors { right: parent.right; baseline: date.baseline } text: "Week " + today.week(today.now); font.pixelSize: Style.caption; dim: Style.textFaint }
         }
 
-        // Phase Solar Arc: live visual position across Night -> Dawn -> Day -> Dusk; click opens Theme Studio.
+        // The day's arc: the sun's path over the horizon from dawn to nightfall and under it through the
+        // night, the part already travelled in the accent, and an orb where the clock is now (a disc by
+        // day, a ring by night). The hours are the phases' own (phase.toml): the arc leaves the horizon
+        // when dawn starts and meets it again when night does, with a mark where day and dusk begin.
+        // A press opens the themes.
         Pressable {
             id: solarArc
             width: parent.width; height: Style.solarHeight; radius: Style.rowRadius; raised: true
-            accessibleName: "Phase " + Theme.phase + ". Open theme studio"
+            accessibleName: "Phase " + Theme.phase + ". Open the themes"
             color: pressed ? Theme.tint(Style.fillPressed) : hovered ? Theme.tint(Style.fillTile + Style.fillHover) : Theme.tint(Style.fillTile)
             onClicked: today.core.search("theme")
-            // Dawn (06:00) -> 0.0, Day (12:00) -> 0.33, Dusk (18:00) -> 0.67, Night (00:00) -> 1.0
-            readonly property real dayFrac: ((today.now.getHours() * 60 + today.now.getMinutes() - 360 + 1440) % 1440) / 1440
+            readonly property int minute: today.now.getHours() * 60 + today.now.getMinutes()
+            readonly property int up: today.phaseStarts[0]        // dawn starts: the sun leaves the horizon
+            readonly property int down: today.phaseStarts[3]      // night starts: it meets it again
+            readonly property bool above: minute >= up && minute < down
+            // Where a minute of the day is on the arc, in the arc's own coordinates.
+            function at(m, w, h) {
+                const horizon = h * 0.6, rise = horizon - Style.space(5), sink = h - horizon - Style.space(5);
+                const day = Math.max(1, down - up), night = 1440 - day;
+                const y = m >= up && m < down ? horizon - rise * Math.sin(Math.PI * (m - up) / day)
+                                              : horizon + sink * Math.sin(Math.PI * (((m - down) + 1440) % 1440) / night);
+                return Qt.point(w * m / 1440, y);
+            }
+            function clockWords(m) { return Style.formatTime(new Date(2000, 0, 1, Math.floor(m / 60), m % 60)); }
             Item {
                 id: solarHead
                 anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: Style.space(12); rightMargin: Style.space(12); topMargin: Style.space(9) }
                 height: Style.space(16)
-                Label { anchors { left: parent.left; verticalCenter: parent.verticalCenter } micro: true; text: "Solar phase" }
+                Label { anchors { left: parent.left; verticalCenter: parent.verticalCenter } micro: true; text: "Today's light" }
                 Label {
                     anchors { right: parent.right; verticalCenter: parent.verticalCenter }
                     font.pixelSize: Style.caption; color: Theme.accent
                     text: Theme.phase.charAt(0).toUpperCase() + Theme.phase.slice(1) + " · " + Theme.name
                 }
             }
-            // Dedicated 14 px track rail cleanly separated from the phase labels below.
-            Item {
-                id: track
-                anchors { left: parent.left; right: parent.right; top: solarHead.bottom; leftMargin: Style.space(12); rightMargin: Style.space(12); topMargin: Style.space(8) }
-                height: Style.space(14)
-                Rectangle {
-                    anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter }
-                    height: 2; radius: 1
-                    gradient: Gradient {
-                        orientation: Gradient.Horizontal
-                        GradientStop { position: 0.0; color: Theme.accentTint(0.55) }
-                        GradientStop { position: 0.35; color: Theme.accent }
-                        GradientStop { position: 0.70; color: Theme.accentTint(0.55) }
-                        GradientStop { position: 1.0; color: Theme.tint(0.14) }
+            Canvas {
+                id: arc
+                anchors { left: parent.left; right: parent.right; top: solarHead.bottom; leftMargin: Style.space(12); rightMargin: Style.space(12); topMargin: Style.space(6) }
+                height: Style.solarPath
+                readonly property var redraw: [solarArc.minute, solarArc.up, solarArc.down, today.phaseStarts, Theme.revision, width, today.active]
+                onRedrawChanged: requestPaint()
+                onPaint: {
+                    const ctx = getContext("2d"), w = width, h = height;
+                    const ink = (c, a) => "rgba(" + Math.round(c.r * 255) + "," + Math.round(c.g * 255) + "," + Math.round(c.b * 255) + "," + a + ")";
+                    ctx.clearRect(0, 0, w, h);
+                    ctx.lineCap = "round"; ctx.lineJoin = "round";
+                    // The horizon.
+                    ctx.strokeStyle = ink(Theme.foreground, 0.16); ctx.lineWidth = 1;
+                    ctx.beginPath(); ctx.moveTo(0, Math.round(h * 0.6) + 0.5); ctx.lineTo(w, Math.round(h * 0.6) + 0.5); ctx.stroke();
+                    // The whole path, quietly; then the part of today already travelled.
+                    const trace = (from, to, style, width) => {
+                        ctx.strokeStyle = style; ctx.lineWidth = width; ctx.beginPath();
+                        for (let m = from; m <= to; m += 6) { const p = solarArc.at(Math.min(m, 1439), w, h); if (m === from) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); }
+                        const end = solarArc.at(Math.min(to, 1439), w, h); ctx.lineTo(end.x, end.y); ctx.stroke();
+                    };
+                    trace(0, 1439, ink(Theme.foreground, 0.2), 1.5);
+                    trace(0, solarArc.minute, ink(Theme.accent, 0.95), 2);
+                    // Where day and dusk begin, on the path itself.
+                    for (const m of [today.phaseStarts[1], today.phaseStarts[2]]) {
+                        const p = solarArc.at(m, w, h);
+                        ctx.fillStyle = m <= solarArc.minute ? ink(Theme.accent, 1) : ink(Theme.foreground, 0.45);
+                        ctx.beginPath(); ctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2); ctx.fill();
                     }
                 }
-                // Luminous phase orb positioned accurately along the Dawn -> Day -> Dusk -> Night cycle.
-                Rectangle {
-                    width: Style.space(10); height: width; radius: width / 2
-                    color: Theme.accent
-                    x: Math.max(0, Math.min(parent.width - width, parent.width * solarArc.dayFrac - width / 2))
-                    anchors.verticalCenter: parent.verticalCenter
+                // Now: a disc while the sun is up, a ring through the night, in a soft halo.
+                Item {
+                    readonly property point here: solarArc.at(solarArc.minute, arc.width, arc.height)
+                    x: here.x; y: here.y
+                    Behavior on x { NumberAnimation { duration: Style.slide; easing.type: Easing.BezierSpline; easing.bezierCurve: Style.easeMove } }
+                    Behavior on y { NumberAnimation { duration: Style.slide; easing.type: Easing.BezierSpline; easing.bezierCurve: Style.easeMove } }
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: Style.solarOrb * 2.4; height: width; radius: width / 2
+                        color: Theme.accentTint(0.16)
+                        SequentialAnimation on scale {
+                            running: today.active && Style.continuousMotion; loops: Animation.Infinite
+                            NumberAnimation { to: 1.25; duration: Style.breathe * 2; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 1; duration: Style.breathe * 2; easing.type: Easing.InOutSine }
+                        }
+                    }
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: Style.solarOrb; height: width; radius: width / 2
+                        color: solarArc.above ? Theme.accent : Theme.surface
+                        border.width: solarArc.above ? 0 : 2; border.color: Theme.accent
+                    }
                 }
             }
+            // Under the horizon's two crossings: when the light comes and when it goes.
             Item {
-                anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: Style.space(12); rightMargin: Style.space(12); bottomMargin: Style.space(8) }
+                anchors { left: arc.left; right: arc.right; bottom: parent.bottom; bottomMargin: Style.space(8) }
                 height: Style.space(14)
                 Repeater {
-                    model: [
-                        { label: "Dawn",  pos: 0.0 },
-                        { label: "Day",   pos: 0.333 },
-                        { label: "Dusk",  pos: 0.667 },
-                        { label: "Night", pos: 1.0 }
-                    ]
+                    model: [{ word: "Dawn", m: solarArc.up, lit: Theme.phase === "dawn" }, { word: "Night", m: solarArc.down, lit: Theme.phase === "night" }]
                     delegate: Label {
                         required property var modelData
-                        x: modelData.pos === 0 ? 0 : modelData.pos === 1 ? parent.width - implicitWidth : Math.round(parent.width * modelData.pos - implicitWidth / 2)
+                        x: Math.max(0, Math.min(parent.width - implicitWidth, Math.round(parent.width * modelData.m / 1440 - implicitWidth / 2)))
                         anchors.verticalCenter: parent.verticalCenter
-                        text: modelData.label; font.pixelSize: Style.micro; dim: Style.textFaint
+                        text: modelData.word + " " + solarArc.clockWords(modelData.m); font.pixelSize: Style.micro
+                        dim: modelData.lit ? 0.92 : Style.textMicro; elide: Text.ElideNone
                     }
                 }
             }

@@ -71,19 +71,13 @@ Rectangle {
         color: Theme.background
         scale: area.onIcon && area.pressed ? Style.press : 1
     }
-    Row {
-        anchors { right: parent.right; rightMargin: Style.space(14); verticalCenter: parent.verticalCenter }
-        spacing: Style.space(8)
-        // Over the fill once it reaches this far, so it takes the fill's ink.
-        readonly property color ink: fill.width > level.width - width - Style.space(20) ? Theme.background : Theme.withAlpha(Theme.foreground, Style.textDim)
-        Label { text: level.detail; visible: text !== ""; font.pixelSize: Style.caption; color: parent.ink; width: Math.min(implicitWidth, level.width * 0.4) }
-        Label {
-            id: number
-            text: level.shown + "%"; font.pixelSize: Style.caption; color: parent.ink
-            horizontalAlignment: Text.AlignRight
-            TextMetrics { id: widest; font: number.font; text: "100%" }
-            width: widest.width
-        }
+    // The output's name and the number, written twice (LevelReading.qml): in the panel's ink, and in the
+    // fill's ink clipped to the fill, so each letter takes the colour of what is under it wherever the
+    // level stands.
+    LevelReading { ink: Theme.withAlpha(Theme.foreground, Style.textDim); detail: level.detail; shown: level.shown; span: level.width }
+    Item {
+        width: fill.width; height: parent.height; clip: true
+        LevelReading { ink: Theme.background; detail: level.detail; shown: level.shown; span: level.width }
     }
 
     MouseArea {

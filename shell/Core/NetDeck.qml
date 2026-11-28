@@ -99,16 +99,22 @@ FocusScope {
                 delegate: Pressable {
                     id: wRow
                     required property var modelData
-                    readonly property bool isOn: String(modelData.subtitle ?? "").startsWith("Connected")
+                    readonly property bool none: modelData.id === "wifi:none"   // no Wi-Fi card: a line of words, not a network
+                    readonly property bool isOn: !none && String(modelData.subtitle ?? "").startsWith("Connected")
                     width: parent.width; height: Style.rowHeight
                     radius: Style.rowRadius; raised: isOn
                     accessibleName: (modelData.title ?? "") + ". " + (modelData.subtitle ?? "")
                     color: isOn ? Theme.accentTint(Style.fillTileOn) : pressed ? Theme.tint(Style.fillPressed) : hovered ? Theme.tint(Style.fillTile + Style.fillHover) : Theme.tint(Style.fillTile)
-                    onClicked: net.core.search(wRow.isOn ? "share wifi" : (wRow.modelData.title ?? "wifi"))
-                    SignalIcon {
+                    onClicked: if (!wRow.none) net.core.search(wRow.isOn ? "share wifi" : (wRow.modelData.title ?? "wifi"))
+                    Item {
                         id: sig; x: Style.space(12); anchors.verticalCenter: parent.verticalCenter
-                        bars: wRow.modelData.bars ?? 3; size: Style.iconSmall
-                        color: wRow.isOn ? Theme.accent : Theme.withAlpha(Theme.foreground, 0.78)
+                        width: Style.iconSmall; height: Style.iconSmall
+                        SignalIcon {
+                            visible: !wRow.none
+                            bars: wRow.modelData.bars ?? 3; size: Style.iconSmall
+                            color: wRow.isOn ? Theme.accent : Theme.withAlpha(Theme.foreground, 0.78)
+                        }
+                        Icon { visible: wRow.none; name: "wired"; size: Style.iconSmall; color: Theme.withAlpha(Theme.foreground, 0.78) }
                     }
                     Column {
                         anchors { left: sig.right; leftMargin: Style.space(10); right: parent.right; rightMargin: Style.space(12); verticalCenter: parent.verticalCenter }

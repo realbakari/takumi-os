@@ -1,7 +1,8 @@
 // The face the Lock and the login screen share: the emblem, the time, the date, one field, whose computer
-// it is. Typing goes straight to the field; Enter submits; a failure shakes the field and outlines it red;
+// it is. Typing goes straight to the field; Enter or the field's arrow submits; a failure shakes the field and outlines it red;
 // Caps Lock says so under it. On the Lock, the bottom of the screen holds what is playing, the keyboard
-// layout (a press goes to the next, so the password is typed in the right one) and the battery.
+// layout (a press goes to the next, so the password is typed in the right one) and the battery. On the login
+// screen, the bottom left holds Restart and Shut down.
 import QtQuick
 import QtQuick.Effects
 import QtQuick.Shapes
@@ -31,6 +32,10 @@ Item {
     property real reveal: 1
     readonly property alias emblem: mark
     signal submitted(string secret)
+    function submit() { if (!busy && typed.length) { const s = typed; typed = ""; submitted(s); } }
+    // The login screen offers to restart or shut down: nobody is logged in, so nothing is open to lose.
+    property bool canStop: false
+    signal stopRequested(string how)       // "restart" or "off"
 
     SystemClock { id: clock; precision: SystemClock.Minutes }
 
@@ -57,28 +62,21 @@ Item {
     property real frame: 0
     NumberAnimation on frame { from: 0; to: 1; duration: Style.duration(900); easing.type: Easing.BezierSpline; easing.bezierCurve: Style.easeEnter }
 
-    // 匠, as tall as most of the screen, drawn as its outline only, faintly, behind everything.
-    Shape {
+    // 匠, as tall as most of the screen, as a faint shade behind everything. One glyph of text, not a path:
+    // its strokes overlap, and a path draws their outlines crossing (stray boxes) or leaves holes where they meet.
+    Text {
         id: ghost
         readonly property real size: Math.min(face.height * 0.86, face.width * 0.62)
         anchors.centerIn: parent
-        width: size; height: size
-        opacity: face.frame * face.reveal
+        anchors.verticalCenterOffset: -size * 0.09   // the glyph sits low in its line: centre the ink, not the line
+        text: "匠"
+        font.family: Style.cjkFamily
+        font.pixelSize: size
+        font.weight: Font.Black
+        color: Theme.foreground
+        opacity: Style.lockGhost * face.frame * face.reveal
         scale: 0.96 + 0.04 * face.frame
-        preferredRendererType: Shape.CurveRenderer
-        ShapePath {
-            strokeColor: Theme.tint(Style.lockGhost)
-            strokeWidth: Style.hairline * 1.2
-            fillColor: "transparent"
-            joinStyle: ShapePath.RoundJoin
-            PathText {
-                x: 0; y: ghost.size * 0.03
-                text: "匠"
-                font.family: Style.cjkFamily
-                font.pixelSize: ghost.size
-                font.weight: Font.Black
-            }
-        }
+        renderType: Text.QtRendering
     }
 
     // A thin mark at each corner of the screen, like the corners of a viewfinder.
@@ -160,15 +158,18 @@ Item {
                     elide: Text.ElideNone
                 }
             }
-            Item { width: 1; height: Style.space(14) }
-            Label { anchors.horizontalCenter: parent.horizontalCenter; micro: true; text: Qt.formatDateTime(clock.date, "dddd d MMMM") }
-            Item { width: 1; height: Style.space(30) }
+            Item { width: 1; height: Style.space(10) }
+            // The date belongs to the clock: close under it, large enough to read from across a room.
+            Label { anchors.horizontalCenter: parent.horizontalCenter; text: Qt.formatDateTime(clock.date, "dddd d MMMM"); font.pixelSize: Style.title; dim: Style.textDim; elide: Text.ElideNone }
+            // A wider gap: the time and date above, whose computer it is and its field below.
+            Item { width: 1; height: Style.space(44) }
             // Circular profile picture (or sculpted monogram when no photo is set yet).
             Item {
                 id: avatarWrap
                 anchors.horizontalCenter: parent.horizontalCenter
                 width: Style.lockAvatar; height: Style.lockAvatar
-                Elevation { anchors.fill: parent; radius: width / 2; level: 16 }
+                // Drawn live only: the shadow kept for computers without 3D is a rounded square (Elevation.qml).
+                Elevation { visible: Style.glow; anchors.fill: parent; radius: width / 2; level: 16 }
                 Rectangle {
                     anchors.fill: parent; radius: width / 2
                     color: Theme.withAlpha(Theme.surface, Style.lockGlass)
@@ -241,7 +242,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     x: Style.space(20)
                     spacing: Style.space(10)
-                    Repeater { model: Math.min(face.typed.length, 16)
+                    Repeater { model: Math.min(face.typed.length, Style.lockDots)
                         delegate: Rectangle {
                             width: Style.space(7); height: width; radius: width / 2; color: Theme.foreground; opacity: 0.9
                             scale: 0.3
@@ -255,6 +256,22 @@ Item {
                     x: Style.space(20)
                     text: face.busy ? "Checking…" : face.failed ? (face.failText || "Try again") : face.hint
                     dim: Style.textFaint; font.pixelSize: Style.space(12)
+                }
+                // For a hand on the pointer or a finger on the screen: the same as Enter.
+                Rectangle {
+                    id: go
+                    visible: opacity > 0
+                    opacity: face.typed.length > 0 && !face.busy ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: Style.fade } }
+                    anchors { right: parent.right; rightMargin: Style.space(5); verticalCenter: parent.verticalCenter }
+                    width: parent.height - Style.space(10); height: width; radius: width / 2
+                    color: goArea.pressed ? Theme.accentTint(0.9) : Theme.accent
+                    scale: goArea.pressed ? Style.press : 1
+                    Accessible.role: Accessible.Button
+                    Accessible.name: "Unlock"
+                    Accessible.onPressAction: face.submit()
+                    Icon { anchors.centerIn: parent; name: "chevron"; size: Style.iconSmall; color: Theme.background }
+                    MouseArea { id: goArea; anchors.fill: parent; anchors.margins: -Style.space(5); cursorShape: Qt.PointingHandCursor; onClicked: face.submit() }
                 }
             }
             }
@@ -302,9 +319,7 @@ Item {
         focus: true
         Component.onCompleted: forceActiveFocus()
         Keys.onPressed: event => {
-            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                if (!face.busy && face.typed.length) { const s = face.typed; face.typed = ""; face.submitted(s); }
-            }
+            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) face.submit();
             else if (event.key === Qt.Key_Backspace) face.typed = face.typed.slice(0, -1);
             else if (event.key === Qt.Key_Escape) face.typed = "";
             else if (event.text && !face.busy) {
@@ -337,6 +352,32 @@ Item {
                 Icon { anchors.centerIn: parent; name: face.player?.isPlaying ? "pause" : "play"; size: Style.iconSmall; color: Theme.foreground }
                 MouseArea { anchors.fill: parent; anchors.margins: -Style.space(6); cursorShape: Qt.PointingHandCursor
                     onClicked: if (face.player?.canTogglePlaying) face.player.togglePlaying() }
+            }
+        }
+    }
+
+    // Bottom left, on the login screen: restart and shut down, said in words.
+    Row {
+        visible: face.canStop
+        opacity: face.reveal * face.frame
+        anchors { left: parent.left; bottom: parent.bottom; leftMargin: Style.space(40); bottomMargin: Style.space(30) }
+        spacing: Style.space(8)
+        Repeater {
+            model: [{ how: "restart", icon: "restart", label: "Restart" }, { how: "off", icon: "power", label: "Shut down" }]
+            delegate: Pressable {
+                id: stop
+                required property var modelData
+                width: stopRow.implicitWidth + Style.space(26); height: Style.space(34); radius: height / 2
+                accessibleName: modelData.label; raised: true
+                color: pressed ? Theme.withAlpha(Theme.surface, 0.9) : Theme.withAlpha(Theme.surface, hovered ? 0.75 : Style.lockGlass)
+                onClicked: face.stopRequested(modelData.how)
+                Row {
+                    id: stopRow
+                    anchors.centerIn: parent
+                    spacing: Style.space(7)
+                    Icon { anchors.verticalCenter: parent.verticalCenter; name: stop.modelData.icon; size: Style.iconSmall; color: Theme.withAlpha(Theme.foreground, 0.85) }
+                    Label { anchors.verticalCenter: parent.verticalCenter; text: stop.modelData.label; font.pixelSize: Style.caption; dim: 0.85; elide: Text.ElideNone }
+                }
             }
         }
     }

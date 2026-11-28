@@ -4,6 +4,7 @@
 import QtQuick
 import Quickshell
 import "../Look"
+import "../Look/Icons.js" as Icons
 import "../Parts"
 
 GridView {
@@ -61,9 +62,30 @@ GridView {
             width: Style.appIcon; height: width
             scale: tile.pressed ? 0.94 : tile.current || tile.hovered ? 1.06 : 1
             Behavior on scale { NumberAnimation { duration: Style.glide; easing.type: Easing.OutCubic } }
+            // Takumi's own apps come with their squircle drawn in (lib/theme.sh). Everyone else's app keeps
+            // its maker's icon, untouched, set on the same squircle: same plate, same rim, same size.
+            readonly property bool plated: tile.iconPath !== "" && !Icons.isOwnApp(String(tile.modelData.icon ?? ""))
+            Rectangle {
+                visible: face.plated && picture.status === Image.Ready
+                anchors.fill: parent; anchors.margins: parent.width * Style.platePad
+                radius: parent.width * Style.plateRadius
+                gradient: Gradient {
+                    GradientStop { position: 0; color: Theme.surface }
+                    GradientStop { position: 1; color: Theme.background }
+                }
+                border.width: Style.hairline; border.color: Theme.tint(0.16)
+                Rectangle {
+                    anchors.fill: parent; radius: parent.radius
+                    gradient: Gradient {
+                        GradientStop { position: 0; color: Theme.accentTint(0.14) }
+                        GradientStop { position: 0.6; color: Theme.accentTint(0) }
+                    }
+                }
+            }
             Image {
                 id: picture
                 anchors.fill: parent
+                anchors.margins: face.plated ? parent.width * Style.plateInset : 0
                 visible: tile.iconPath !== "" && status === Image.Ready
                 source: tile.iconPath
                 fillMode: Image.PreserveAspectFit

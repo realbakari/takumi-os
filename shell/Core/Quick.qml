@@ -1,9 +1,10 @@
-// Quick settings: the Core grown into the switches people reach for most (Wi-Fi, Bluetooth, do not
-// disturb, the night light, staying awake, the power mode), two levels (the sound, and the screen's
-// brightness where it has a backlight) and, while a song plays, what is playing (NowPlaying). A press switches a tile; its arrow opens the Palette on that topic
-// for the rest (networks, devices, schedules). The power button turns the tiles into the four ways to stop.
-// Typing anything opens the Palette with what you typed. State comes from `takumi switch state`; a press
-// shows its result at once and the next read confirms it. See docs/shell.md.
+// Quick settings: the Core grown into the switches people reach for most, as two rows of discs (the
+// network, Bluetooth, do not disturb, the night light, staying awake, the microphone, the power mode, the
+// look), two levels (the sound, and the screen's brightness where it has a backlight) and, while a song
+// plays, what is playing (NowPlaying). A press on a disc switches it; a press on its words opens the
+// Palette on that topic for the rest (networks, devices, schedules). The power button turns the switches
+// into the four ways to stop. Typing anything opens the Palette with what you typed. State comes from
+// `takumi switch state`; a press shows its result at once and the next read confirms it. See docs/shell.md.
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -31,7 +32,7 @@ FocusScope {
             read(); Qt.callLater(() => quick.forceActiveFocus());
             for (let i = 0; i < tiles.children.length; i++) {
                 const t = tiles.children[i];
-                if (t.arrive) { t.order = Math.floor(i / 2) + i % 2; t.arrive(); }
+                if (t.arrive) { t.order = Math.floor(i / Style.switchColumns) + i % Style.switchColumns; t.arrive(); }
             }
         }
     }
@@ -151,19 +152,21 @@ FocusScope {
         Grid {
             id: tiles
             visible: !quick.stopping
-            columns: 2
-            spacing: Style.tileGap
-            readonly property real cell: (width - spacing) / 2
+            columns: Style.switchColumns
+            columnSpacing: Style.space(4); rowSpacing: Style.space(12)
+            readonly property real cell: (width - columnSpacing * (columns - 1)) / columns
             width: parent.width
 
             Tile {
                 width: parent.cell
-                icon: quick.st.wifi === "off" ? "wifiOff" : "wifi"; label: "Wi-Fi"
-                available: quick.st.wifi !== ""
-                on: quick.st.wifi === "on"
-                detail: quick.st.wifi === undefined ? "" : !available ? "Not available" : quick.st.wifi === "off" ? "Off" : (quick.st.ssid || "Not connected")
+                // A computer with no Wi-Fi card on a cable: the tile is the network, and a press opens Connections.
+                readonly property bool cabled: quick.st.wifi === "" && quick.poll.link === "wired"
+                icon: cabled ? "wired" : quick.st.wifi === "off" ? "wifiOff" : "wifi"; label: cabled ? "Network" : "Wi-Fi"
+                available: quick.st.wifi !== "" || cabled
+                on: cabled || quick.st.wifi === "on"
+                detail: cabled ? "Wired" : quick.st.wifi === undefined ? "" : !available ? "Not available" : quick.st.wifi === "off" ? "Off" : (quick.st.ssid || "Not connected")
                 more: true
-                onToggled: quick.change({ wifi: on ? "off" : "on", ssid: on ? "" : quick.st.ssid }, ["takumi", "switch", "wifi"])
+                onToggled: cabled ? quick.core.network() : quick.change({ wifi: on ? "off" : "on", ssid: on ? "" : quick.st.ssid }, ["takumi", "switch", "wifi"])
                 onMoreRequested: quick.core.network()
             }
             Tile {
@@ -182,14 +185,14 @@ FocusScope {
                 icon: quick.st.dnd ? "bellOff" : "bell"; label: "Do not disturb"
                 on: quick.st.dnd === true
                 detail: quick.st.dnd === undefined ? "" : !on ? "Off"
-                      : (quick.core.noticesHeld ?? 0) > 0 ? "Only urgent messages · " + quick.core.noticesHeld + " held" : "Only urgent messages"
+                      : (quick.core.noticesHeld ?? 0) > 0 ? quick.core.noticesHeld + " held" : "Urgent only"
                 onToggled: quick.change({ dnd: !on }, ["takumi", "switch", "dnd"])
             }
             Tile {
                 width: parent.cell
                 icon: "moon"; label: "Night light"
                 on: quick.st.night === true
-                detail: quick.st.night === undefined ? "" : !on ? "Off" : quick.st.nightMode === "schedule" ? "From dusk to dawn" : "Warm all day"
+                detail: quick.st.night === undefined ? "" : !on ? "Off" : quick.st.nightMode === "schedule" ? "Dusk to dawn" : "All day"
                 more: true
                 onToggled: quick.change({ night: !on, nightMode: on ? "off" : "on" }, ["takumi", "switch", "nightlight"])
                 onMoreRequested: quick.core.search("night light")
@@ -207,7 +210,7 @@ FocusScope {
                 width: parent.cell
                 icon: quick.poll.micMuted ? "micOff" : "mic"; label: "Microphone"
                 on: !quick.poll.micMuted
-                detail: quick.poll.micMuted ? "Muted · apps hear nothing" : quick.poll.micInUse ? "On · an app is listening" : "On"
+                detail: quick.poll.micMuted ? "Muted" : quick.poll.micInUse ? "In use" : "On"
                 more: true
                 onToggled: { Quickshell.execDetached(["takumi", "audio", "mic", "toggle"]); pollSoon.restart(); }
                 onMoreRequested: quick.core.search("microphone")
@@ -231,19 +234,17 @@ FocusScope {
                 onToggled: quick.core.search("theme")
                 onMoreRequested: quick.core.search("theme")
             }
-        }
-
-        // Projector mirroring sits full-width beneath the 2x4 grid when more than one screen is attached,
-        // so single-screen and multi-screen layouts both stay balanced with no orphan tile.
-        Tile {
-            visible: !quick.stopping && (quick.st.screens ?? 1) > 1
-            width: parent.width
-            icon: "display"; label: "Mirror"
-            on: quick.st.mirror === "on"
-            detail: on ? "The projector shows this screen" : "Each screen its own"
-            more: true
-            onToggled: quick.change({ mirror: on ? "off" : "on" }, ["takumi", "display", "mirror", "toggle"])
-            onMoreRequested: quick.core.display()
+            // Mirroring to a projector, when more than one screen is attached.
+            Tile {
+                visible: (quick.st.screens ?? 1) > 1
+                width: parent.cell
+                icon: "display"; label: "Mirror"
+                on: quick.st.mirror === "on"
+                detail: on ? "This screen" : "Off"
+                more: true
+                onToggled: quick.change({ mirror: on ? "off" : "on" }, ["takumi", "display", "mirror", "toggle"])
+                onMoreRequested: quick.core.display()
+            }
         }
 
         Column {
@@ -356,8 +357,12 @@ FocusScope {
                     id: cap
                     required property var modelData
                     readonly property bool stop: modelData.label === "Stop"
-                    width: (parent.width - Style.tileGap * 3) / 4; height: Style.space(54)
-                    radius: Style.tileRadius
+                    // A capsule, as the levels above it are: the panel is discs and capsules throughout.
+                    // Each as wide as its word asks: "Screenshot" is longer than "Text".
+                    readonly property real share: (modelData.label.length + 6) / shares
+                    readonly property real shares: ["Screenshot", quick.poll.recording ? "Stop" : "Record", "Colour", "Text"].reduce((n, w) => n + w.length + 6, 0)
+                    width: (parent.width - Style.tileGap * 3) * share; height: Style.space(38)
+                    radius: height / 2
                     accessibleName: stop ? "Stop recording" : modelData.label; raised: true
                     activeFocusOnTab: true
                     color: pressed ? Theme.tint(Style.fillPressed) : hovered ? Theme.tint(Style.fillTile + Style.fillHover) : Theme.tint(Style.fillTile)
@@ -367,11 +372,11 @@ FocusScope {
                         anchors.fill: parent; anchors.margins: -Style.space(3); radius: parent.radius + Style.space(3)
                         color: "transparent"; border.width: 2; border.color: Theme.accentTint(0.7); visible: cap.activeFocus
                     }
-                    Column {
+                    Row {
                         anchors.centerIn: parent
-                        spacing: Style.space(4)
-                        Icon { anchors.horizontalCenter: parent.horizontalCenter; name: cap.modelData.icon; size: Style.icon; color: cap.stop ? Theme.red : Theme.withAlpha(Theme.foreground, 0.85) }
-                        Label { anchors.horizontalCenter: parent.horizontalCenter; text: cap.modelData.label; font.pixelSize: Style.caption; color: cap.stop ? Theme.red : Theme.withAlpha(Theme.foreground, Style.textDim) }
+                        spacing: Style.space(5)
+                        Icon { anchors.verticalCenter: parent.verticalCenter; name: cap.modelData.icon; size: Style.iconSmall; color: cap.stop ? Theme.red : Theme.withAlpha(Theme.foreground, 0.85) }
+                        Label { anchors.verticalCenter: parent.verticalCenter; text: cap.modelData.label; font.pixelSize: Style.caption; elide: Text.ElideNone; color: cap.stop ? Theme.red : Theme.withAlpha(Theme.foreground, Style.textDim) }
                     }
                 }
             }

@@ -113,9 +113,12 @@ keywords, ignoring case and hyphens: "wifi off" finds "Turn Wi-Fi off",
 "turn off wifi" too.
 
 A row's score is the provider's score times its weight, plus a boost: the
-query starts the title or a word of it (0.5), starts one of its keywords
-(0.45), every word of a longer query is in the title (0.4), or the title
-holds the query (0.3). Each time you pick a row it gains 0.05, from
+query starts the title or a word of it (0.5), is one of its keywords (0.5)
+or starts one (0.25 to 0.45, by how much of the keyword it is: "power" is
+half of "powerpoint"), every word of a longer query is in the title (0.4),
+or the title holds the query (0.3). A query that names a row's kind
+("power", "bluetooth", "wifi") adds 0.35 to that kind's rows, so the word
+for a subject finds the subject before an app that mentions it. Each time you pick a row it gains 0.05, from
 `~/.local/state/takumi/palette/history`, unless it is steady. Intent's row
 never takes a boost: its title is the query itself, and it stays the
 fallback, so a sentence never comes back with "no results".

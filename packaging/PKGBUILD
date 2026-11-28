@@ -33,7 +33,7 @@ package_takumi-base() {
 
   install -d "$pkgdir/usr/lib/takumi/commands" "$pkgdir/usr/share/takumi/lib" \
              "$pkgdir/usr/share/takumi/config" "$pkgdir/usr/share/takumi/migrations" \
-             "$pkgdir/usr/share/takumi/packages" "$pkgdir/usr/share/takumi/app-colours" \
+             "$pkgdir/usr/share/takumi/packages" "$pkgdir/usr/share/takumi/app-colours" "$pkgdir/usr/share/takumi/app-icons" \
              "$pkgdir/usr/share/takumi/default/palette" "$pkgdir/usr/lib/systemd/system" \
              "$pkgdir/usr/lib/systemd/user" "$pkgdir/etc/polkit-1/rules.d"
 
@@ -43,6 +43,7 @@ package_takumi-base() {
   cp -a "$_root/migrations/." "$pkgdir/usr/share/takumi/migrations/"
   cp -a "$_root/install/packages/." "$pkgdir/usr/share/takumi/packages/"
   cp -a "$_root/default/app-colours/." "$pkgdir/usr/share/takumi/app-colours/"
+  cp -a "$_root/default/app-icons/." "$pkgdir/usr/share/takumi/app-icons/"
   cp -a "$_root/default/palette/." "$pkgdir/usr/share/takumi/default/palette/"
   cp -a "$_root/default/systemd/system/." "$pkgdir/usr/lib/systemd/system/"
   cp -a "$_root/default/systemd/user/." "$pkgdir/usr/lib/systemd/user/"

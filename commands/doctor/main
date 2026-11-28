@@ -104,7 +104,8 @@ done
 # Unmerged package configuration files (*.pacnew / *.pacsave) left behind by pacman updates.
 etc_dir=${TAKUMI_ETC:-/etc}
 if [[ -d "$etc_dir" ]]; then
-  pac_count=$(find "$etc_dir" -maxdepth 4 \( -name '*.pacnew' -o -name '*.pacsave' \) 2>/dev/null | wc -l | tr -d ' ')
+  # find fails on the folders in /etc only root may read; that must not end the check (pipefail).
+  pac_count=$( (find "$etc_dir" -maxdepth 4 \( -name '*.pacnew' -o -name '*.pacsave' \) 2>/dev/null || true) | wc -l | tr -d ' ')
   if (( pac_count > 0 )); then
     need "$pac_count system settings file(s) updated (*.pacnew): review with pacdiff"
   fi

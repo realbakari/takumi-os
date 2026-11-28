@@ -26,14 +26,7 @@ PanelWindow {
     readonly property string view: open ? core.view : ""
     onApprovingChanged: if (approving) { Qt.callLater(() => approval.focusField()); trace.play(); }
     onViewChanged: if (open || view !== "") trace.play()
-    onOpenChanged: {
-        if (open) { focusPriming = true; focusPrimeTimer.restart(); trace.play(); }
-        else { focusPriming = false; focusPrimeTimer.stop(); }
-    }
-    // Brief Exclusive -> OnDemand focus prime: grabs keyboard cleanly on summon without trapping clicks
-    // across multi-monitor setups; password approvals stay Exclusive for security.
-    property bool focusPriming: false
-    Timer { id: focusPrimeTimer; interval: 120; onTriggered: win.focusPriming = false }
+    onOpenChanged: if (open) trace.play()
     // A theme chosen: the Core's light runs in the new accent as the Sky opens (Sky/SkyCanvas.qml).
     Connections { target: Theme; function onNameChanged() { trace.play(); } }
     // Slide away when the focused column on this output fills the strip (maximized or fullscreen).
@@ -53,7 +46,10 @@ PanelWindow {
     color: "transparent"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.namespace: "takumi-core"
-    WlrLayershell.keyboardFocus: approving || focusPriming ? WlrKeyboardFocus.Exclusive : open ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
+    // The keyboard is the Core's for as long as it is open. niri gives an on-demand layer the keyboard only
+    // after a click on it, so handing over to on-demand a moment after opening left the Palette deaf to
+    // typing. A click anywhere else closes the Core (Scrim.qml), which gives the keyboard back.
+    WlrLayershell.keyboardFocus: approving || open ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
     mask: Region { item: capsule }
     // Frosted glass: niri blurs exactly the capsule's shape behind it. Without a GPU nothing is blurred and
     // the body stays nearly opaque (Style.coreFill).
@@ -83,7 +79,8 @@ PanelWindow {
 
         // Light: an accent glow around the capsule while it is open, asking or saying something, breathing
         // while a command works; under it, the shadow that lifts it off the windows.
-        readonly property bool lit: win.open || win.approving || win.noticing
+        // A conversation still working with the Core closed keeps it lit: something is being done for you.
+        readonly property bool lit: win.open || win.approving || win.noticing || pane.working
         RectangularShadow {
             id: aura
             visible: Style.glow
@@ -95,7 +92,7 @@ PanelWindow {
             opacity: capsule.lit ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: capsule.lit ? Style.enter * 2 : Style.exit } }
             SequentialAnimation on opacity {
-                running: win.open && pane.working && Style.continuousMotion; loops: Animation.Infinite
+                running: pane.working && Style.continuousMotion; loops: Animation.Infinite
                 NumberAnimation { to: 0.45; duration: Style.breathe * 1.4; easing.type: Easing.InOutSine }
                 NumberAnimation { to: 1; duration: Style.breathe * 1.4; easing.type: Easing.InOutSine }
             }
@@ -151,6 +148,7 @@ PanelWindow {
             Rest {
                 id: rest
                 niri: win.niri; poll: win.poll; output: win.output; screenWidth: win.width; core: win.core
+                working: pane.workingLine; workingTitle: pane.workingTitle; workingIcon: pane.workingIcon
                 anchors.bottom: parent.bottom
                 anchors.horizontalCenter: parent.horizontalCenter
                 opacity: !win.open && !win.noticing && !win.approving ? 1 : 0

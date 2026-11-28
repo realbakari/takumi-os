@@ -55,6 +55,11 @@ boundary between floating controls and work content:
 - **Work windows stay solid and legible** (never smeared with stacked glass
   blur), lifted off the Sky with soft elevation shadows (`softness 30`) and a
   directional gradient focus catch instead of a harsh flat neon outline.
+  Every window, focused or not, also carries a one-pixel hairline of the
+  foreground, so it still has an edge on a dark sky where a shadow cannot show.
+  Inside a GTK window there are three depths: the header is a band of the
+  surface, 46 px tall like the Core; the sidebar sits halfway and ends in a
+  hairline; the page is the background, the deepest.
 - **The Core is adaptive optical glass** over niri's background blur (`0.72` at
   rest / `0.84` open on dark themes, automatically rising to `0.80` / `0.90` on
   light themes so light skies never cause contrast whiteout, tunable via

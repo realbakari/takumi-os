@@ -5,6 +5,7 @@ import Quickshell.Wayland
 import "../Look"
 
 PanelWindow {
+    id: sky
     property var niri: null
     property string output: ""
     anchors { top: true; bottom: true; left: true; right: true }
@@ -12,5 +13,5 @@ PanelWindow {
     WlrLayershell.layer: WlrLayer.Background
     WlrLayershell.namespace: "takumi-sky"
     color: Theme.background
-    SkyCanvas { anchors.fill: parent; niri: parent.niri; output: parent.output }
+    SkyCanvas { anchors.fill: parent; niri: sky.niri; output: sky.output }
 }

@@ -28,6 +28,7 @@ sudo install -Dm644 "$TAKUMI_PATH/default/pam/takumi-lock"         /etc/pam.d/ta
 sudo mkdir -p /usr/share/takumi
 sudo rsync -a --delete "$TAKUMI_PATH/themes/"         /usr/share/takumi/themes/
 sudo rsync -a --delete "$TAKUMI_PATH/default/app-colours/" /usr/share/takumi/app-colours/
+sudo rsync -a --delete "$TAKUMI_PATH/default/app-icons/" /usr/share/takumi/app-icons/   # /usr/share/takumi/app-icons: the icons inside apps
 sudo rm -rf /usr/share/takumi/default/themed   # /usr/share/takumi/default/themed: where the templates lived before app-colours
 sudo rsync -a --delete "$TAKUMI_PATH/default/palette/" /usr/share/takumi/default/palette/   # /usr/share/takumi/default/palette/emoji.tsv
 sudo rsync -a --delete "$TAKUMI_PATH/default/coding-agents/" /usr/share/takumi/coding-agents/   # /usr/share/takumi/coding-agents/takumi/SKILL.md
